@@ -1,0 +1,5 @@
+tkcalendar
+qrcode[pil]
+pillow
+reportlab
+mysql-connector-python
