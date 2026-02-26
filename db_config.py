@@ -2,41 +2,41 @@
 """
 Конфигурация подключения к базе данных MariaDB
 
-Настройки хранятся в файле: config/database.json
+Настройки хранятся в файле: config/.env
 """
 
-import json
 import os
+import sys
+from dotenv import load_dotenv
 
-# Путь к файлу конфигурации
-CONFIG_DIR = os.path.join(os.path.dirname(__file__), 'config')
-CONFIG_FILE = os.path.join(CONFIG_DIR, 'database.json')
+
+def get_base_path():
+    """Получить базовый путь приложения (работает и для PyInstaller)"""
+    if getattr(sys, 'frozen', False):
+        # Запущено как exe (PyInstaller)
+        return os.path.dirname(sys.executable)
+    else:
+        # Запущено как скрипт
+        return os.path.dirname(__file__)
+
+
+# Загружаем переменные из config/.env файла
+_base_path = get_base_path()
+_env_path = os.path.join(_base_path, 'config', '.env')
+load_dotenv(_env_path)
 
 
 def load_config():
-    """Загрузить конфигурацию из JSON файла"""
-    try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-
-        return {
-            'host': config.get('host', 'localhost'),
-            'port': int(config.get('port', 3306)),
-            'user': config.get('user', 'root'),
-            'password': config.get('password', ''),
-            'database': config.get('database', 'alexauto'),
-            'charset': 'utf8mb4',
-            'collation': 'utf8mb4_unicode_ci',
-            'autocommit': False,
-        }
-    except FileNotFoundError:
-        print(f"ОШИБКА: Файл конфигурации не найден: {CONFIG_FILE}")
-        print("Создайте файл config/database.json с параметрами подключения.")
-        raise
-    except json.JSONDecodeError as e:
-        print(f"ОШИБКА: Неверный формат JSON в файле {CONFIG_FILE}")
-        print(f"Детали: {e}")
-        raise
+    """Загрузить конфигурацию из переменных окружения"""
+    return {
+        'host': os.getenv('DB_HOST', 'localhost'),
+        'port': int(os.getenv('DB_PORT', 3306)),
+        'user': os.getenv('DB_USER', 'root'),
+        'password': os.getenv('DB_PASSWORD', ''),
+        'database': os.getenv('DB_NAME', 'alexauto'),
+        'charset': 'utf8mb4',
+        'autocommit': False,
+    }
 
 
 # Загружаем конфигурацию при импорте модуля

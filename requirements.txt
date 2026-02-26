@@ -2,4 +2,7 @@ tkcalendar
 qrcode[pil]
 pillow
 reportlab
-mysql-connector-python
+pymysql
+apscheduler
+python-dotenv
+pystray
