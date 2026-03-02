@@ -5,9 +5,6 @@
 """
 
 import sys
-import pymysql
-import pymysql.cursors
-from pymysql import Error as MySQLError
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from datetime import datetime, date
@@ -26,8 +23,8 @@ import requests
 import customtkinter as ctk
 from dotenv import load_dotenv
 
-# Импорт конфигурации базы данных
-from db_config import DB_CONFIG
+# Импорт класса для работы с базой данных
+from database import Database
 
 
 def get_base_path():
@@ -285,1653 +282,6 @@ class LabelTooltip:
             self.tooltip = None
 
 
-class Database:
-    """Класс для работы с базой данных MariaDB"""
-
-    def __init__(self):
-        self.config = DB_CONFIG.copy()
-        self.db_name = self.config.pop('database')
-        self._ensure_database_exists()
-        self.config['database'] = self.db_name
-        self.create_tables()
-
-    def _ensure_database_exists(self):
-        """Создать базу данных, если она не существует"""
-        try:
-            conn = pymysql.connect(**self.config)
-            cursor = conn.cursor()
-            cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{self.db_name}` "
-                          f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-            conn.commit()
-            cursor.close()
-            conn.close()
-        except MySQLError as e:
-            messagebox.showerror("Ошибка подключения к БД",
-                f"Не удалось подключиться к серверу MariaDB.\n\n"
-                f"Проверьте:\n"
-                f"1. Запущен ли сервер MariaDB\n"
-                f"2. Правильность настроек в db_config.py\n\n"
-                f"Ошибка: {e}")
-            raise
-
-    def get_connection(self):
-        """Получить соединение с базой данных"""
-        return pymysql.connect(**self.config)
-
-    def create_tables(self):
-        """Создание таблиц в базе данных"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        # Таблица работников
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS workers (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                full_name VARCHAR(255) NOT NULL UNIQUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB
-        ''')
-
-        # Таблица марок машин
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS car_brands (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                brand_name VARCHAR(255) NOT NULL UNIQUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB
-        ''')
-
-        # Таблица моделей машин
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS car_models (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                brand_id INT NOT NULL,
-                model_name VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (brand_id) REFERENCES car_brands(id) ON DELETE CASCADE,
-                UNIQUE KEY unique_brand_model (brand_id, model_name)
-            ) ENGINE=InnoDB
-        ''')
-
-        # Таблица работ (данные клиента и машины через car_id -> client_cars -> clients)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS works (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                worker_id INT NOT NULL,
-                car_id INT,
-                booking_id INT,
-                description TEXT NOT NULL,
-                amount DECIMAL(12,2) NOT NULL,
-                work_date DATE NOT NULL,
-                order_number VARCHAR(20) UNIQUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB
-        ''')
-
-        # Добавляем колонки если их нет (для существующих баз)
-        try:
-            cursor.execute("ALTER TABLE works ADD COLUMN order_number VARCHAR(20) UNIQUE")
-        except:
-            pass
-        try:
-            cursor.execute("ALTER TABLE works ADD COLUMN booking_id INT")
-        except:
-            pass
-        try:
-            cursor.execute("ALTER TABLE works ADD COLUMN car_id INT")
-        except:
-            pass
-
-        # Таблица расходов/доходов
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS expenses (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                description TEXT NOT NULL,
-                amount DECIMAL(12,2) NOT NULL,
-                expense_date DATE NOT NULL,
-                category VARCHAR(255) NOT NULL,
-                is_income TINYINT(1) DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB
-        ''')
-
-        # Таблица запчастей
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS parts (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                work_id INT NOT NULL,
-                part_name TEXT NOT NULL,
-                part_price DECIMAL(12,2) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (work_id) REFERENCES works(id) ON DELETE CASCADE
-            ) ENGINE=InnoDB
-        ''')
-
-        # Таблица ключевых слов для автодополнения
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS keywords (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                keyword VARCHAR(255) NOT NULL UNIQUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB
-        ''')
-
-        # Таблица клиентов (центральная таблица для всех данных о клиентах)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS clients (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                telegram_user_id BIGINT UNIQUE,
-                tg_username VARCHAR(255),
-                full_name VARCHAR(255),
-                phone VARCHAR(50),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_phone (phone)
-            ) ENGINE=InnoDB
-        ''')
-
-        # Таблица записей из Telegram бота (данные клиента через client_id -> clients)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS bookings (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                client_id INT,
-                car_id INT,
-                booking_date DATE NOT NULL,
-                booking_time VARCHAR(10) NOT NULL,
-                status VARCHAR(20) DEFAULT 'waiting',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_booking_datetime (booking_date, booking_time)
-            ) ENGINE=InnoDB
-        ''')
-
-        # Добавляем колонки если их нет (для существующих баз)
-        try:
-            cursor.execute("ALTER TABLE expenses ADD COLUMN is_income TINYINT(1) DEFAULT 0")
-        except MySQLError:
-            pass
-        try:
-            cursor.execute("ALTER TABLE bookings ADD COLUMN client_id INT AFTER id")
-        except:
-            pass
-        try:
-            cursor.execute("ALTER TABLE bookings ADD COLUMN car_id INT AFTER client_id")
-        except:
-            pass
-
-        # Удаляем уникальный ключ, чтобы разрешить несколько записей на одно время
-        try:
-            cursor.execute("ALTER TABLE bookings DROP INDEX unique_booking")
-        except:
-            pass
-
-        # Таблица автомобилей клиентов (данные клиента через client_id -> clients)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS client_cars (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                client_id INT,
-                car_brand VARCHAR(100),
-                car_model VARCHAR(100),
-                car_number VARCHAR(20),
-                vin VARCHAR(20),
-                mileage VARCHAR(50),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY unique_car_number (car_number)
-            ) ENGINE=InnoDB
-        ''')
-
-        # Добавляем колонку client_id если её нет
-        try:
-            cursor.execute("ALTER TABLE client_cars ADD COLUMN client_id INT AFTER id")
-        except:
-            pass
-
-        # Добавляем индексы для быстрого поиска
-        try:
-            cursor.execute("CREATE INDEX idx_works_work_date ON works(work_date)")
-        except:
-            pass
-        try:
-            cursor.execute("CREATE INDEX idx_works_car_id ON works(car_id)")
-        except:
-            pass
-        try:
-            cursor.execute("CREATE INDEX idx_bookings_booking_date ON bookings(booking_date)")
-        except:
-            pass
-        try:
-            cursor.execute("CREATE INDEX idx_bookings_status ON bookings(status)")
-        except:
-            pass
-        try:
-            cursor.execute("CREATE INDEX idx_bookings_client_id ON bookings(client_id)")
-        except:
-            pass
-        try:
-            cursor.execute("CREATE INDEX idx_client_cars_client_id ON client_cars(client_id)")
-        except:
-            pass
-
-        conn.commit()
-        conn.close()
-
-    # --- Методы для работы с работниками ---
-
-    def add_worker(self, full_name):
-        """Добавить работника"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("INSERT INTO workers (full_name) VALUES (%s)", (full_name,))
-            conn.commit()
-            return True
-        except pymysql.IntegrityError:
-            return False
-        finally:
-            conn.close()
-
-    def delete_worker(self, worker_id):
-        """Удалить работника и все его записи"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM works WHERE worker_id = %s", (worker_id,))
-        cursor.execute("DELETE FROM workers WHERE id = %s", (worker_id,))
-        conn.commit()
-        conn.close()
-
-    def get_all_workers(self):
-        """Получить всех работников"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, full_name FROM workers ORDER BY full_name")
-        workers = cursor.fetchall()
-        conn.close()
-        return workers
-
-    # --- Методы для работы с марками и моделями ---
-
-    def add_car_brand(self, brand_name):
-        """Добавить марку машины"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("INSERT INTO car_brands (brand_name) VALUES (%s)", (brand_name,))
-            conn.commit()
-            return True
-        except pymysql.IntegrityError:
-            return False
-        finally:
-            conn.close()
-
-    def add_car_model(self, brand_id, model_name):
-        """Добавить модель машины"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("INSERT INTO car_models (brand_id, model_name) VALUES (%s, %s)",
-                         (brand_id, model_name))
-            conn.commit()
-            return True
-        except pymysql.IntegrityError:
-            return False
-        finally:
-            conn.close()
-
-    def get_all_car_brands(self):
-        """Получить все марки машин"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, brand_name FROM car_brands ORDER BY brand_name")
-        brands = cursor.fetchall()
-        conn.close()
-        return brands
-
-    def get_car_models_by_brand(self, brand_id):
-        """Получить модели машины по марке"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, model_name FROM car_models WHERE brand_id = %s ORDER BY model_name",
-                      (brand_id,))
-        models = cursor.fetchall()
-        conn.close()
-        return models
-
-    def get_brand_id_by_name(self, brand_name):
-        """Получить ID марки по названию"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM car_brands WHERE LOWER(brand_name) = LOWER(%s)", (brand_name,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-
-    def search_car_brands(self, search_text):
-        """Поиск марок машин по началу названия (без учёта регистра)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT brand_name FROM car_brands WHERE LOWER(brand_name) LIKE LOWER(%s) ORDER BY brand_name LIMIT 10",
-                      (f"{search_text}%",))
-        brands = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return brands
-
-    def search_car_models(self, brand_name, search_text=""):
-        """Поиск моделей машин по марке и промежуточным буквам
-
-        Если search_text пустой - возвращает все модели марки
-        Если search_text не пустой - ищет по промежуточным буквам (например, 'kra' найдет 'iskra')
-        """
-        brand_id = self.get_brand_id_by_name(brand_name)
-        if not brand_id:
-            return []
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        if not search_text or search_text == "":
-            # Если поиск пустой, возвращаем все модели для этой марки
-            cursor.execute(
-                "SELECT model_name FROM car_models WHERE brand_id = %s ORDER BY model_name",
-                (brand_id,)
-            )
-        else:
-            # Создаем паттерн для поиска по промежуточным буквам
-            # Например, "kra" становится "%k%r%a%"
-            pattern = "%" + "%".join(search_text.lower()) + "%"
-            cursor.execute(
-                "SELECT model_name FROM car_models WHERE brand_id = %s AND LOWER(model_name) LIKE %s ORDER BY model_name LIMIT 20",
-                (brand_id, pattern)
-            )
-
-        models = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return models
-
-    def delete_car_brand(self, brand_id):
-        """Удалить марку машины и все её модели"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM car_models WHERE brand_id = %s", (brand_id,))
-        cursor.execute("DELETE FROM car_brands WHERE id = %s", (brand_id,))
-        conn.commit()
-        conn.close()
-
-    def delete_car_model(self, model_id):
-        """Удалить модель машины"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM car_models WHERE id = %s", (model_id,))
-        conn.commit()
-        conn.close()
-
-    def import_brands_models_from_dict(self, data):
-        """Импортировать марки и модели из словаря {brand: [models]}"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        added_brands = 0
-        added_models = 0
-
-        for brand_name, models in data.items():
-            try:
-                cursor.execute("INSERT INTO car_brands (brand_name) VALUES (%s)", (brand_name,))
-                brand_id = cursor.lastrowid
-                added_brands += 1
-            except pymysql.IntegrityError:
-                cursor.execute("SELECT id FROM car_brands WHERE brand_name = %s", (brand_name,))
-                brand_id = cursor.fetchone()[0]
-
-            for model_name in models:
-                try:
-                    cursor.execute("INSERT INTO car_models (brand_id, model_name) VALUES (%s, %s)",
-                                 (brand_id, model_name))
-                    added_models += 1
-                except pymysql.IntegrityError:
-                    pass
-
-        conn.commit()
-        conn.close()
-        return added_brands, added_models
-
-    # --- Методы для работы с записями о работах ---
-
-    def generate_order_number(self):
-        """Генерировать уникальный номер заказа"""
-        import random
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        while True:
-            # Формат: 8 случайных цифр (90 млн вариантов)
-            order_number = str(random.randint(10000000, 99999999))
-            cursor.execute("SELECT id FROM works WHERE order_number = %s", (order_number,))
-            if not cursor.fetchone():
-                conn.close()
-                return order_number
-
-    def add_work(self, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None):
-        """Добавить запись о работе и вернуть ID.
-        Данные о клиенте и машине берутся через car_id -> client_cars -> clients.
-        mileage и vin обновляются в client_cars.
-        """
-        order_number = self.generate_order_number()
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO works (worker_id, description, amount, work_date, order_number, booking_id, car_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (worker_id, description, amount, work_date, order_number, booking_id, car_id)
-        )
-        work_id = cursor.lastrowid
-        # Обновляем mileage и vin в client_cars
-        if car_id:
-            if mileage:
-                # Пробег всегда перезаписывается
-                cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (mileage, car_id))
-            if vin:
-                # VIN только если пустой
-                cursor.execute("UPDATE client_cars SET vin = COALESCE(NULLIF(vin, ''), %s) WHERE id = %s", (vin, car_id))
-        # Обновляем car_id в bookings если есть booking_id
-        if booking_id and car_id:
-            cursor.execute("UPDATE bookings SET car_id = %s WHERE id = %s", (car_id, booking_id))
-        conn.commit()
-        conn.close()
-        return work_id
-
-    def update_work(self, work_id, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None):
-        """Обновить запись о работе.
-        Данные о клиенте и машине берутся через car_id -> client_cars -> clients.
-        mileage и vin обновляются в client_cars.
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE works
-            SET worker_id = %s, description = %s, amount = %s, work_date = %s,
-                booking_id = %s, car_id = %s
-            WHERE id = %s
-        ''', (worker_id, description, amount, work_date, booking_id, car_id, work_id))
-        # Обновляем mileage и vin в client_cars
-        if car_id:
-            if mileage:
-                # Пробег всегда перезаписывается
-                cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (mileage, car_id))
-            if vin:
-                # VIN только если пустой
-                cursor.execute("UPDATE client_cars SET vin = COALESCE(NULLIF(vin, ''), %s) WHERE id = %s", (vin, car_id))
-        # Обновляем car_id в bookings если есть booking_id
-        if booking_id and car_id:
-            cursor.execute("UPDATE bookings SET car_id = %s WHERE id = %s", (car_id, booking_id))
-        conn.commit()
-        conn.close()
-
-    def append_to_work(self, work_id, new_description, new_amount):
-        """Добавить описание и сумму к существующей работе"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        # Получаем текущие данные
-        cursor.execute("SELECT description, amount FROM works WHERE id = %s", (work_id,))
-        row = cursor.fetchone()
-        if row:
-            old_desc = row[0] or ""
-            old_amount = float(row[1] or 0)
-            # Объединяем описания
-            combined_desc = old_desc + "\n" + new_description if old_desc else new_description
-            combined_amount = old_amount + float(new_amount or 0)
-            # Обновляем
-            cursor.execute('''
-                UPDATE works SET description = %s, amount = %s WHERE id = %s
-            ''', (combined_desc, combined_amount, work_id))
-            conn.commit()
-        conn.close()
-        return work_id
-
-    def get_work_by_id(self, work_id):
-        """Получить работу по ID.
-        Возвращает: (id, worker_id, worker_name, description, amount, work_date,
-                     car_brand, car_model, car_number, mileage, vin, booking_id,
-                     client_name, client_phone, car_id, client_id)
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT wk.id, wk.worker_id, w.full_name, wk.description, wk.amount,
-                   wk.work_date,
-                   cc.car_brand, cc.car_model, cc.car_number,
-                   cc.mileage, cc.vin,
-                   wk.booking_id, cl.full_name as client_name, cl.phone as client_phone,
-                   wk.car_id, cc.client_id
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE wk.id = %s
-        ''', (work_id,))
-        work = cursor.fetchone()
-        conn.close()
-        return work
-
-    def get_work_by_booking_id(self, booking_id):
-        """Получить работу по ID записи (booking).
-        Возвращает: (id, worker_id, worker_name, description, amount, work_date,
-                     car_brand, car_model, car_number, mileage, vin, booking_id,
-                     client_name, client_phone, order_number, car_id)
-        """
-        if not booking_id:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT wk.id, wk.worker_id, w.full_name, wk.description, wk.amount,
-                   wk.work_date,
-                   cc.car_brand, cc.car_model, cc.car_number,
-                   cc.mileage, cc.vin,
-                   wk.booking_id, cl.full_name as client_name, cl.phone as client_phone,
-                   wk.order_number, wk.car_id
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE wk.booking_id = %s
-            ORDER BY wk.id DESC
-            LIMIT 1
-        ''', (booking_id,))
-        work = cursor.fetchone()
-        conn.close()
-        return work
-
-    def get_all_works_by_booking_id(self, booking_id):
-        """Получить ВСЕ работы по ID записи (booking).
-        Возвращает список: [(id, worker_id, worker_name, description, amount, work_date,
-                            car_brand, car_model, car_number, mileage, vin, booking_id,
-                            client_name, client_phone, order_number, car_id), ...]
-        """
-        if not booking_id:
-            return []
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT wk.id, wk.worker_id, w.full_name, wk.description, wk.amount,
-                   wk.work_date,
-                   cc.car_brand, cc.car_model, cc.car_number,
-                   cc.mileage, cc.vin,
-                   wk.booking_id, cl.full_name as client_name, cl.phone as client_phone,
-                   wk.order_number, wk.car_id
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE wk.booking_id = %s
-            ORDER BY wk.id ASC
-        ''', (booking_id,))
-        works = cursor.fetchall()
-        conn.close()
-        return works
-
-    def get_last_work_by_booking_id(self, booking_id):
-        """Получить последнюю работу по booking_id (для объединения)"""
-        if not booking_id:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id, description, amount FROM works
-            WHERE booking_id = %s
-            ORDER BY id DESC LIMIT 1
-        ''', (booking_id,))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            return {"work_id": row[0], "description": row[1], "amount": row[2]}
-        return None
-
-    def get_telegram_user_by_phone(self, phone):
-        """Найти telegram user_id и username по телефону"""
-        if not phone:
-            return None
-        import re
-        # Нормализуем телефон - оставляем только цифры
-        phone_digits = re.sub(r'\D', '', phone)
-        # Берём последние 10 цифр
-        phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
-
-        if not phone_suffix:
-            return None
-
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        # Ищем в таблице clients по телефону
-        cursor.execute('''
-            SELECT telegram_user_id, tg_username, phone FROM clients
-            WHERE telegram_user_id IS NOT NULL AND telegram_user_id > 0
-            ORDER BY id DESC
-        ''')
-        all_clients = cursor.fetchall()
-
-        # Ищем совпадение по последним 10 цифрам
-        for row in all_clients:
-            db_tg_id, db_tg_username, db_phone = row
-            if db_phone:
-                db_phone_digits = re.sub(r'\D', '', db_phone)
-                db_phone_suffix = db_phone_digits[-10:] if len(db_phone_digits) >= 10 else db_phone_digits
-                if db_phone_suffix == phone_suffix:
-                    conn.close()
-                    return {"user_id": db_tg_id, "username": db_tg_username or ""}
-
-        conn.close()
-        return None
-
-    def delete_parts_by_work_id(self, work_id):
-        """Удалить все запчасти для работы"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM parts WHERE work_id = %s", (work_id,))
-        conn.commit()
-        conn.close()
-
-    def get_works_by_period(self, date_from, date_to):
-        """Получить работы за период.
-        Возвращает: [(id, worker_name, description, amount, work_date,
-                     car_brand, car_model, car_number, order_number, client_name, client_phone), ...]
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT wk.id, w.full_name, wk.description, wk.amount, wk.work_date,
-                   cc.car_brand, cc.car_model, cc.car_number,
-                   wk.order_number, cl.full_name as client_name, cl.phone as client_phone
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE wk.work_date BETWEEN %s AND %s
-            ORDER BY w.full_name, wk.work_date
-        ''', (date_from, date_to))
-        works = cursor.fetchall()
-        conn.close()
-        return works
-
-    def get_works_by_car_number(self, car_number):
-        """Получить все работы по госномеру.
-        Возвращает: [(id, worker_name, description, amount, work_date,
-                     car_brand, car_model, car_number, order_number, client_name, client_phone), ...]
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT wk.id, w.full_name, wk.description, wk.amount, wk.work_date,
-                   cc.car_brand, cc.car_model, cc.car_number,
-                   wk.order_number, cl.full_name as client_name, cl.phone as client_phone
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE UPPER(cc.car_number) LIKE %s
-            ORDER BY wk.work_date DESC
-        ''', (f'%{car_number.upper()}%',))
-        works = cursor.fetchall()
-        conn.close()
-        return works
-
-    def get_summary_by_period(self, date_from, date_to):
-        """Получить сводку по работникам за период"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT w.full_name, SUM(wk.amount) as total, COUNT(wk.id) as work_count
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            WHERE wk.work_date BETWEEN %s AND %s
-            GROUP BY w.id
-            ORDER BY total DESC
-        ''', (date_from, date_to))
-        summary = cursor.fetchall()
-        conn.close()
-        return summary
-
-    def get_recent_works(self, limit=50):
-        """Получить последние записи о работах.
-        Возвращает: [(id, worker_name, description, amount, work_date,
-                     car_brand, car_model, car_number), ...]
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT wk.id, w.full_name, wk.description, wk.amount, wk.work_date,
-                   cc.car_brand, cc.car_model, cc.car_number
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            ORDER BY wk.created_at DESC, wk.id DESC
-            LIMIT %s
-        ''', (limit,))
-        works = cursor.fetchall()
-        conn.close()
-        return works
-
-    # --- Методы для работы с расходами ---
-
-    def add_expense(self, description, amount, expense_date, category, is_income=False):
-        """Добавить запись о расходе или доходе"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO expenses (description, amount, expense_date, category, is_income) VALUES (%s, %s, %s, %s, %s)",
-            (description, amount, expense_date, category, 1 if is_income else 0)
-        )
-        conn.commit()
-        conn.close()
-
-    def get_expenses_by_period(self, date_from, date_to):
-        """Получить расходы за период"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT description, amount, expense_date, category
-            FROM expenses
-            WHERE expense_date BETWEEN %s AND %s
-            ORDER BY expense_date DESC
-        ''', (date_from, date_to))
-        expenses = cursor.fetchall()
-        conn.close()
-        return expenses
-
-    def get_recent_expenses(self, limit=50):
-        """Получить последние записи о расходах и доходах"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id, description, amount, expense_date, category, COALESCE(is_income, 0) as is_income
-            FROM expenses
-            ORDER BY created_at DESC, id DESC
-            LIMIT %s
-        ''', (limit,))
-        expenses = cursor.fetchall()
-        conn.close()
-        return expenses
-
-    def delete_expense(self, expense_id):
-        """Удалить расход"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
-        conn.commit()
-        conn.close()
-
-    def get_total_expenses_by_period(self, date_from, date_to):
-        """Получить общую сумму расходов за период (только расходы, без доходов)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT COALESCE(SUM(amount), 0) as total
-            FROM expenses
-            WHERE expense_date BETWEEN %s AND %s AND (is_income = 0 OR is_income IS NULL)
-        ''', (date_from, date_to))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else 0
-
-    def get_total_income_by_period(self, date_from, date_to):
-        """Получить общую сумму доходов за период (только доходы)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT COALESCE(SUM(amount), 0) as total
-            FROM expenses
-            WHERE expense_date BETWEEN %s AND %s AND is_income = 1
-        ''', (date_from, date_to))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else 0
-
-    def get_detailed_expenses_by_period(self, date_from, date_to):
-        """Получить детальный список расходов за период (только расходы)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT category, description, amount, expense_date
-            FROM expenses
-            WHERE expense_date BETWEEN %s AND %s AND (is_income = 0 OR is_income IS NULL)
-            ORDER BY expense_date DESC
-        ''', (date_from, date_to))
-        expenses = cursor.fetchall()
-        conn.close()
-        return expenses
-
-    def get_detailed_income_by_period(self, date_from, date_to):
-        """Получить детальный список доходов за период (только доходы)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT category, description, amount, expense_date
-            FROM expenses
-            WHERE expense_date BETWEEN %s AND %s AND is_income = 1
-            ORDER BY expense_date DESC
-        ''', (date_from, date_to))
-        income = cursor.fetchall()
-        conn.close()
-        return income
-
-    # --- Методы для работы с запчастями ---
-
-    def add_parts(self, work_id, parts_list):
-        """Добавить запчасти к работе
-        parts_list: список кортежей (part_name, part_price)
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        for part_name, part_price in parts_list:
-            cursor.execute(
-                "INSERT INTO parts (work_id, part_name, part_price) VALUES (%s, %s, %s)",
-                (work_id, part_name, part_price)
-            )
-        conn.commit()
-        conn.close()
-
-    def get_parts_by_work_id(self, work_id):
-        """Получить запчасти по ID работы"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT part_name, part_price
-            FROM parts
-            WHERE work_id = %s
-            ORDER BY id
-        ''', (work_id,))
-        parts = cursor.fetchall()
-        conn.close()
-        return parts
-
-    def get_work_with_parts_by_car(self, car_brand, car_model, car_number):
-        """Получить работы с запчастями по машине"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        # Получаем работы по машине
-        cursor.execute('''
-            SELECT wk.id, w.full_name, wk.description, wk.amount, wk.work_date,
-                   wk.car_brand, wk.car_model, wk.car_number
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            WHERE wk.car_brand = %s AND wk.car_model = %s AND wk.car_number = %s
-            ORDER BY wk.work_date DESC
-        ''', (car_brand, car_model, car_number))
-        works = cursor.fetchall()
-        conn.close()
-        return works
-
-    # --- Методы для работы с ключевыми словами ---
-
-    def add_keyword(self, keyword):
-        """Добавить ключевое слово"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "INSERT INTO keywords (keyword) VALUES (%s)",
-                (keyword,)
-            )
-            conn.commit()
-            return True
-        except MySQLError:
-            conn.rollback()
-            return False
-        finally:
-            conn.close()
-
-    def get_all_keywords(self):
-        """Получить все ключевые слова"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, keyword FROM keywords ORDER BY keyword")
-        keywords = cursor.fetchall()
-        conn.close()
-        return keywords
-
-    def search_keywords(self, prefix):
-        """Поиск ключевых слов по префиксу (без учёта регистра)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT keyword FROM keywords WHERE LOWER(keyword) LIKE LOWER(%s) ORDER BY keyword LIMIT 10",
-            ('%' + prefix + '%',)
-        )
-        keywords = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return keywords
-
-    def delete_keyword(self, keyword_id):
-        """Удалить ключевое слово"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM keywords WHERE id = %s", (keyword_id,))
-        conn.commit()
-        conn.close()
-
-    def import_keywords_from_list(self, keywords):
-        """Импортировать ключевые слова из списка"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        added = 0
-        for keyword in keywords:
-            keyword = keyword.strip()
-            if not keyword:
-                continue
-            try:
-                cursor.execute(
-                    "INSERT INTO keywords (keyword) VALUES (%s)",
-                    (keyword,)
-                )
-                added += 1
-            except MySQLError:
-                pass  # Пропускаем дубликаты
-        conn.commit()
-        conn.close()
-        return added
-
-    # --- Методы для работы с записями из Telegram ---
-
-    def get_all_bookings(self, status=None):
-        """Получить все записи.
-        Возвращает: [(id, user_id, username, full_name, phone, booking_date,
-                     booking_time, status, car_info, client_id, car_id, order_number), ...]
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        query = """SELECT b.id,
-                   c.telegram_user_id as user_id,
-                   c.tg_username,
-                   c.full_name,
-                   c.phone,
-                   b.booking_date, b.booking_time, b.status,
-                   CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
-                   b.client_id, b.car_id,
-                   w.order_number
-                   FROM bookings b
-                   LEFT JOIN clients c ON b.client_id = c.id
-                   LEFT JOIN client_cars cc ON b.car_id = cc.id
-                   LEFT JOIN works w ON w.booking_id = b.id
-                   WHERE 1=1"""
-        params = []
-
-        if status:
-            query += " AND b.status = %s"
-            params.append(status)
-
-        query += " ORDER BY b.booking_date ASC, b.booking_time ASC"
-
-        cursor.execute(query, params)
-        bookings = cursor.fetchall()
-        conn.close()
-        return bookings
-
-    def get_today_bookings(self):
-        """Получить записи на сегодня.
-        Возвращает: [(id, user_id, username, full_name, phone, booking_date,
-                     booking_time, status, car_info, client_id, car_id, order_number), ...]
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT b.id,
-                   c.telegram_user_id as user_id,
-                   c.tg_username,
-                   c.full_name,
-                   c.phone,
-                   b.booking_date, b.booking_time, b.status,
-                   CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
-                   b.client_id, b.car_id,
-                   w.order_number
-            FROM bookings b
-            LEFT JOIN clients c ON b.client_id = c.id
-            LEFT JOIN client_cars cc ON b.car_id = cc.id
-            LEFT JOIN works w ON w.booking_id = b.id
-            WHERE b.booking_date = CURDATE()
-            ORDER BY b.booking_time
-        """)
-        bookings = cursor.fetchall()
-        conn.close()
-        return bookings
-
-    def update_booking_status(self, booking_id, status):
-        """Обновить статус записи"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE bookings SET status = %s WHERE id = %s",
-            (status, booking_id)
-        )
-        conn.commit()
-        conn.close()
-
-    def delete_booking(self, booking_id):
-        """Удалить запись"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM bookings WHERE id = %s", (booking_id,))
-        conn.commit()
-        conn.close()
-
-    def add_booking(self, booking_date, booking_time, client_id, car_id=None, status="waiting"):
-        """Добавить новую запись клиента. Возвращает ID записи или None при ошибке.
-        Данные клиента (full_name, phone, tg_username) берутся из таблицы clients по client_id.
-        Данные машины берутся из таблицы client_cars по car_id.
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            # Удаляем старые неактивные записи на это время (cancelled/completed)
-            cursor.execute("""
-                DELETE FROM bookings
-                WHERE booking_date = %s AND booking_time = %s AND status NOT IN ('waiting', 'in_progress')
-            """, (booking_date, booking_time))
-            # Создаём новую запись с client_id и car_id
-            cursor.execute("""
-                INSERT INTO bookings (client_id, car_id, booking_date, booking_time, status)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (client_id, car_id, booking_date, booking_time, status))
-            conn.commit()
-            return cursor.lastrowid
-        except Exception as e:
-            print(f"Ошибка добавления записи: {e}")
-            return None
-        finally:
-            conn.close()
-
-    def is_time_slot_available(self, booking_date, booking_time):
-        """Проверить свободен ли слот времени"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT COUNT(*) FROM bookings
-            WHERE booking_date = %s AND booking_time = %s AND status IN ('waiting', 'in_progress')
-        """, (booking_date, booking_time))
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count == 0
-
-    def get_bookings_at_time(self, booking_date, booking_time):
-        """Получить список записей на конкретное время с информацией о машинах.
-        Возвращает список словарей: [{client_name, car_number, brand, model}, ...]
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT c.full_name, car.car_number, car.car_brand, car.car_model
-            FROM bookings b
-            LEFT JOIN clients c ON b.client_id = c.id
-            LEFT JOIN client_cars car ON b.car_id = car.id
-            WHERE b.booking_date = %s AND b.booking_time = %s AND b.status IN ('waiting', 'in_progress')
-        """, (booking_date, booking_time))
-        results = cursor.fetchall()
-        conn.close()
-
-        bookings_list = []
-        for row in results:
-            bookings_list.append({
-                'client_name': row[0] or 'Неизвестно',
-                'car_number': row[1] or 'Нет номера',
-                'brand': row[2] or '',
-                'model': row[3] or ''
-            })
-        return bookings_list
-
-    def get_active_bookings_for_select(self):
-        """Получить активные записи для выпадающего списка.
-        Возвращает: [(id, full_name, phone, booking_date, booking_time, car_id), ...]
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT b.id,
-                   c.full_name,
-                   c.phone,
-                   b.booking_date, b.booking_time, b.car_id
-            FROM bookings b
-            LEFT JOIN clients c ON b.client_id = c.id
-            WHERE b.status IN ('waiting', 'in_progress') AND b.booking_date >= CURDATE()
-            ORDER BY b.booking_date ASC, b.booking_time ASC
-        """)
-        bookings = cursor.fetchall()
-        conn.close()
-        return bookings
-
-    def get_booking_by_id(self, booking_id):
-        """Получить запись по ID.
-        Возвращает словарь: {id, user_id, username, full_name, phone, booking_date,
-                            booking_time, status, created_at, car_info, client_id, car_id}
-        """
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT b.id,
-                   c.telegram_user_id as user_id,
-                   c.tg_username,
-                   c.full_name,
-                   c.phone,
-                   b.booking_date, b.booking_time, b.status, b.created_at,
-                   CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
-                   b.client_id, b.car_id
-            FROM bookings b
-            LEFT JOIN clients c ON b.client_id = c.id
-            LEFT JOIN client_cars cc ON b.car_id = cc.id
-            WHERE b.id = %s
-        """, (booking_id,))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            return {
-                "id": row[0],
-                "user_id": row[1],
-                "username": row[2],
-                "full_name": row[3],
-                "phone": row[4],
-                "booking_date": row[5],
-                "booking_time": row[6],
-                "status": row[7],
-                "created_at": row[8],
-                "car_info": row[9],
-                "client_id": row[10],
-                "car_id": row[11]
-            }
-        return None
-
-    def get_telegram_user_id_by_phone(self, phone):
-        """Найти telegram user_id по номеру телефона из clients"""
-        if not phone:
-            return None
-        import re
-        # Нормализуем телефон - оставляем только цифры
-        phone_digits = re.sub(r'\D', '', phone)
-        # Берём последние 10 цифр
-        phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
-
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        # Ищем в clients по последним 10 цифрам телефона
-        cursor.execute("""
-            SELECT telegram_user_id FROM clients
-            WHERE telegram_user_id IS NOT NULL AND telegram_user_id > 0
-            AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s
-            ORDER BY id DESC LIMIT 1
-        """, (phone_suffix,))
-        row = cursor.fetchone()
-        conn.close()
-        return row[0] if row else None
-
-    # --- Методы для работы с клиентами (таблица clients) ---
-
-    def get_or_create_client(self, telegram_user_id=None, full_name=None, phone=None, tg_username=None):
-        """Найти или создать клиента. Возвращает client_id"""
-        import re
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        # Сначала ищем по telegram_user_id
-        if telegram_user_id and telegram_user_id > 0:
-            cursor.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
-            result = cursor.fetchone()
-            if result:
-                # Обновляем данные если переданы
-                if full_name or phone or tg_username:
-                    cursor.execute("""
-                        UPDATE clients SET
-                            tg_username = COALESCE(%s, tg_username),
-                            full_name = COALESCE(%s, full_name),
-                            phone = COALESCE(%s, phone)
-                        WHERE id = %s
-                    """, (tg_username, full_name, phone, result[0]))
-                    conn.commit()
-                conn.close()
-                return result[0]
-
-        # Ищем по телефону
-        if phone:
-            phone_digits = re.sub(r'\D', '', phone)
-            phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
-            cursor.execute("""
-                SELECT id FROM clients
-                WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s
-            """, (phone_suffix,))
-            result = cursor.fetchone()
-            if result:
-                # Обновляем telegram_user_id и tg_username если переданы
-                if telegram_user_id and telegram_user_id > 0:
-                    cursor.execute("""
-                        UPDATE clients SET
-                            telegram_user_id = %s,
-                            tg_username = COALESCE(%s, tg_username)
-                        WHERE id = %s
-                    """, (telegram_user_id, tg_username, result[0]))
-                    conn.commit()
-                conn.close()
-                return result[0]
-
-        # Создаём нового клиента
-        cursor.execute("""
-            INSERT INTO clients (telegram_user_id, tg_username, full_name, phone)
-            VALUES (%s, %s, %s, %s)
-        """, (telegram_user_id if telegram_user_id and telegram_user_id > 0 else None, tg_username, full_name, phone))
-        conn.commit()
-        client_id = cursor.lastrowid
-        conn.close()
-        return client_id
-
-    def get_client_by_id(self, client_id):
-        """Получить клиента по ID"""
-        if not client_id:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, telegram_user_id, full_name, phone, created_at
-            FROM clients WHERE id = %s
-        """, (client_id,))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {
-                "id": result[0],
-                "telegram_user_id": result[1],
-                "full_name": result[2],
-                "phone": result[3],
-                "created_at": result[4]
-            }
-        return None
-
-    def get_client_by_phone(self, phone):
-        """Получить клиента по телефону"""
-        if not phone:
-            return None
-        import re
-        phone_digits = re.sub(r'\D', '', phone)
-        phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
-
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, telegram_user_id, full_name, phone, created_at
-            FROM clients
-            WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s
-            LIMIT 1
-        """, (phone_suffix,))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {
-                "id": result[0],
-                "telegram_user_id": result[1],
-                "full_name": result[2],
-                "phone": result[3],
-                "created_at": result[4]
-            }
-        return None
-
-    def get_or_create_car(self, client_id, car_brand, car_model, car_number):
-        """Найти или создать авто клиента. Возвращает car_id"""
-        if not car_number:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        # Ищем авто по госномеру
-        cursor.execute("SELECT id FROM client_cars WHERE UPPER(car_number) = UPPER(%s)", (car_number,))
-        result = cursor.fetchone()
-
-        if result:
-            # Обновляем client_id если авто уже существует
-            if client_id:
-                cursor.execute("UPDATE client_cars SET client_id = %s WHERE id = %s", (client_id, result[0]))
-                conn.commit()
-            conn.close()
-            return result[0]
-
-        # Создаём новое авто
-        cursor.execute("""
-            INSERT INTO client_cars (client_id, car_brand, car_model, car_number)
-            VALUES (%s, %s, %s, %s)
-        """, (client_id, car_brand, car_model, car_number.upper()))
-        conn.commit()
-        car_id = cursor.lastrowid
-        conn.close()
-        return car_id
-
-    def get_client_cars_by_client_id(self, client_id):
-        """Получить список машин клиента по client_id"""
-        if not client_id:
-            return []
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, car_brand, car_model, car_number
-            FROM client_cars
-            WHERE client_id = %s
-            ORDER BY car_brand, car_model
-        """, (client_id,))
-        cars = cursor.fetchall()
-        conn.close()
-        return cars
-
-    def get_car_by_id(self, car_id):
-        """Получить авто по ID"""
-        if not car_id:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, client_id, car_brand, car_model, car_number
-            FROM client_cars WHERE id = %s
-        """, (car_id,))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {
-                "id": result[0],
-                "client_id": result[1],
-                "car_brand": result[2],
-                "car_model": result[3],
-                "car_number": result[4]
-            }
-        return None
-
-    def get_car_by_number(self, car_number):
-        """Получить авто по госномеру"""
-        if not car_number:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, client_id, car_brand, car_model, car_number
-            FROM client_cars WHERE UPPER(car_number) = UPPER(%s)
-        """, (car_number,))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {
-                "id": result[0],
-                "client_id": result[1],
-                "car_brand": result[2],
-                "car_model": result[3],
-                "car_number": result[4]
-            }
-        return None
-
-    def get_client_cars_by_phone(self, phone):
-        """Получить список машин клиента по номеру телефона через clients"""
-        if not phone:
-            return []
-        import re
-        # Нормализуем телефон - последние 10 цифр
-        phone_digits = re.sub(r'\D', '', phone)
-        phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
-
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        # Ищем в client_cars через JOIN с clients по телефону
-        cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
-            FROM client_cars cc
-            JOIN clients c ON cc.client_id = c.id
-            WHERE RIGHT(REGEXP_REPLACE(c.phone, '[^0-9]', ''), 10) = %s
-            AND cc.car_brand IS NOT NULL AND cc.car_brand != ''
-            ORDER BY cc.car_brand, cc.car_model
-        """, (phone_suffix,))
-        cars = cursor.fetchall()
-        conn.close()
-        return cars
-
-    def add_client_car(self, client_id, car_brand, car_model, car_number):
-        """Добавить автомобиль клиента в client_cars. Возвращает car_id или None.
-        client_id - обязательный параметр (FK на clients).
-        """
-        if not car_number or not car_brand or not client_id:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO client_cars (client_id, car_brand, car_model, car_number)
-                VALUES (%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    client_id = VALUES(client_id)
-            """, (client_id, car_brand, car_model, car_number.upper()))
-            conn.commit()
-            # Получаем ID вставленной/обновлённой записи
-            cursor.execute("SELECT id FROM client_cars WHERE UPPER(car_number) = UPPER(%s)", (car_number,))
-            result = cursor.fetchone()
-            return result[0] if result else None
-        except Exception as e:
-            print(f"Ошибка добавления авто: {e}")
-            return None
-        finally:
-            conn.close()
-
-    def get_client_cars_by_telegram_id(self, telegram_user_id):
-        """Получить список машин клиента по telegram_user_id через clients"""
-        if not telegram_user_id:
-            return []
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
-            FROM client_cars cc
-            JOIN clients c ON cc.client_id = c.id
-            WHERE c.telegram_user_id = %s
-            AND cc.car_brand IS NOT NULL AND cc.car_brand != ''
-            ORDER BY cc.car_brand, cc.car_model
-        """, (telegram_user_id,))
-        cars = cursor.fetchall()
-        conn.close()
-        return cars
-
-    def get_client_name_by_phone(self, phone):
-        """Получить имя клиента по номеру телефона из таблицы clients"""
-        if not phone:
-            return None
-        import re
-        # Нормализуем телефон - последние 10 цифр
-        phone_digits = re.sub(r'\D', '', phone)
-        phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
-
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT full_name FROM clients
-            WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s
-            AND full_name IS NOT NULL AND full_name != ''
-            ORDER BY id DESC LIMIT 1
-        """, (phone_suffix,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-
-    def get_client_cars_by_name(self, name):
-        """Получить список машин клиента по имени через clients"""
-        if not name:
-            return []
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        # Ищем машины через JOIN с clients
-        cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
-            FROM client_cars cc
-            JOIN clients c ON cc.client_id = c.id
-            WHERE c.full_name = %s
-            AND cc.car_brand IS NOT NULL AND cc.car_brand != ''
-            ORDER BY cc.car_brand, cc.car_model
-        """, (name,))
-        cars = cursor.fetchall()
-        conn.close()
-        return cars
-
-    def get_client_history(self, phone=None, name=None, telegram_user_id=None):
-        """Получить всю историю работ клиента через clients -> client_cars -> works.
-        Возвращает: [(id, work_date, order_number, worker, car_brand, car_model,
-                     car_number, mileage, description, amount, client_name, client_phone), ...]
-        """
-        if not phone and not name and not telegram_user_id:
-            return []
-        import re
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        # Находим client_id
-        client_id = None
-
-        if telegram_user_id:
-            cursor.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
-            result = cursor.fetchone()
-            if result:
-                client_id = result[0]
-
-        if not client_id and phone:
-            phone_digits = re.sub(r'\D', '', phone)
-            phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
-            cursor.execute("""
-                SELECT id FROM clients
-                WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s
-                LIMIT 1
-            """, (phone_suffix,))
-            result = cursor.fetchone()
-            if result:
-                client_id = result[0]
-
-        if not client_id and name:
-            cursor.execute("SELECT id FROM clients WHERE full_name = %s LIMIT 1", (name,))
-            result = cursor.fetchone()
-            if result:
-                client_id = result[0]
-
-        if not client_id:
-            conn.close()
-            return []
-
-        # Получаем историю работ через client_cars
-        cursor.execute("""
-            SELECT wk.id, wk.work_date, wk.order_number, w.full_name as worker,
-                   cc.car_brand, cc.car_model, cc.car_number, cc.mileage,
-                   wk.description, wk.amount, cl.full_name as client_name, cl.phone as client_phone
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            JOIN client_cars cc ON wk.car_id = cc.id
-            JOIN clients cl ON cc.client_id = cl.id
-            WHERE cc.client_id = %s
-            ORDER BY wk.work_date DESC, wk.id DESC
-        """, (client_id,))
-
-        works = cursor.fetchall()
-        conn.close()
-        return works
-
-    def get_client_cars_by_telegram_user_id(self, telegram_user_id):
-        """Получить список машин клиента по telegram_user_id через clients -> client_cars"""
-        if not telegram_user_id:
-            return []
-        conn = self.get_connection()
-        cursor = conn.cursor()
-
-        # Простой запрос через JOIN
-        cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
-            FROM client_cars cc
-            JOIN clients c ON cc.client_id = c.id
-            WHERE c.telegram_user_id = %s
-            AND cc.car_brand IS NOT NULL AND cc.car_brand != ''
-            ORDER BY cc.car_brand, cc.car_model
-        """, (telegram_user_id,))
-
-        cars = cursor.fetchall()
-        conn.close()
-        return cars
-
-    def get_car_info_by_number(self, car_number):
-        """Получить информацию о машине и владельце по госномеру"""
-        if not car_number:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        # Ищем машину по госномеру в client_cars
-        cursor.execute("""
-            SELECT cc.car_brand, cc.car_model, cc.car_number, cc.mileage, cc.vin,
-                   cl.full_name as client_name, cl.phone as client_phone
-            FROM client_cars cc
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE UPPER(cc.car_number) = UPPER(%s)
-            LIMIT 1
-        """, (car_number,))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {
-                "car_brand": result[0] or "",
-                "car_model": result[1] or "",
-                "car_number": result[2] or "",
-                "mileage": result[3] or "",
-                "vin": result[4] or "",
-                "client_name": result[5] or "",
-                "client_phone": result[6] or ""
-            }
-        return None
-
-    def get_all_clients_by_car_number(self, car_number):
-        """Получить клиента по госномеру из client_cars"""
-        if not car_number:
-            return []
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        # Находим клиента по госномеру
-        cursor.execute("""
-            SELECT cl.full_name as client_name, cl.phone as client_phone,
-                   cc.car_brand, cc.car_model, cc.vin
-            FROM client_cars cc
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE UPPER(cc.car_number) = UPPER(%s)
-        """, (car_number,))
-        results = cursor.fetchall()
-        conn.close()
-
-        clients = []
-        for row in results:
-            clients.append({
-                "client_name": row[0] or "",
-                "client_phone": row[1] or "",
-                "car_brand": row[2] or "",
-                "car_model": row[3] or "",
-                "vin": row[4] or ""
-            })
-        return clients
-
-    def get_active_work_by_car_number(self, car_number):
-        """Найти активную работу (в работе) по госномеру"""
-        if not car_number:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        # Ищем работу связанную с записью в статусе in_progress
-        cursor.execute("""
-            SELECT w.id, w.booking_id, w.description, cl.full_name, cl.phone,
-                   b.booking_date, b.booking_time
-            FROM works w
-            JOIN bookings b ON w.booking_id = b.id
-            LEFT JOIN client_cars cc ON w.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE UPPER(cc.car_number) = UPPER(%s)
-              AND b.status = 'in_progress'
-            ORDER BY w.id DESC
-            LIMIT 1
-        """, (car_number,))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {
-                "work_id": result[0],
-                "booking_id": result[1],
-                "description": result[2] or "",
-                "client_name": result[3] or "",
-                "client_phone": result[4] or "",
-                "booking_date": result[5],
-                "booking_time": result[6]
-            }
-        return None
-
-
 class AutoServiceApp:
     """Главный класс приложения"""
 
@@ -1946,37 +296,94 @@ class AutoServiceApp:
         # Настройка стилей
         self.setup_styles()
 
-        # Создание вкладок
-        self.notebook = ctk.CTkTabview(root, command=self.on_tab_changed)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Основной контейнер
+        self.main_container = ctk.CTkFrame(root, fg_color="transparent")
+        self.main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Боковое меню слева
+        self.sidebar = ctk.CTkFrame(self.main_container, width=180, corner_radius=10)
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        self.sidebar.pack_propagate(False)  # Фиксированная ширина
+
+        # Заголовок меню
+        self.sidebar_title = ctk.CTkLabel(
+            self.sidebar,
+            text="Меню",
+            font=ctk.CTkFont(size=18, weight="bold")
+        )
+        self.sidebar_title.pack(pady=(20, 20))
+
+        # Пункты меню
+        self.menu_items = [
+            ("Добавить работу", "works"),
+            ("Записи", "bookings"),
+            ("Склад", "warehouse"),
+            ("Отчёты", "reports"),
+            ("Финансы", "expenses"),
+            ("Настройки", "settings")
+        ]
+
+        self.menu_buttons = {}
+        self.current_tab = "works"
+
+        for text, name in self.menu_items:
+            btn = ctk.CTkButton(
+                self.sidebar,
+                text=text,
+                command=lambda n=name: self.switch_tab(n),
+                height=40,
+                corner_radius=8,
+                fg_color="transparent" if name != "works" else None,
+                text_color=("gray10", "gray90"),
+                hover_color=("gray70", "gray30"),
+                anchor="w",
+                font=ctk.CTkFont(size=14)
+            )
+            btn.pack(fill=tk.X, pady=3, padx=10)
+            self.menu_buttons[name] = btn
+
+        # Контейнер для контента справа
+        self.content_container = ctk.CTkFrame(self.main_container, corner_radius=10)
+        self.content_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Словарь для хранения фреймов контента
+        self.content_frames = {}
 
         # Вкладка добавления работ
-        self.notebook.add("Добавить работу")
-        self.works_frame = self.notebook.tab("Добавить работу")
+        self.works_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["works"] = self.works_frame
         self.setup_works_tab()
 
         # Вкладка записей из Telegram
-        self.notebook.add("Записи")
-        self.bookings_frame = self.notebook.tab("Записи")
+        self.bookings_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["bookings"] = self.bookings_frame
         self.setup_bookings_tab()
 
+        # Вкладка склада запчастей
+        self.warehouse_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["warehouse"] = self.warehouse_frame
+        self.setup_warehouse_tab()
+
         # Вкладка отчётов
-        self.notebook.add("Отчёты")
-        self.reports_frame = self.notebook.tab("Отчёты")
+        self.reports_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["reports"] = self.reports_frame
         self.setup_reports_tab()
 
         # Вкладка расходов и доходов
-        self.notebook.add("Финансы")
-        self.expenses_frame = self.notebook.tab("Финансы")
+        self.expenses_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["expenses"] = self.expenses_frame
         self.setup_expenses_tab()
 
-        # Вкладка "Добавить" с подвкладками
-        self.notebook.add("Настройки")
-        self.add_frame = self.notebook.tab("Настройки")
+        # Вкладка настроек с подвкладками
+        self.add_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["settings"] = self.add_frame
 
-        # Создаём вложенный Tabview для подвкладок
+        # Создаём вложенный Tabview для подвкладок настроек
         self.add_notebook = ctk.CTkTabview(self.add_frame)
         self.add_notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Показываем первую вкладку по умолчанию
+        self.works_frame.pack(fill=tk.BOTH, expand=True)
 
         # Подвкладка работников
         self.add_notebook.add("Мастера")
@@ -2000,18 +407,42 @@ class AutoServiceApp:
         self.refresh_keywords_list()
         self.refresh_bookings()
 
+    def switch_tab(self, tab_name):
+        """Переключение между вкладками бокового меню"""
+        # Скрываем все фреймы
+        for frame in self.content_frames.values():
+            frame.pack_forget()
+
+        # Показываем выбранный фрейм
+        self.content_frames[tab_name].pack(fill=tk.BOTH, expand=True)
+
+        # Обновляем стили кнопок меню
+        for name, btn in self.menu_buttons.items():
+            if name == tab_name:
+                btn.configure(fg_color=("gray75", "gray25"))
+            else:
+                btn.configure(fg_color="transparent")
+
+        self.current_tab = tab_name
+
+        # Вызываем обработчик смены вкладки
+        self.on_tab_changed()
+
     def on_tab_changed(self):
         """Обработчик переключения вкладок"""
-        current_tab = self.notebook.get()
-        if current_tab == "Отчёты":
+        current_tab = self.current_tab
+        if current_tab == "reports":
             # Автоматически обновляем отчёт при переключении на вкладку
             self.generate_report(show_empty_message=False)
-        elif current_tab == "Записи":
+        elif current_tab == "bookings":
             # Автоматически обновляем записи при переключении на вкладку
             self.refresh_bookings()
-        elif current_tab == "Добавить работу":
+        elif current_tab == "works":
             # Автоматически обновляем список записей для выбора клиента
             self.refresh_bookings_combo()
+        elif current_tab == "warehouse":
+            # Автоматически обновляем список запчастей на складе
+            self.refresh_warehouse()
 
     def format_currency(self, amount):
         """Форматирование суммы в формат: 1.000.000 руб."""
@@ -2306,6 +737,16 @@ class AutoServiceApp:
         self.worker_combo = ctk.CTkComboBox(row1, width=350, fg_color="white", text_color="black", button_color="#0078d7", button_hover_color="#005a9e")
         self.worker_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
+        # Номер машины (госномер) - отдельная строка
+        row_car_number = ctk.CTkFrame(center_container)
+        row_car_number.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row_car_number, text="Госномер:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.car_number_entry = ctk.CTkEntry(row_car_number, width=250, fg_color="white", text_color="black")
+        self.car_number_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        # Автозаполнение при потере фокуса или нажатии Enter
+        self.car_number_entry.bind("<FocusOut>", self.on_car_number_change)
+        self.car_number_entry.bind("<Return>", self.on_car_number_change)
+
         # Марка машины с автокомплитом
         row_car_brand = ctk.CTkFrame(center_container)
         row_car_brand.pack(fill=tk.X, pady=5)
@@ -2334,26 +775,16 @@ class AutoServiceApp:
         self.model_listbox_visible = False
         self.model_listbox.bind('<<ListboxSelect>>', self.on_model_select)
 
-        # Номер машины и пробег
-        row_car_number = ctk.CTkFrame(center_container)
-        row_car_number.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_car_number, text="Госномер:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.car_number_entry = ctk.CTkEntry(row_car_number, width=100, fg_color="white", text_color="black")
-        self.car_number_entry.pack(side=tk.LEFT, padx=5)
-        # Автозаполнение при потере фокуса или нажатии Enter
-        self.car_number_entry.bind("<FocusOut>", self.on_car_number_change)
-        self.car_number_entry.bind("<Return>", self.on_car_number_change)
-
-        ctk.CTkLabel(row_car_number, text="Пробег:", width=80, anchor="w").pack(side=tk.LEFT, padx=(20, 5))
-        self.mileage_entry = ctk.CTkEntry(row_car_number, width=100, fg_color="white", text_color="black")
-        self.mileage_entry.pack(side=tk.LEFT, padx=5)
-
-        # VIN номер (необязательное поле)
+        # VIN номер и пробег
         row_vin = ctk.CTkFrame(center_container)
         row_vin.pack(fill=tk.X, pady=5)
         ctk.CTkLabel(row_vin, text="VIN:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.vin_entry = ctk.CTkEntry(row_vin, width=200, fg_color="white", text_color="black")
         self.vin_entry.pack(side=tk.LEFT, padx=5)
+
+        ctk.CTkLabel(row_vin, text="Пробег:", width=80, anchor="w").pack(side=tk.LEFT, padx=(20, 5))
+        self.mileage_entry = ctk.CTkEntry(row_vin, width=100, fg_color="white", text_color="black")
+        self.mileage_entry.pack(side=tk.LEFT, padx=5)
 
         # Контекстное меню для VIN (правая кнопка - вставить)
         self.vin_context_menu = tk.Menu(self.root, tearoff=0)
@@ -2391,8 +822,8 @@ class AutoServiceApp:
         ctk.CTkLabel(row_client_phone, text="Телефон клиента:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.client_phone_entry = ctk.CTkEntry(row_client_phone, width=200, fg_color="white", text_color="black")
         self.client_phone_entry.pack(side=tk.LEFT, padx=5)
-        # При потере фокуса ищем машины клиента
-        self.client_phone_entry.bind('<FocusOut>', self.on_client_phone_focus_out)
+        # При вводе телефона ищем данные клиента
+        self.client_phone_entry.bind('<KeyRelease>', self.on_client_phone_keyrelease)
 
         # Машины клиента (если клиент уже был в сервисе)
         row_client_cars = ctk.CTkFrame(center_container)
@@ -2409,26 +840,62 @@ class AutoServiceApp:
         # Храним выбранный booking_id
         self.selected_booking_id = None
 
-        # Описание работы
-        row2 = ctk.CTkFrame(center_container)
-        row2.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row2, text="Проделанная работа:", width=150, anchor="w").pack(side=tk.LEFT, padx=5, pady=5)
-        self.work_desc_entry = ctk.CTkTextbox(row2, width=400, height=80, fg_color="white", text_color="black", wrap="word")
-        self.work_desc_entry.pack(side=tk.LEFT, padx=5, fill=tk.BOTH, expand=True)
-        self.work_desc_entry.bind('<KeyRelease>', self.on_description_keyrelease)
-        self.work_desc_entry.bind('<FocusOut>', self.on_description_focus_out)
+        # Секция работ
+        separator_works = ctk.CTkFrame(center_container, height=2, fg_color="gray70")
+        separator_works.pack(fill=tk.X, pady=(10, 5))
+        ctk.CTkLabel(center_container, text="Проделанные работы", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=5)
 
-        # Listbox для автокомплита ключевых слов
-        self.keyword_listbox = tk.Listbox(row2, height=5, width=40, takefocus=False)
-        self.keyword_listbox_visible = False
-        self.keyword_listbox.bind('<Double-Button-1>', self.on_keyword_select)
+        works_container = ctk.CTkFrame(center_container)
+        works_container.pack(fill=tk.X, pady=5)
 
-        # Сумма
-        row3 = ctk.CTkFrame(center_container)
-        row3.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row3, text="Сумма (руб.):", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.amount_entry = ctk.CTkEntry(row3, width=200, fg_color="white", text_color="black")
-        self.amount_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        # Таблица работ
+        works_table_frame = ctk.CTkFrame(works_container)
+        works_table_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        work_columns = ("work_name", "work_price")
+        self.works_tree = ttk.Treeview(works_table_frame, columns=work_columns, show="headings", height=4)
+        self.works_tree.heading("work_name", text="Название работы")
+        self.works_tree.heading("work_price", text="Цена")
+        self.works_tree.column("work_name", width=450)
+        self.works_tree.column("work_price", width=150, anchor=tk.CENTER)
+
+        scrollbar_works = ttk.Scrollbar(works_table_frame, orient=tk.VERTICAL, command=self.works_tree.yview)
+        self.works_tree.configure(yscrollcommand=scrollbar_works.set)
+        self.works_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar_works.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Ввод работы
+        works_input_frame = ctk.CTkFrame(works_container)
+        works_input_frame.pack(fill=tk.X, pady=5, padx=5)
+
+        row_work_name = ctk.CTkFrame(works_input_frame)
+        row_work_name.pack(fill=tk.X, pady=2)
+        ctk.CTkLabel(row_work_name, text="Название:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.work_name_entry = ctk.CTkEntry(row_work_name, fg_color="white", text_color="black")
+        self.work_name_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.work_name_entry.bind('<KeyRelease>', self.on_work_name_keyrelease)
+        self.work_name_entry.bind('<FocusOut>', self.on_work_name_focus_out)
+
+        self.work_keyword_listbox = tk.Listbox(row_work_name, height=5, width=40, takefocus=False)
+        self.work_keyword_listbox_visible = False
+        self.work_keyword_listbox.bind('<Double-Button-1>', self.on_work_keyword_select)
+        self.work_keyword_listbox.bind('<Return>', self.on_work_keyword_select)
+
+        row_work_price = ctk.CTkFrame(works_input_frame)
+        row_work_price.pack(fill=tk.X, pady=2)
+        ctk.CTkLabel(row_work_price, text="Цена:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.work_price_entry = ctk.CTkEntry(row_work_price, width=200, fg_color="white", text_color="black")
+        self.work_price_entry.pack(side=tk.LEFT, padx=5)
+
+        # Кнопки работ
+        works_buttons_frame = ctk.CTkFrame(works_container)
+        works_buttons_frame.pack(fill=tk.X, pady=5, padx=5)
+        ctk.CTkButton(works_buttons_frame, text="Добавить работу",
+                      command=self.add_work_to_list, width=200).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(works_buttons_frame, text="Удалить выбранную",
+                      command=self.remove_work_from_list, width=200, fg_color="red", hover_color="darkred").pack(side=tk.LEFT, padx=5)
+
+        self.works_list = []
 
         # Разделитель - Запчасти
         separator_parts = ctk.CTkFrame(center_container, height=2, fg_color="gray70")
@@ -2549,7 +1016,6 @@ class AutoServiceApp:
             # Автоматически показываем все модели выбранной марки
             models = self.db.search_car_models(brand, "")
             if models:
-                # Очищаем поле модели и переводим фокус на него
                 self.car_model_entry.delete(0, tk.END)
                 self.show_model_listbox(models)
                 self.car_model_entry.focus_set()
@@ -2602,9 +1068,10 @@ class AutoServiceApp:
             self.client_cars_combo.set("")
             self.client_cars_data = {}
 
-    def load_client_cars(self, phone, name, booking_car_id=None):
+    def load_client_cars(self, phone, name, booking_car_id=None, auto_select=True):
         """Загрузить машины клиента по телефону или имени.
         booking_car_id - ID машины из записи (None = "Другое авто" в боте)
+        auto_select - автоматически выбирать машину при поиске по телефону
         """
         cars = []
         # Сначала ищем по телефону
@@ -2636,26 +1103,82 @@ class AutoServiceApp:
 
         self.client_cars_combo.configure(values=values)
 
-        # Если car_id=None (выбрано "Другое авто") - ставим "Новая машина"
-        if booking_car_id is None:
-            self.client_cars_combo.set("Новая машина")
-        # Если нашли машину по car_id - выбираем её
-        elif selected_car_display:
-            self.client_cars_combo.set(selected_car_display)
-            self.on_client_car_select(selected_car_display)
-        # Если есть машины но car_id не совпал - выбираем первую
-        elif len(values) > 1:
-            self.client_cars_combo.set(values[1])
-            self.on_client_car_select(values[1])
+        # Сбрасываем цвет на стандартный
+        self.client_cars_combo.configure(text_color="black")
+
+        # Количество машин клиента (без "Новая машина")
+        num_cars = len(values) - 1
+
+        # Если auto_select=True и нет booking_car_id - логика для ввода телефона
+        if auto_select and booking_car_id is None:
+            if num_cars == 1:
+                # Одна машина - автоматически выбираем и заполняем поля
+                self.client_cars_combo.set(values[1])
+                self.on_client_car_select(values[1])
+            elif num_cars > 1:
+                # Несколько машин - показываем "Выберите авто" красным
+                values_with_select = ["Выберите авто"] + values[1:]  # убираем "Новая машина" из начала
+                values_with_select.append("Новая машина")  # добавляем в конец
+                self.client_cars_combo.configure(values=values_with_select)
+                self.client_cars_combo.set("Выберите авто")
+                self.client_cars_combo.configure(text_color="#c62828")
+                # Очищаем поля машины
+                self.car_brand_entry.delete(0, tk.END)
+                self.car_model_entry.delete(0, tk.END)
+                self.car_number_entry.delete(0, tk.END)
+            else:
+                # Нет машин
+                self.client_cars_combo.set("Новая машина")
+        # Если booking_car_id передан - старая логика для редактирования записи
+        elif booking_car_id is not None:
+            if selected_car_display:
+                self.client_cars_combo.set(selected_car_display)
+                self.on_client_car_select(selected_car_display)
+            elif num_cars > 0:
+                self.client_cars_combo.set(values[1])
+                self.on_client_car_select(values[1])
+            else:
+                self.client_cars_combo.set("Новая машина")
         else:
             self.client_cars_combo.set("Новая машина")
 
-    def on_client_phone_focus_out(self, event):
-        """При потере фокуса поля телефона - искать машины клиента"""
-        phone = self.client_phone_entry.get().strip()
-        name = self.client_name_entry.get().strip()
-        if phone or name:
-            self.load_client_cars(phone, name)
+    def on_client_phone_keyrelease(self, event):
+        """При вводе телефона - искать данные клиента и его машины"""
+        phone_raw = self.client_phone_entry.get().strip()
+        phone_digits = ''.join(c for c in phone_raw if c.isdigit())
+
+        # Ищем только если введено 10-11 цифр
+        if len(phone_digits) >= 10:
+            # Нормализуем до последних 10 цифр
+            last_10 = phone_digits[-10:]
+
+            # Пробуем разные форматы телефона
+            phone_variants = [
+                f"+7{last_10}",
+                f"7{last_10}",
+                f"8{last_10}",
+                last_10,
+            ]
+
+            # Ищем имя клиента
+            client_name = None
+            for phone_variant in phone_variants:
+                client_name = self.db.get_client_name_by_phone(phone_variant)
+                if client_name:
+                    break
+
+            # Автозаполнение имени - всегда обновляем при найденном клиенте
+            if client_name:
+                self.client_name_entry.delete(0, tk.END)
+                self.client_name_entry.insert(0, client_name)
+
+            # Загружаем машины клиента
+            self.load_client_cars(phone_raw, client_name or "")
+        else:
+            # Если цифр меньше 10 - очищаем список машин
+            self.client_cars_combo.configure(values=["Новая машина"])
+            self.client_cars_combo.set("Новая машина")
+            self.client_cars_data = {}
 
     def on_car_number_change(self, event=None):
         """Автозаполнение по госномеру"""
@@ -2788,6 +1311,9 @@ class AutoServiceApp:
 
     def on_client_car_select(self, choice):
         """Обработчик выбора машины клиента"""
+        # Сбрасываем красный цвет при любом выборе
+        self.client_cars_combo.configure(text_color="black")
+
         if choice and choice in self.client_cars_data:
             car_info = self.client_cars_data[choice]
             # Заполняем поля машины
@@ -2802,6 +1328,9 @@ class AutoServiceApp:
             self.car_brand_entry.delete(0, tk.END)
             self.car_model_entry.delete(0, tk.END)
             self.car_number_entry.delete(0, tk.END)
+        elif choice == "Выберите авто":
+            # Не делаем ничего, ждём выбора
+            self.client_cars_combo.configure(text_color="#c62828")
 
     # Обработчики автокомплита для модели
     def on_model_keyrelease(self, event):
@@ -2812,7 +1341,6 @@ class AutoServiceApp:
             return
 
         search_text = self.car_model_entry.get().strip()
-        # Теперь показываем модели даже если search_text пустой
         models = self.db.search_car_models(brand, search_text)
         if models:
             self.show_model_listbox(models)
@@ -2847,104 +1375,6 @@ class AutoServiceApp:
         """Скрыть список при потере фокуса"""
         self.root.after(200, self.hide_model_listbox)
 
-    # Обработчики автокомплита для ключевых слов
-    def on_description_keyrelease(self, event):
-        """Обработчик ввода текста для описания работы"""
-        # Получаем текст до позиции курсора
-        try:
-            text = self.work_desc_entry.get("1.0", "insert")
-        except:
-            self.hide_keyword_listbox()
-            return
-
-        # Находим последнее слово (после пробела, запятой или новой строки)
-        words = re.split(r'[\s,\n]+', text)
-        last_word = words[-1] if words else ""
-
-        if len(last_word) < 1:
-            self.hide_keyword_listbox()
-            return
-
-        keywords = self.db.search_keywords(last_word)
-        if keywords:
-            self.show_keyword_listbox(keywords)
-        else:
-            self.hide_keyword_listbox()
-
-    def show_keyword_listbox(self, keywords):
-        """Показать список ключевых слов"""
-        self.keyword_listbox.delete(0, tk.END)
-        for keyword in keywords:
-            self.keyword_listbox.insert(tk.END, keyword)
-        if not self.keyword_listbox_visible:
-            self.keyword_listbox.pack(side=tk.LEFT, padx=5)
-            self.keyword_listbox_visible = True
-        # Возвращаем фокус на поле ввода
-        self.work_desc_entry.focus_set()
-
-    def hide_keyword_listbox(self):
-        """Скрыть список ключевых слов"""
-        if self.keyword_listbox_visible:
-            self.keyword_listbox.pack_forget()
-            self.keyword_listbox_visible = False
-
-    def on_keyword_select(self, event):
-        """Обработчик выбора ключевого слова из списка"""
-        selection = self.keyword_listbox.curselection()
-        if selection:
-            keyword = self.keyword_listbox.get(selection[0])
-
-            # Получаем весь текст для проверки дубликатов
-            try:
-                full_text = self.work_desc_entry.get("1.0", tk.END).lower()
-            except:
-                return
-
-            # Проверяем, есть ли уже это слово в тексте
-            if keyword.lower() in full_text:
-                messagebox.showinfo("Внимание", f"Слово '{keyword}' уже используется!")
-                self.hide_keyword_listbox()
-                self.work_desc_entry.focus_set()
-                return
-
-            # Получаем текущий текст и позицию курсора
-            try:
-                text = self.work_desc_entry.get("1.0", "insert")
-            except:
-                return
-
-            # Находим последнее слово и заменяем его
-            words = re.split(r'([\s,\n]+)', text)
-            if words:
-                # Удаляем последнее непустое слово
-                while words and (not words[-1] or re.match(r'^[\s,\n]+$', words[-1])):
-                    words.pop()
-                if words:
-                    words.pop()  # Удаляем последнее слово
-
-            # Собираем новый текст с запятой после ключевого слова
-            new_text = ''.join(words) + keyword + ", "
-
-            # Заменяем текст в поле
-            self.work_desc_entry.delete("1.0", tk.END)
-            self.work_desc_entry.insert("1.0", new_text)
-
-            # Перемещаем курсор в конец
-            self.work_desc_entry.see(tk.END)
-
-            self.hide_keyword_listbox()
-
-    def on_description_focus_out(self, event):
-        """Скрыть список при потере фокуса"""
-        def check_and_hide():
-            # Проверяем, что фокус не в keyword_listbox и не в work_desc_entry
-            try:
-                focused = self.root.focus_get()
-                if focused != self.keyword_listbox and focused != self.work_desc_entry._textbox:
-                    self.hide_keyword_listbox()
-            except:
-                self.hide_keyword_listbox()
-        self.root.after(200, check_and_hide)
 
     def refresh_workers_combo(self):
         """Обновить выпадающий список работников"""
@@ -3001,6 +1431,78 @@ class AutoServiceApp:
         # Обновляем общую стоимость
         self.update_total_cost()
 
+    def add_work_to_list(self):
+        """Добавить работу в список"""
+        work_name = self.work_name_entry.get().strip()
+        if not work_name:
+            messagebox.showwarning("Внимание", "Введите название работы!")
+            return
+        try:
+            work_price = float(self.work_price_entry.get().replace(',', '.'))
+            if work_price <= 0:
+                raise ValueError()
+        except ValueError:
+            messagebox.showwarning("Внимание", "Введите корректную цену работы!")
+            return
+
+        self.works_list.append((work_name, work_price))
+        self.works_tree.insert("", tk.END, values=(work_name, self.format_currency(work_price)))
+        self.work_name_entry.delete(0, tk.END)
+        self.work_price_entry.delete(0, tk.END)
+
+    def remove_work_from_list(self):
+        """Удалить работу из списка"""
+        selected = self.works_tree.selection()
+        if not selected:
+            messagebox.showwarning("Внимание", "Выберите работу для удаления!")
+            return
+        item_index = self.works_tree.index(selected[0])
+        del self.works_list[item_index]
+        self.works_tree.delete(selected[0])
+
+    def on_work_name_keyrelease(self, event):
+        text = self.work_name_entry.get().strip()
+        if len(text) < 1:
+            self.hide_work_keyword_listbox()
+            return
+        keywords = self.db.search_keywords(text)
+        if keywords:
+            self.show_work_keyword_listbox(keywords)
+        else:
+            self.hide_work_keyword_listbox()
+
+    def show_work_keyword_listbox(self, keywords):
+        self.work_keyword_listbox.delete(0, tk.END)
+        for kw in keywords:
+            self.work_keyword_listbox.insert(tk.END, kw)
+        if not self.work_keyword_listbox_visible:
+            self.work_keyword_listbox.pack(side=tk.LEFT, padx=5)
+            self.work_keyword_listbox_visible = True
+
+    def hide_work_keyword_listbox(self):
+        if self.work_keyword_listbox_visible:
+            self.work_keyword_listbox.pack_forget()
+            self.work_keyword_listbox_visible = False
+
+    def on_work_keyword_select(self, event):
+        selection = self.work_keyword_listbox.curselection()
+        if selection:
+            keyword = self.work_keyword_listbox.get(selection[0])
+            self.work_name_entry.delete(0, tk.END)
+            self.work_name_entry.insert(0, keyword)
+            self.hide_work_keyword_listbox()
+            self.work_name_entry.focus_set()
+
+    def on_work_name_focus_out(self, event):
+        def check_and_hide():
+            try:
+                focused = self.root.focus_get()
+                if focused != self.work_keyword_listbox:
+                    self.hide_work_keyword_listbox()
+            except:
+                self.hide_work_keyword_listbox()
+        self.root.after(200, check_and_hide)
+
     def update_total_cost(self):
         """Обновить общую стоимость работы + запчасти"""
         # Метод оставлен для совместимости, но больше ничего не отображает
@@ -3013,18 +1515,12 @@ class AutoServiceApp:
             messagebox.showwarning("Внимание", "Выберите мастера!")
             return
 
-        description = self.work_desc_entry.get("1.0", "end-1c").strip().rstrip(',').strip()
-        if not description:
-            messagebox.showwarning("Внимание", "Введите описание работы!")
+        if not self.works_list:
+            messagebox.showwarning("Внимание", "Добавьте хотя бы одну работу!")
             return
 
-        try:
-            amount = float(self.amount_entry.get().replace(',', '.'))
-            if amount <= 0:
-                raise ValueError()
-        except ValueError:
-            messagebox.showwarning("Внимание", "Введите корректную сумму!")
-            return
+        description = "\n".join(name for name, _ in self.works_list)
+        amount = sum(price for _, price in self.works_list)
 
         worker_id = self.workers_data[selected_worker]
         car_brand = self.car_brand_entry.get().strip()
@@ -3075,7 +1571,8 @@ class AutoServiceApp:
             client_id = self.db.get_or_create_client(
                 telegram_user_id=telegram_user_id,
                 full_name=client_name,
-                phone=client_phone
+                phone=client_phone,
+                car_number=car_number
             )
             car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number) if client_id else None
 
@@ -3188,7 +1685,8 @@ class AutoServiceApp:
                     new_client_id = self.db.get_or_create_client(
                         telegram_user_id=tg_user_id if tg_user_id else None,
                         full_name=client_name,
-                        phone=client_phone
+                        phone=client_phone,
+                        car_number=car_number
                     )
                     new_car_id = self.db.get_or_create_car(new_client_id, car_brand, car_model, car_number) if new_client_id else None
 
@@ -3205,7 +1703,8 @@ class AutoServiceApp:
             client_id = self.db.get_or_create_client(
                 telegram_user_id=telegram_user_id,
                 full_name=client_name,
-                phone=client_phone
+                phone=client_phone,
+                car_number=car_number
             )
             car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number) if client_id else None
 
@@ -3227,8 +1726,9 @@ class AutoServiceApp:
 
     def clear_work_form(self):
         """Очистить форму добавления работы"""
-        self.work_desc_entry.delete("1.0", "end")
-        self.amount_entry.delete(0, tk.END)
+        self.works_list = []
+        for item in self.works_tree.get_children():
+            self.works_tree.delete(item)
         self.car_brand_entry.delete(0, tk.END)
         self.car_model_entry.delete(0, tk.END)
         self.car_number_entry.delete(0, tk.END)
@@ -3249,6 +1749,708 @@ class AutoServiceApp:
 
         # Обновляем общую стоимость
         self.update_total_cost()
+
+    # ===== ВКЛАДКА СКЛАДА =====
+
+    def setup_warehouse_tab(self):
+        """Настройка вкладки склада запчастей"""
+        # Верхняя панель с кнопками
+        top_frame = ctk.CTkFrame(self.warehouse_frame)
+        top_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        # Заголовок
+        ctk.CTkLabel(top_frame, text="Склад запчастей", font=ctk.CTkFont(size=20, weight="bold")).pack(side=tk.LEFT, padx=10)
+
+        # Кнопка заказать запчасть
+        ctk.CTkButton(top_frame, text="Заказать запчасть", command=self.show_add_part_form,
+                     fg_color="#1565c0", hover_color="#0d47a1", width=160).pack(side=tk.RIGHT, padx=10)
+
+        # Кнопка обновить
+        ctk.CTkButton(top_frame, text="Обновить", command=self.refresh_warehouse,
+                     width=100).pack(side=tk.RIGHT, padx=5)
+
+        # Фильтр по статусу
+        filter_frame = ctk.CTkFrame(self.warehouse_frame)
+        filter_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        ctk.CTkLabel(filter_frame, text="Статус:").pack(side=tk.LEFT, padx=5)
+        self.warehouse_status_var = tk.StringVar(value="Все")
+        status_combo = ctk.CTkComboBox(filter_frame, variable=self.warehouse_status_var,
+                                        values=["Все", "В пути", "На складе", "Выдано"],
+                                        width=140, command=lambda x: self.refresh_warehouse())
+        status_combo.pack(side=tk.LEFT, padx=5)
+
+        # Поиск по госномеру
+        ctk.CTkLabel(filter_frame, text="Госномер:").pack(side=tk.LEFT, padx=(20, 5))
+        self.warehouse_search_entry = ctk.CTkEntry(filter_frame, width=150, placeholder_text="Поиск...")
+        self.warehouse_search_entry.pack(side=tk.LEFT, padx=5)
+        self.warehouse_search_entry.bind("<Return>", lambda e: self.refresh_warehouse())
+        ctk.CTkButton(filter_frame, text="✕", command=self.clear_warehouse_search,
+                     width=30, fg_color="#c62828", hover_color="#b71c1c").pack(side=tk.LEFT, padx=2)
+
+        # Таблица запчастей
+        table_frame = ctk.CTkFrame(self.warehouse_frame)
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        columns = ("id", "car_info", "client", "part_name", "quantity", "price", "status", "order_date", "received_date", "notes")
+        self.warehouse_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
+
+        self.warehouse_tree.heading("id", text="ID")
+        self.warehouse_tree.heading("car_info", text="Автомобиль")
+        self.warehouse_tree.heading("client", text="Клиент")
+        self.warehouse_tree.heading("part_name", text="Запчасть")
+        self.warehouse_tree.heading("quantity", text="Кол-во")
+        self.warehouse_tree.heading("price", text="Цена")
+        self.warehouse_tree.heading("status", text="Статус")
+        self.warehouse_tree.heading("order_date", text="Дата заказа")
+        self.warehouse_tree.heading("received_date", text="Дата прихода")
+        self.warehouse_tree.heading("notes", text="Примечания")
+
+        self.warehouse_tree.column("id", width=0, stretch=False, minwidth=0)
+        self.warehouse_tree.column("car_info", width=180)
+        self.warehouse_tree.column("client", width=130)
+        self.warehouse_tree.column("part_name", width=200)
+        self.warehouse_tree.column("quantity", width=50)
+        self.warehouse_tree.column("price", width=90)
+        self.warehouse_tree.column("status", width=90)
+        self.warehouse_tree.column("order_date", width=90)
+        self.warehouse_tree.column("received_date", width=90)
+        self.warehouse_tree.column("notes", width=120)
+
+        scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.warehouse_tree.yview)
+        self.warehouse_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.warehouse_tree.pack(fill=tk.BOTH, expand=True)
+
+        # Настройка цветов для статусов
+        self.warehouse_tree.tag_configure("в пути", background="#e3f2fd", foreground="#1565c0")
+        self.warehouse_tree.tag_configure("на складе", background="#e8f5e9", foreground="#2e7d32")
+        self.warehouse_tree.tag_configure("выдано", background="#f3e5f5", foreground="#7b1fa2")
+
+        # Добавляем tooltip для запчастей
+        TreeviewTooltip(self.warehouse_tree, columns=["part_name", "notes"])
+
+        # Контекстное меню для редактирования
+        self.warehouse_context_menu = tk.Menu(self.warehouse_tree, tearoff=0)
+        self.warehouse_context_menu.add_command(label="Редактировать", command=self.edit_warehouse_part)
+        self.warehouse_context_menu.add_separator()
+        self.warehouse_context_menu.add_command(label="На склад", command=lambda: self.update_part_status("на складе"))
+        self.warehouse_context_menu.add_command(label="Выдано", command=lambda: self.update_part_status("выдано"))
+        self.warehouse_context_menu.add_separator()
+        self.warehouse_context_menu.add_command(label="Удалить", command=self.delete_warehouse_part)
+
+        def show_warehouse_context_menu(event):
+            # Выбираем строку под курсором
+            item = self.warehouse_tree.identify_row(event.y)
+            if item:
+                self.warehouse_tree.selection_set(item)
+                self.warehouse_context_menu.tk_popup(event.x_root, event.y_root)
+
+        self.warehouse_tree.bind("<Button-3>", show_warehouse_context_menu)
+
+        # Нижняя панель с кнопками действий
+        actions_frame = ctk.CTkFrame(self.warehouse_frame)
+        actions_frame.pack(pady=10)
+
+        ctk.CTkButton(actions_frame, text="На склад", command=lambda: self.update_part_status("на складе"),
+                     fg_color="#2e7d32", hover_color="#1b5e20", width=100).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(actions_frame, text="Выдано", command=lambda: self.update_part_status("выдано"),
+                     fg_color="#7b1fa2", hover_color="#6a1b9a", width=100).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(actions_frame, text="Удалить", command=self.delete_warehouse_part,
+                     fg_color="#c62828", hover_color="#b71c1c", width=100).pack(side=tk.LEFT, padx=5)
+
+        # Форма добавления запчасти (скрыта по умолчанию)
+        self.add_part_form_frame = ctk.CTkFrame(self.warehouse_frame)
+        self.add_part_form_visible = False
+
+    def show_add_part_form(self):
+        """Показать форму добавления запчасти"""
+        if self.add_part_form_visible:
+            self.hide_add_part_form()
+            return
+
+        self.add_part_form_frame = ctk.CTkToplevel(self.root)
+        self.add_part_form_frame.title("Заказать запчасть")
+        self.add_part_form_frame.geometry("550x500")
+        self.add_part_form_frame.transient(self.root)
+        self.add_part_form_frame.grab_set()
+
+        # Центрируем окно
+        self.add_part_form_frame.update_idletasks()
+        x = (self.add_part_form_frame.winfo_screenwidth() - 550) // 2
+        y = (self.add_part_form_frame.winfo_screenheight() - 500) // 2
+        self.add_part_form_frame.geometry(f"+{x}+{y}")
+
+        # Прокручиваемый контейнер
+        form_container = ctk.CTkScrollableFrame(self.add_part_form_frame)
+        form_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        ctk.CTkLabel(form_container, text="Заказ запчасти", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(0, 20))
+
+        # Госномер с поиском
+        row1 = ctk.CTkFrame(form_container)
+        row1.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row1, text="Госномер:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.wh_car_number_entry = ctk.CTkEntry(row1, width=150, fg_color="white", text_color="black")
+        self.wh_car_number_entry.pack(side=tk.LEFT, padx=5)
+        self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
+        self.wh_car_number_entry.bind('<Return>', lambda e: self.search_car_for_warehouse())
+        ctk.CTkButton(row1, text="Найти", command=self.search_car_for_warehouse, width=70).pack(side=tk.LEFT, padx=5)
+
+        # Информация о найденной машине
+        self.wh_car_info_label = ctk.CTkLabel(form_container, text="", text_color="gray")
+        self.wh_car_info_label.pack(fill=tk.X, padx=(10, 10), anchor="w")
+        self.wh_selected_car_id = None  # Сохраняем car_id
+
+        # Фрейм для новой машины (скрыт по умолчанию)
+        self.wh_new_car_frame = ctk.CTkFrame(form_container, fg_color=("gray90", "gray20"))
+        self.wh_new_car_visible = False
+
+        # Поля для новой машины
+        ctk.CTkLabel(self.wh_new_car_frame, text="Новая машина и клиент",
+                    font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 5))
+
+        row_brand = ctk.CTkFrame(self.wh_new_car_frame)
+        row_brand.pack(fill=tk.X, pady=3, padx=10)
+        ctk.CTkLabel(row_brand, text="Марка:", width=100, anchor="w").pack(side=tk.LEFT)
+        self.wh_new_brand_entry = ctk.CTkEntry(row_brand, width=200, fg_color="white", text_color="black")
+        self.wh_new_brand_entry.pack(side=tk.LEFT, padx=5)
+        self.wh_new_brand_entry.bind('<KeyRelease>', self.on_wh_brand_keyrelease)
+        self.wh_new_brand_entry.bind('<FocusOut>', self.on_wh_brand_focus_out)
+
+        # Listbox для автокомплита марки (склад)
+        self.wh_brand_listbox = tk.Listbox(row_brand, height=5, width=25, takefocus=False)
+        self.wh_brand_listbox_visible = False
+        self.wh_brand_listbox.bind('<<ListboxSelect>>', self.on_wh_brand_select)
+
+        row_model = ctk.CTkFrame(self.wh_new_car_frame)
+        row_model.pack(fill=tk.X, pady=3, padx=10)
+        ctk.CTkLabel(row_model, text="Модель:", width=100, anchor="w").pack(side=tk.LEFT)
+        self.wh_new_model_entry = ctk.CTkEntry(row_model, width=200, fg_color="white", text_color="black")
+        self.wh_new_model_entry.pack(side=tk.LEFT, padx=5)
+        self.wh_new_model_entry.bind('<KeyRelease>', self.on_wh_model_keyrelease)
+        self.wh_new_model_entry.bind('<FocusOut>', self.on_wh_model_focus_out)
+
+        # Listbox для автокомплита модели (склад)
+        self.wh_model_listbox = tk.Listbox(row_model, height=5, width=25, takefocus=False)
+        self.wh_model_listbox_visible = False
+        self.wh_model_listbox.bind('<<ListboxSelect>>', self.on_wh_model_select)
+
+        row_client = ctk.CTkFrame(self.wh_new_car_frame)
+        row_client.pack(fill=tk.X, pady=3, padx=10)
+        ctk.CTkLabel(row_client, text="Имя клиента:", width=100, anchor="w").pack(side=tk.LEFT)
+        self.wh_new_client_name_entry = ctk.CTkEntry(row_client, width=200, fg_color="white", text_color="black")
+        self.wh_new_client_name_entry.pack(side=tk.LEFT, padx=5)
+
+        row_phone = ctk.CTkFrame(self.wh_new_car_frame)
+        row_phone.pack(fill=tk.X, pady=3, padx=10)
+        ctk.CTkLabel(row_phone, text="Телефон:", width=100, anchor="w").pack(side=tk.LEFT)
+
+        # Валидация телефона: +7 и только 10 цифр после
+        def validate_wh_phone(new_value):
+            if len(new_value) < 2:
+                return False
+            if not new_value.startswith("+7"):
+                return False
+            if new_value == "+7":
+                return True
+            after_prefix = new_value[2:]
+            if not after_prefix.isdigit():
+                return False
+            if len(after_prefix) > 10:
+                return False
+            return True
+
+        vcmd_phone = (self.add_part_form_frame.register(validate_wh_phone), '%P')
+        self.wh_new_phone_entry = ctk.CTkEntry(row_phone, width=200, fg_color="white", text_color="black",
+                                                validate="key", validatecommand=vcmd_phone)
+        self.wh_new_phone_entry.pack(side=tk.LEFT, padx=5, pady=(0, 10))
+        self.wh_new_phone_entry.insert(0, "+7")
+
+        # Название запчасти
+        row2 = ctk.CTkFrame(form_container)
+        row2.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row2, text="Запчасть:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.wh_part_name_entry = ctk.CTkEntry(row2, width=300, fg_color="white", text_color="black")
+        self.wh_part_name_entry.pack(side=tk.LEFT, padx=5)
+
+        # Количество
+        row3 = ctk.CTkFrame(form_container)
+        row3.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row3, text="Количество:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.wh_quantity_entry = ctk.CTkEntry(row3, width=100, fg_color="white", text_color="black")
+        self.wh_quantity_entry.pack(side=tk.LEFT, padx=5)
+        self.wh_quantity_entry.insert(0, "1")
+
+        # Цена
+        row4 = ctk.CTkFrame(form_container)
+        row4.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row4, text="Цена:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.wh_price_entry = ctk.CTkEntry(row4, width=150, fg_color="white", text_color="black")
+        self.wh_price_entry.pack(side=tk.LEFT, padx=5)
+
+        # Примечания
+        row5 = ctk.CTkFrame(form_container)
+        row5.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row5, text="Примечания:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.wh_notes_entry = ctk.CTkEntry(row5, width=300, fg_color="white", text_color="black")
+        self.wh_notes_entry.pack(side=tk.LEFT, padx=5)
+
+        # Кнопки
+        buttons_frame = ctk.CTkFrame(form_container, fg_color="transparent")
+        buttons_frame.pack(pady=20)
+
+        ctk.CTkButton(buttons_frame, text="Заказать", command=self.add_warehouse_part,
+                     fg_color="#2e7d32", hover_color="#1b5e20", width=120).pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(buttons_frame, text="Отмена", command=self.hide_add_part_form,
+                     fg_color="#757575", hover_color="#616161", width=120).pack(side=tk.LEFT, padx=10)
+
+        self.add_part_form_visible = True
+
+    def search_car_for_warehouse(self):
+        """Поиск машины по госномеру для склада"""
+        car_number = self.wh_car_number_entry.get().strip()
+        if not car_number:
+            self.wh_car_info_label.configure(text="Введите госномер", text_color="orange")
+            self.wh_selected_car_id = None
+            self.hide_new_car_form()
+            return
+
+        car_info = self.db.get_car_info_by_number(car_number)
+        if car_info:
+            self.wh_selected_car_id = car_info.get("car_id")
+            info_text = f"{car_info.get('car_brand', '')} {car_info.get('car_model', '')} | {car_info.get('client_name', 'Без имени')} | {car_info.get('client_phone', '')}"
+            self.wh_car_info_label.configure(text=info_text, text_color="green")
+            self.hide_new_car_form()
+        else:
+            self.wh_selected_car_id = None
+            self.wh_car_info_label.configure(text="Машина не найдена — заполните данные ниже", text_color="orange")
+            self.show_new_car_form()
+
+    def show_new_car_form(self):
+        """Показать форму для новой машины"""
+        if not self.wh_new_car_visible:
+            self.wh_new_car_frame.pack(fill=tk.X, pady=10, after=self.wh_car_info_label)
+            self.wh_new_car_visible = True
+            # Автоматически заполняем госномер
+            car_number = self.wh_car_number_entry.get().strip().upper()
+            # Увеличиваем окно
+            self.add_part_form_frame.geometry("550x620")
+
+    def hide_new_car_form(self):
+        """Скрыть форму для новой машины"""
+        if self.wh_new_car_visible:
+            self.wh_new_car_frame.pack_forget()
+            self.wh_new_car_visible = False
+            self.add_part_form_frame.geometry("550x500")
+
+    # === Автокомплит для марки (форма склада) ===
+    def on_wh_brand_keyrelease(self, event):
+        """Обработчик ввода текста для марки (склад)"""
+        if event.keysym in ('Up', 'Down', 'Return', 'Escape'):
+            return
+
+        search_text = self.wh_new_brand_entry.get().strip()
+        if len(search_text) < 1:
+            self.hide_wh_brand_listbox()
+            return
+
+        brands = self.db.search_car_brands(search_text)
+        if brands:
+            self.show_wh_brand_listbox(brands)
+        else:
+            self.hide_wh_brand_listbox()
+
+    def show_wh_brand_listbox(self, brands):
+        """Показать список марок (склад)"""
+        self.wh_brand_listbox.delete(0, tk.END)
+        for brand in brands:
+            self.wh_brand_listbox.insert(tk.END, brand)
+        if not self.wh_brand_listbox_visible:
+            self.wh_brand_listbox.pack(side=tk.LEFT, padx=5)
+            self.wh_brand_listbox_visible = True
+
+    def hide_wh_brand_listbox(self):
+        """Скрыть список марок (склад)"""
+        if self.wh_brand_listbox_visible:
+            self.wh_brand_listbox.pack_forget()
+            self.wh_brand_listbox_visible = False
+
+    def on_wh_brand_select(self, event):
+        """Обработчик выбора марки из списка (склад)"""
+        selection = self.wh_brand_listbox.curselection()
+        if selection:
+            brand = self.wh_brand_listbox.get(selection[0])
+            self.wh_new_brand_entry.delete(0, tk.END)
+            self.wh_new_brand_entry.insert(0, brand)
+            self.hide_wh_brand_listbox()
+
+            # Автоматически показываем все модели выбранной марки
+            models = self.db.search_car_models(brand, "")
+            if models:
+                self.wh_new_model_entry.delete(0, tk.END)
+                self.show_wh_model_listbox(models)
+                self.wh_new_model_entry.focus_set()
+
+    def on_wh_brand_focus_out(self, event):
+        """Скрыть список при потере фокуса (склад)"""
+        self.root.after(200, self.hide_wh_brand_listbox)
+
+    # === Автокомплит для модели (форма склада) ===
+    def on_wh_model_keyrelease(self, event):
+        """Обработчик ввода текста для модели (склад)"""
+        if event.keysym in ('Up', 'Down', 'Return', 'Escape'):
+            return
+
+        brand = self.wh_new_brand_entry.get().strip()
+        if not brand:
+            self.hide_wh_model_listbox()
+            return
+
+        search_text = self.wh_new_model_entry.get().strip()
+        models = self.db.search_car_models(brand, search_text)
+        if models:
+            self.show_wh_model_listbox(models)
+        else:
+            self.hide_wh_model_listbox()
+
+    def show_wh_model_listbox(self, models):
+        """Показать список моделей (склад)"""
+        self.wh_model_listbox.delete(0, tk.END)
+        for model in models:
+            self.wh_model_listbox.insert(tk.END, model)
+        if not self.wh_model_listbox_visible:
+            self.wh_model_listbox.pack(side=tk.LEFT, padx=5)
+            self.wh_model_listbox_visible = True
+
+    def hide_wh_model_listbox(self):
+        """Скрыть список моделей (склад)"""
+        if self.wh_model_listbox_visible:
+            self.wh_model_listbox.pack_forget()
+            self.wh_model_listbox_visible = False
+
+    def on_wh_model_select(self, event):
+        """Обработчик выбора модели из списка (склад)"""
+        selection = self.wh_model_listbox.curselection()
+        if selection:
+            model = self.wh_model_listbox.get(selection[0])
+            self.wh_new_model_entry.delete(0, tk.END)
+            self.wh_new_model_entry.insert(0, model)
+            self.hide_wh_model_listbox()
+
+    def on_wh_model_focus_out(self, event):
+        """Скрыть список при потере фокуса (склад)"""
+        self.root.after(200, self.hide_wh_model_listbox)
+
+    def hide_add_part_form(self):
+        """Скрыть форму добавления запчасти"""
+        # Скрываем списки автокомплита
+        if hasattr(self, 'wh_brand_listbox_visible'):
+            self.hide_wh_brand_listbox()
+        if hasattr(self, 'wh_model_listbox_visible'):
+            self.hide_wh_model_listbox()
+
+        if hasattr(self, 'add_part_form_frame') and self.add_part_form_frame:
+            self.add_part_form_frame.destroy()
+        self.add_part_form_visible = False
+
+    def add_warehouse_part(self):
+        """Добавить запчасть на склад"""
+        car_number = self.wh_car_number_entry.get().strip().upper()
+        part_name = self.wh_part_name_entry.get().strip()
+        quantity_str = self.wh_quantity_entry.get().strip()
+        price_str = self.wh_price_entry.get().strip()
+        notes = self.wh_notes_entry.get().strip()
+
+        if not part_name:
+            messagebox.showwarning("Внимание", "Введите название запчасти!")
+            return
+
+        try:
+            quantity = int(quantity_str) if quantity_str else 1
+        except ValueError:
+            messagebox.showwarning("Внимание", "Количество должно быть числом!")
+            return
+
+        try:
+            price = float(price_str.replace(",", ".")) if price_str else None
+        except ValueError:
+            messagebox.showwarning("Внимание", "Цена должна быть числом!")
+            return
+
+        # Используем car_id если машина найдена
+        car_id = self.wh_selected_car_id if hasattr(self, 'wh_selected_car_id') else None
+
+        # Если госномер введён, но машина не найдена — пробуем найти автоматически
+        if car_number and car_id is None:
+            car_info = self.db.get_car_info_by_number(car_number)
+            if car_info:
+                car_id = car_info.get("car_id")
+                self.wh_selected_car_id = car_id
+
+        # Если машина не найдена и форма новой машины видна — создаём клиента и машину
+        if car_id is None and self.wh_new_car_visible and car_number:
+            brand = self.wh_new_brand_entry.get().strip()
+            model = self.wh_new_model_entry.get().strip()
+            client_name = self.wh_new_client_name_entry.get().strip()
+            phone = self.wh_new_phone_entry.get().strip()
+
+            if not brand:
+                messagebox.showwarning("Внимание", "Введите марку машины!")
+                return
+
+            # Проверка телефона: должен быть +7 и 10 цифр
+            if phone == "+7" or len(phone) < 12:
+                messagebox.showwarning("Внимание", "Введите номер телефона полностью!\nПример: +79091234567")
+                return
+
+            # Создаём или находим клиента
+            client_id = self.db.get_or_create_client(
+                full_name=client_name if client_name else None,
+                phone=phone if phone else None,
+                car_number=car_number
+            )
+
+            # Создаём машину
+            car_id = self.db.get_or_create_car(
+                client_id=client_id,
+                car_brand=brand,
+                car_model=model if model else "",
+                car_number=car_number
+            )
+
+        # Предупреждение: госномер введён, но машина не привязана
+        if car_number and car_id is None:
+            result = messagebox.askyesno(
+                "Внимание",
+                f"Госномер '{car_number}' не найден в базе.\n\n"
+                "Добавить запчасть без привязки к машине?"
+            )
+            if not result:
+                return
+
+        self.db.add_warehouse_part(
+            car_id=car_id,
+            part_name=part_name,
+            quantity=quantity,
+            price=price,
+            notes=notes if notes else None
+        )
+
+        messagebox.showinfo("Успех", "Запчасть добавлена в заказы!")
+        self.hide_add_part_form()
+        self.refresh_warehouse()
+
+    def refresh_warehouse(self):
+        """Обновить список запчастей на складе"""
+        # Очистка таблицы
+        for item in self.warehouse_tree.get_children():
+            self.warehouse_tree.delete(item)
+
+        # Получение фильтра по статусу
+        status_filter = self.warehouse_status_var.get() if hasattr(self, 'warehouse_status_var') else "Все"
+        status_map = {"Все": None, "В пути": "в пути", "На складе": "на складе", "Выдано": "выдано"}
+        status = status_map.get(status_filter, None)
+
+        # Поиск по госномеру
+        search_query = self.warehouse_search_entry.get().strip().upper() if hasattr(self, 'warehouse_search_entry') else ""
+
+        # Получение данных (новая структура с JOIN)
+        parts = self.db.get_all_warehouse_parts(status=status)
+
+        for part in parts:
+            # Новая структура: id, car_number, car_brand, car_model, client_name, client_phone,
+            #                  part_name, quantity, price, status, order_date, received_date, notes, car_id
+            part_id, car_number, car_brand, car_model, client_name, client_phone, \
+                part_name, quantity, price, part_status, order_date, received_date, notes, car_id = part
+
+            # Фильтрация по госномеру
+            if search_query and (not car_number or search_query not in car_number.upper()):
+                continue
+
+            # Форматирование информации о машине
+            car_info = f"{car_number or ''} {car_brand or ''} {car_model or ''}".strip() or "-"
+
+            # Форматирование информации о клиенте
+            client_info = client_name or "-"
+
+            # Форматирование дат
+            order_date_str = order_date.strftime("%d.%m.%Y") if order_date else "-"
+            received_date_str = received_date.strftime("%d.%m.%Y") if received_date else "-"
+
+            # Форматирование цены
+            price_str = self.format_currency(float(price)) if price else "-"
+
+            self.warehouse_tree.insert("", tk.END, values=(
+                part_id,
+                car_info,
+                client_info,
+                part_name,
+                quantity,
+                price_str,
+                part_status,
+                order_date_str,
+                received_date_str,
+                notes or "-"
+            ), tags=(part_status,))
+
+    def clear_warehouse_search(self):
+        """Очистить поиск по складу"""
+        self.warehouse_search_entry.delete(0, tk.END)
+        self.refresh_warehouse()
+
+    def update_part_status(self, new_status):
+        """Обновить статус выбранной запчасти"""
+        selection = self.warehouse_tree.selection()
+        if not selection:
+            messagebox.showwarning("Внимание", "Выберите запчасть из списка!")
+            return
+
+        values = self.warehouse_tree.item(selection[0], "values")
+        part_id = int(values[0])
+
+        # Если статус "на складе", устанавливаем дату прихода
+        received_date = None
+        if new_status == "на складе":
+            from datetime import date
+            received_date = date.today()
+
+        self.db.update_warehouse_part_status(part_id, new_status, received_date)
+        self.refresh_warehouse()
+
+    def edit_warehouse_part(self):
+        """Редактировать выбранную запчасть"""
+        selection = self.warehouse_tree.selection()
+        if not selection:
+            messagebox.showwarning("Внимание", "Выберите запчасть из списка!")
+            return
+
+        values = self.warehouse_tree.item(selection[0], "values")
+        part_id = int(values[0])
+
+        # Получаем данные запчасти из БД
+        part_data = self.db.get_warehouse_part_by_id(part_id)
+        if not part_data:
+            messagebox.showerror("Ошибка", "Запчасть не найдена!")
+            return
+
+        # Создаём окно редактирования
+        edit_window = ctk.CTkToplevel(self.root)
+        edit_window.title("Редактировать запчасть")
+        edit_window.geometry("450x400")
+        edit_window.transient(self.root)
+        edit_window.grab_set()
+
+        # Центрируем окно
+        x = (edit_window.winfo_screenwidth() - 450) // 2
+        y = (edit_window.winfo_screenheight() - 400) // 2
+        edit_window.geometry(f"+{x}+{y}")
+
+        # Форма
+        form_frame = ctk.CTkFrame(edit_window)
+        form_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        ctk.CTkLabel(form_frame, text="Редактирование запчасти",
+                    font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(0, 15))
+
+        # Информация о машине (только для чтения)
+        car_info = f"{part_data.get('car_number', '')} {part_data.get('car_brand', '')} {part_data.get('car_model', '')}".strip()
+        if car_info:
+            ctk.CTkLabel(form_frame, text=f"Авто: {car_info}", text_color="gray").pack(anchor="w", pady=(0, 10))
+
+        # Название запчасти
+        row1 = ctk.CTkFrame(form_frame, fg_color="transparent")
+        row1.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row1, text="Запчасть:", width=100, anchor="w").pack(side=tk.LEFT)
+        part_name_entry = ctk.CTkEntry(row1, width=280, fg_color="white", text_color="black")
+        part_name_entry.pack(side=tk.LEFT)
+        part_name_entry.insert(0, part_data.get('part_name', ''))
+
+        # Количество
+        row2 = ctk.CTkFrame(form_frame, fg_color="transparent")
+        row2.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row2, text="Количество:", width=100, anchor="w").pack(side=tk.LEFT)
+        quantity_entry = ctk.CTkEntry(row2, width=100, fg_color="white", text_color="black")
+        quantity_entry.pack(side=tk.LEFT)
+        quantity_entry.insert(0, str(part_data.get('quantity', 1)))
+
+        # Цена
+        row3 = ctk.CTkFrame(form_frame, fg_color="transparent")
+        row3.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row3, text="Цена:", width=100, anchor="w").pack(side=tk.LEFT)
+        price_entry = ctk.CTkEntry(row3, width=150, fg_color="white", text_color="black")
+        price_entry.pack(side=tk.LEFT)
+        if part_data.get('price'):
+            price_entry.insert(0, str(part_data.get('price')))
+
+        # Статус
+        row4 = ctk.CTkFrame(form_frame, fg_color="transparent")
+        row4.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row4, text="Статус:", width=100, anchor="w").pack(side=tk.LEFT)
+        status_var = tk.StringVar(value=part_data.get('status', 'в пути'))
+        status_combo = ctk.CTkComboBox(row4, variable=status_var,
+                                        values=["в пути", "на складе", "выдано"], width=150)
+        status_combo.pack(side=tk.LEFT)
+
+        # Примечания
+        row5 = ctk.CTkFrame(form_frame, fg_color="transparent")
+        row5.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row5, text="Примечания:", width=100, anchor="w").pack(side=tk.LEFT)
+        notes_entry = ctk.CTkEntry(row5, width=280, fg_color="white", text_color="black")
+        notes_entry.pack(side=tk.LEFT)
+        if part_data.get('notes'):
+            notes_entry.insert(0, part_data.get('notes'))
+
+        def save_changes():
+            new_part_name = part_name_entry.get().strip()
+            if not new_part_name:
+                messagebox.showwarning("Внимание", "Введите название запчасти!")
+                return
+
+            try:
+                new_quantity = int(quantity_entry.get().strip()) if quantity_entry.get().strip() else 1
+            except ValueError:
+                messagebox.showwarning("Внимание", "Количество должно быть числом!")
+                return
+
+            try:
+                price_str = price_entry.get().strip().replace(",", ".")
+                new_price = float(price_str) if price_str else None
+            except ValueError:
+                messagebox.showwarning("Внимание", "Цена должна быть числом!")
+                return
+
+            new_status = status_var.get()
+            new_notes = notes_entry.get().strip() or None
+
+            self.db.update_warehouse_part(part_id, new_part_name, new_quantity, new_price, new_status, new_notes)
+            edit_window.destroy()
+            self.refresh_warehouse()
+            messagebox.showinfo("Успех", "Запчасть обновлена!")
+
+        # Кнопки
+        buttons_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
+        buttons_frame.pack(pady=20)
+
+        ctk.CTkButton(buttons_frame, text="Сохранить", command=save_changes,
+                     fg_color="#2e7d32", hover_color="#1b5e20", width=120).pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(buttons_frame, text="Отмена", command=edit_window.destroy,
+                     fg_color="#757575", hover_color="#616161", width=120).pack(side=tk.LEFT, padx=10)
+
+    def delete_warehouse_part(self):
+        """Удалить выбранную запчасть"""
+        selection = self.warehouse_tree.selection()
+        if not selection:
+            messagebox.showwarning("Внимание", "Выберите запчасть из списка!")
+            return
+
+        values = self.warehouse_tree.item(selection[0], "values")
+        part_id = int(values[0])
+        part_name = values[3]
+
+        if messagebox.askyesno("Подтверждение", f"Удалить запчасть '{part_name}'?"):
+            self.db.delete_warehouse_part(part_id)
+            self.refresh_warehouse()
 
     # ===== ВКЛАДКА ОТЧЁТОВ =====
 
@@ -4949,63 +4151,69 @@ class AutoServiceApp:
         # Слоты времени: каждые 2 часа с 10:00 до 20:00
         TIME_SLOTS = ["10:00", "12:00", "14:00", "16:00", "18:00", "20:00"]
 
+        # Создаём затемняющий оверлей поверх главного окна
+        self.root.update_idletasks()
+        overlay = tk.Toplevel(self.root)
+        overlay.overrideredirect(True)
+        overlay.geometry(f"{self.root.winfo_width()}x{self.root.winfo_height()}+{self.root.winfo_x()}+{self.root.winfo_y()}")
+        overlay.configure(bg="black")
+        overlay.attributes("-alpha", 0.5)
+        overlay.attributes("-topmost", True)
+        overlay.update()
+
         add_window = ctk.CTkToplevel(self.root)
         add_window.title("Записать клиента")
-        add_window.geometry("420x650")
         add_window.transient(self.root)
+        add_window.attributes("-topmost", True)
+
+        # Центрируем окно
+        window_width = 450
+        window_height = 620
+        screen_width = add_window.winfo_screenwidth()
+        screen_height = add_window.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        add_window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        add_window.update()
         add_window.grab_set()
+        add_window.focus_force()
+
+        def on_close():
+            overlay.destroy()
+            add_window.destroy()
+
+        add_window.protocol("WM_DELETE_WINDOW", on_close)
 
         # Основной фрейм
         main_frame = ctk.CTkFrame(add_window)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        # Список найденных авто клиента
-        found_cars = []
+        # Флаг: авто найдено по госномеру
+        car_found_by_number = [False]
+        found_car_id = [None]
 
-        # Телефон (первым для поиска авто)
-        ctk.CTkLabel(main_frame, text="Телефон:", font=("Arial", 13)).pack(anchor="w", pady=(0, 5))
-        phone_entry = ctk.CTkEntry(main_frame, width=200)
-        phone_entry.pack(anchor="w", pady=(0, 15))
-        phone_entry.insert(0, "+7")
-
-        # Имя клиента
-        ctk.CTkLabel(main_frame, text="Имя клиента:", font=("Arial", 13)).pack(anchor="w", pady=(0, 5))
-        name_entry = ctk.CTkEntry(main_frame, width=200)
-        name_entry.pack(anchor="w", pady=(0, 15))
-
-        # Автомобиль
-        ctk.CTkLabel(main_frame, text="Автомобиль:", font=("Arial", 13)).pack(anchor="w", pady=(0, 5))
-        car_combo = ctk.CTkComboBox(main_frame, values=[""], width=350)
-        car_combo.pack(anchor="w", pady=(0, 5))
-        car_combo.set("")
-        car_status_label = ctk.CTkLabel(main_frame, text="", font=("Arial", 11))
+        # === ГОСНОМЕР (первым) ===
+        ctk.CTkLabel(main_frame, text="Госномер:", font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
+        car_number_entry = ctk.CTkEntry(main_frame, width=200, font=("Arial", 14), placeholder_text="А123БВ777")
+        car_number_entry.pack(anchor="w", pady=(0, 5))
+        car_status_label = ctk.CTkLabel(main_frame, text="", font=("Arial", 13))
         car_status_label.pack(anchor="w", pady=(0, 5))
 
-        # Фрейм для ручного ввода авто (изначально скрыт)
-        manual_car_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-
-        def on_car_combo_change(choice):
-            """Обработчик выбора авто из списка"""
-            if choice == "➕ Другое авто":
-                manual_car_frame.pack(anchor="w", pady=(0, 5))
-                car_status_label.configure(text="Введите данные нового авто:", text_color="#1976d2")
-            else:
-                manual_car_frame.pack_forget()
-                car_status_label.configure(text="", text_color="#2e7d32")
-
-        car_combo.configure(command=on_car_combo_change)
+        # === Фрейм для марки/модели (показывается динамически если авто не найдено) ===
+        car_details_frame = ctk.CTkFrame(main_frame, fg_color="#e8f5e9", corner_radius=8, border_width=2, border_color="#4caf50")
+        car_details_visible = [False]
 
         # Флаги видимости listbox
         brand_listbox_visible = [False]
         model_listbox_visible = [False]
 
         # Марка с автокомплитом
-        brand_row = ctk.CTkFrame(manual_car_frame, fg_color="transparent")
-        brand_row.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(brand_row, text="Марка:", width=80, anchor="w").pack(side=tk.LEFT)
-        brand_entry = ctk.CTkEntry(brand_row, width=200)
+        brand_row = ctk.CTkFrame(car_details_frame, fg_color="transparent")
+        brand_row.pack(fill=tk.X, pady=5, padx=10)
+        ctk.CTkLabel(brand_row, text="Марка:", width=80, anchor="w", font=("Arial", 14)).pack(side=tk.LEFT)
+        brand_entry = ctk.CTkEntry(brand_row, width=200, font=("Arial", 14))
         brand_entry.pack(side=tk.LEFT)
-        brand_listbox = tk.Listbox(brand_row, height=5, width=25)
+        brand_listbox = tk.Listbox(brand_row, height=5, width=25, font=("Arial", 12))
 
         def show_brand_list(brands_list):
             brand_listbox.delete(0, tk.END)
@@ -5043,12 +4251,12 @@ class AutoServiceApp:
         brand_listbox.bind('<<ListboxSelect>>', on_brand_select)
 
         # Модель с автокомплитом
-        model_row = ctk.CTkFrame(manual_car_frame, fg_color="transparent")
-        model_row.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(model_row, text="Модель:", width=80, anchor="w").pack(side=tk.LEFT)
-        model_entry = ctk.CTkEntry(model_row, width=200)
+        model_row = ctk.CTkFrame(car_details_frame, fg_color="transparent")
+        model_row.pack(fill=tk.X, pady=5, padx=10)
+        ctk.CTkLabel(model_row, text="Модель:", width=80, anchor="w", font=("Arial", 14)).pack(side=tk.LEFT)
+        model_entry = ctk.CTkEntry(model_row, width=200, font=("Arial", 14))
         model_entry.pack(side=tk.LEFT)
-        model_listbox = tk.Listbox(model_row, height=5, width=25)
+        model_listbox = tk.Listbox(model_row, height=5, width=25, font=("Arial", 12))
 
         def show_model_list(models_list):
             model_listbox.delete(0, tk.END)
@@ -5081,129 +4289,141 @@ class AutoServiceApp:
                 model_entry.delete(0, tk.END)
                 model_entry.insert(0, model_listbox.get(sel[0]))
                 hide_model_list()
-                car_number_entry.focus_set()
+                phone_entry.focus_set()
 
         model_entry.bind('<KeyRelease>', on_model_key)
         model_entry.bind('<FocusIn>', on_model_key)
         model_listbox.bind('<<ListboxSelect>>', on_model_select)
 
-        # Госномер
-        number_row = ctk.CTkFrame(manual_car_frame, fg_color="transparent")
-        number_row.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(number_row, text="Госномер:", width=80, anchor="w").pack(side=tk.LEFT)
-        car_number_entry = ctk.CTkEntry(number_row, width=150, placeholder_text="А123БВ777")
-        car_number_entry.pack(side=tk.LEFT)
+        # === ТЕЛЕФОН ===
+        ctk.CTkLabel(main_frame, text="Телефон:", font=("Arial", 15)).pack(anchor="w", pady=(10, 5))
 
-        def search_client_cars(*args):
-            """Поиск авто и имени клиента по номеру телефона"""
-            nonlocal found_cars
+        def validate_phone(new_value):
+            if len(new_value) < 2:
+                return False
+            if not new_value.startswith("+7"):
+                return False
+            if new_value == "+7":
+                return True
+            after_prefix = new_value[2:]
+            if not after_prefix.isdigit():
+                return False
+            if len(after_prefix) > 10:
+                return False
+            return True
 
-            # Валидация - не даём стереть +7
-            current = phone_entry.get()
-            if not current.startswith("+7"):
-                phone_entry.delete(0, tk.END)
-                phone_entry.insert(0, "+7")
-                return
+        vcmd = (add_window.register(validate_phone), '%P')
+        phone_entry = ctk.CTkEntry(main_frame, width=220, font=("Arial", 14), validate="key", validatecommand=vcmd)
+        phone_entry.pack(anchor="w", pady=(0, 10))
+        phone_entry.insert(0, "+7")
 
-            phone_raw = phone_entry.get().strip()
-            phone_digits = ''.join(c for c in phone_raw if c.isdigit())
+        # === ИМЯ КЛИЕНТА ===
+        ctk.CTkLabel(main_frame, text="Имя клиента:", font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
+        name_entry = ctk.CTkEntry(main_frame, width=220, font=("Arial", 14))
+        name_entry.pack(anchor="w", pady=(0, 10))
 
-            # Теперь номер в формате +79091234567, значит 11 цифр (7 + 10)
-            if len(phone_digits) == 11 and phone_digits.startswith('7'):
-                last_10 = phone_digits[1:]  # Последние 10 цифр
-                # Пробуем разные форматы телефона
-                phone_variants = [
-                    f"+7{last_10}",      # +79091234567
-                    f"7{last_10}",       # 79091234567
-                    f"8{last_10}",       # 89091234567
-                    last_10,             # 9091234567
-                ]
+        def check_car_number(*args):
+            """Проверка госномера - ищем существующее авто и владельца"""
+            car_num = car_number_entry.get().strip().upper()
+            if len(car_num) >= 6:
+                car_info = self.db.get_car_info_by_number(car_num)
+                if car_info:
+                    car_found_by_number[0] = True
+                    found_car_id[0] = car_info.get('car_id')
+                    owner_name = car_info.get('client_name', '')
+                    owner_phone = car_info.get('client_phone', '')
+                    car_brand = car_info.get('car_brand', '')
+                    car_model = car_info.get('car_model', '')
 
-                # Ищем авто по всем вариантам телефона
-                all_cars = []
-                seen_cars = set()  # Для избежания дубликатов
-                for phone_variant in phone_variants:
-                    cars = self.db.get_client_cars_by_phone(phone_variant)
-                    for car in cars:
-                        # car = (brand, model, number)
-                        car_key = (car[0], car[1], car[2])
-                        if car_key not in seen_cars:
-                            seen_cars.add(car_key)
-                            all_cars.append(car)
-                found_cars = all_cars
-                cars = all_cars
+                    # Показываем информацию
+                    info_text = f"✓ Найдено: {car_brand} {car_model}"
+                    if owner_name:
+                        info_text += f" ({owner_name})"
+                    car_status_label.configure(text=info_text, text_color="#2e7d32")
 
-                # Ищем имя клиента
-                client_name = None
-                for phone_variant in phone_variants:
-                    client_name = self.db.get_client_name_by_phone(phone_variant)
-                    if client_name:
-                        break
+                    # Скрываем поля марки/модели
+                    if car_details_visible[0]:
+                        car_details_frame.pack_forget()
+                        car_details_visible[0] = False
+                        add_window.geometry(f"{window_width}x{window_height}")
 
-                # Автозаполнение имени
-                if client_name and not name_entry.get().strip():
-                    name_entry.delete(0, tk.END)
-                    name_entry.insert(0, client_name)
+                    # Заполняем марку/модель (скрытые, но для сохранения)
+                    brand_entry.delete(0, tk.END)
+                    brand_entry.insert(0, car_brand)
+                    model_entry.delete(0, tk.END)
+                    model_entry.insert(0, car_model)
 
-                if len(cars) >= 1:
-                    # Есть авто - показываем список + опция "Другое авто"
-                    car_list = [f"{brand} {model} {number}".strip() for brand, model, number in cars]
-                    car_list.append("➕ Другое авто")
-                    car_combo.configure(values=car_list)
-                    car_combo.set(car_list[0])
-                    car_status_label.configure(text=f"Найдено авто: {len(cars)}", text_color="#2e7d32")
-                    manual_car_frame.pack_forget()
-                    car_combo.pack(anchor="w", pady=(0, 5))
+                    # Автозаполнение телефона и имени (всегда обновляем при нахождении)
+                    if owner_name:
+                        name_entry.delete(0, tk.END)
+                        name_entry.insert(0, owner_name)
+                    if owner_phone:
+                        phone_digits = ''.join(c for c in owner_phone if c.isdigit())
+                        if len(phone_digits) >= 10:
+                            # Временно отключаем валидацию для вставки
+                            phone_entry.configure(validate="none")
+                            phone_entry.delete(0, tk.END)
+                            phone_entry.insert(0, f"+7{phone_digits[-10:]}")
+                            phone_entry.configure(validate="key", validatecommand=vcmd)
                 else:
-                    # Авто не найдено - показываем ручной ввод
-                    car_combo.pack_forget()
-                    car_status_label.configure(text="Авто не найдено - введите данные:", text_color="#c62828")
-                    manual_car_frame.pack(anchor="w", pady=(0, 5))
+                    # Авто не найдено - показываем поля марки/модели, сбрасываем данные
+                    car_found_by_number[0] = False
+                    found_car_id[0] = None
+                    car_status_label.configure(text="Новое авто - введите марку и модель:", text_color="#f57c00")
+                    if not car_details_visible[0]:
+                        car_details_frame.pack(fill=tk.X, pady=(0, 10), after=car_status_label)
+                        car_details_visible[0] = True
+                        add_window.geometry(f"{window_width}x{window_height + 100}")
+                    # Сбрасываем поля марки/модели
+                    brand_entry.delete(0, tk.END)
+                    model_entry.delete(0, tk.END)
             else:
-                found_cars = []
-                car_combo.configure(values=[""])
-                car_combo.set("")
+                car_found_by_number[0] = False
+                found_car_id[0] = None
                 car_status_label.configure(text="")
-                manual_car_frame.pack_forget()
-                car_combo.pack(anchor="w", pady=(0, 5))
+                if car_details_visible[0]:
+                    car_details_frame.pack_forget()
+                    car_details_visible[0] = False
+                    add_window.geometry(f"{window_width}x{window_height}")
+                # Сбрасываем поля марки/модели
+                brand_entry.delete(0, tk.END)
+                model_entry.delete(0, tk.END)
 
-        # Привязываем поиск к изменению поля телефона
-        phone_entry.bind("<KeyRelease>", search_client_cars)
+        car_number_entry.bind("<KeyRelease>", check_car_number)
+        car_number_entry.bind("<FocusOut>", check_car_number)
 
         # Дата
-        ctk.CTkLabel(main_frame, text="Дата:", font=("Arial", 13)).pack(anchor="w", pady=(0, 5))
+        ctk.CTkLabel(main_frame, text="Дата:", font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
         date_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         date_frame.pack(anchor="w", pady=(0, 5))
 
-        # Генерируем даты на 14 дней вперёд
-        from datetime import datetime, timedelta
-        dates = []
-        today = datetime.now().date()
-        for i in range(14):
-            d = today + timedelta(days=i)
-            day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-            day_name = day_names[d.weekday()]
-            dates.append(f"{d.strftime('%d.%m.%Y')} ({day_name})")
-
-        date_combo = ctk.CTkComboBox(date_frame, values=dates, width=200)
-        date_combo.pack(side=tk.LEFT)
-        date_combo.set(dates[0])
+        # Календарь для выбора даты
+        date_entry = DateEntry(
+            date_frame,
+            width=18,
+            background='#1f538d',
+            foreground='white',
+            borderwidth=2,
+            date_pattern='dd.mm.yyyy',
+            locale='ru_RU',
+            mindate=datetime.now().date(),
+            font=("Arial", 12)
+        )
+        date_entry.pack(side=tk.LEFT)
 
         # Время
-        ctk.CTkLabel(main_frame, text="Время:", font=("Arial", 13)).pack(anchor="w", pady=(0, 5))
-        time_combo = ctk.CTkComboBox(main_frame, values=TIME_SLOTS, width=150)
+        ctk.CTkLabel(main_frame, text="Время:", font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
+        time_combo = ctk.CTkComboBox(main_frame, values=TIME_SLOTS, width=150, font=("Arial", 14))
         time_combo.pack(anchor="w", pady=(0, 5))
 
         # Статус (показывает если нет свободных слотов)
-        slot_status_label = ctk.CTkLabel(main_frame, text="", font=("Arial", 11))
+        slot_status_label = ctk.CTkLabel(main_frame, text="", font=("Arial", 13))
         slot_status_label.pack(anchor="w", pady=(0, 5))
 
         def update_available_times(*args):
             """Обновить список доступных слотов времени"""
-            date_str = date_combo.get().split(" ")[0]  # "20.01.2026"
             try:
-                from datetime import datetime
-                booking_date = datetime.strptime(date_str, "%d.%m.%Y").date()
+                booking_date = date_entry.get_date()
 
                 # Показываем все слоты времени (не фильтруем занятые)
                 time_combo.configure(values=TIME_SLOTS)
@@ -5213,60 +4433,44 @@ class AutoServiceApp:
                 time_combo.configure(values=TIME_SLOTS)
                 time_combo.set(TIME_SLOTS[0])
 
-        date_combo.configure(command=lambda x: update_available_times())
+        date_entry.bind("<<DateEntrySelected>>", update_available_times)
         update_available_times()
 
         def save_booking():
             """Сохранить запись"""
             name = name_entry.get().strip()
             phone_raw = phone_entry.get().strip()
-            date_str = date_combo.get().split(" ")[0]
+            date_str = date_entry.get_date().strftime("%d.%m.%Y")
             time_str = time_combo.get()
 
             # Получаем информацию об авто
-            selected_car = car_combo.get().strip()
-            is_new_car = False
-            brand = ""
-            model = ""
-            number = ""
-            existing_car_id = None
-            if selected_car == "➕ Другое авто" or manual_car_frame.winfo_ismapped():
-                # Ручной ввод авто
-                brand = brand_entry.get().strip()
-                model = model_entry.get().strip()
-                number = car_number_entry.get().strip().upper()
-                car_info = f"{brand} {model} {number}".strip()
-                is_new_car = True  # Пометка что это новое авто
-            elif selected_car:
-                # Авто выбрано из списка - извлекаем госномер (последняя часть строки)
-                car_info = selected_car
-                parts = selected_car.split()
-                if parts:
-                    # Госномер - последний элемент
-                    car_number_from_list = parts[-1].upper()
-                    car_data = self.db.get_car_by_number(car_number_from_list)
-                    if car_data:
-                        existing_car_id = car_data.get("id")
-            else:
-                car_info = ""
+            number = car_number_entry.get().strip().upper()
+            brand = brand_entry.get().strip()
+            model = model_entry.get().strip()
+            existing_car_id = found_car_id[0]  # ID найденного авто или None
 
             if not name:
-                messagebox.showwarning("Внимание", "Введите имя клиента!")
+                messagebox.showwarning("Внимание", "Введите имя клиента!", parent=add_window)
                 return
 
-            # Валидация авто - обязательно выбрать или ввести
-            if is_new_car:
-                if not number:
-                    messagebox.showwarning("Внимание", "Введите госномер автомобиля!")
-                    return
-            elif not existing_car_id:
-                messagebox.showwarning("Внимание", "Выберите автомобиль из списка или введите новый!")
+            # Валидация госномера - обязательно
+            if not number:
+                messagebox.showwarning("Внимание", "Введите госномер автомобиля!", parent=add_window)
                 return
+
+            # Если авто не найдено - нужны марка и модель
+            if not car_found_by_number[0]:
+                if not brand:
+                    messagebox.showwarning("Внимание", "Введите марку автомобиля!", parent=add_window)
+                    return
+                if not model:
+                    messagebox.showwarning("Внимание", "Введите модель автомобиля!", parent=add_window)
+                    return
 
             # Валидация телефона - должен быть +7 и 10 цифр после
             phone_digits = ''.join(c for c in phone_raw if c.isdigit())
             if len(phone_digits) != 11 or not phone_digits.startswith('7'):
-                messagebox.showwarning("Внимание", "Введите номер телефона после +7\nПример: +79091234567")
+                messagebox.showwarning("Внимание", "Введите номер телефона после +7\nПример: +79091234567", parent=add_window)
                 return
 
             # Телефон уже в нужном формате
@@ -5277,7 +4481,7 @@ class AutoServiceApp:
                 from datetime import datetime
                 booking_date = datetime.strptime(date_str, "%d.%m.%Y").date()
             except:
-                messagebox.showerror("Ошибка", "Неверный формат даты!")
+                messagebox.showerror("Ошибка", "Неверный формат даты!", parent=add_window)
                 return
 
             # Проверяем доступность
@@ -5298,7 +4502,7 @@ class AutoServiceApp:
                 message += "\nЗаписать клиента на это время?"
 
                 # Спрашиваем пользователя
-                result = messagebox.askyesno("Время занято", message)
+                result = messagebox.askyesno("Время занято", message, parent=add_window)
                 if not result:
                     return
 
@@ -5315,7 +4519,8 @@ class AutoServiceApp:
             client_id = self.db.get_or_create_client(
                 telegram_user_id=tg_user_id if tg_user_id else None,
                 full_name=name,
-                phone=phone
+                phone=phone,
+                car_number=number
             )
 
             # Создаём/находим машину
@@ -5332,20 +4537,20 @@ class AutoServiceApp:
                 car_id=car_id
             )
             if booking_id:
-                messagebox.showinfo("Успех", f"Клиент записан на {date_str} в {time_str}")
-                add_window.destroy()
+                messagebox.showinfo("Успех", f"Клиент записан на {date_str} в {time_str}", parent=add_window)
+                on_close()
                 self.refresh_bookings()
             else:
-                messagebox.showerror("Ошибка", "Не удалось создать запись")
+                messagebox.showerror("Ошибка", "Не удалось создать запись", parent=add_window)
 
-        # Кнопки
-        btn_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        btn_frame.pack(pady=10)
+        # Кнопки (в отдельном фрейме внизу окна, чтобы всегда были под всеми полями)
+        btn_frame = ctk.CTkFrame(add_window, fg_color="transparent")
+        btn_frame.pack(side=tk.BOTTOM, pady=15)
 
         ctk.CTkButton(btn_frame, text="Записать", command=save_booking,
-                     fg_color="#2e7d32", hover_color="#1b5e20", width=120).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(btn_frame, text="Отмена", command=add_window.destroy,
-                     fg_color="#757575", hover_color="#616161", width=120).pack(side=tk.LEFT, padx=5)
+                     fg_color="#2e7d32", hover_color="#1b5e20", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text="Отмена", command=on_close,
+                     fg_color="#757575", hover_color="#616161", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
 
     def show_bookings_context_menu(self, event):
         """Показать контекстное меню для записи"""
@@ -5391,7 +4596,7 @@ class AutoServiceApp:
             return
 
         # Переключаемся на вкладку "Добавить работу"
-        self.notebook.set("Добавить работу")
+        self.switch_tab("works")
 
         # Обновляем список записей в комбобоксе
         self.refresh_bookings_combo()
@@ -5436,7 +4641,7 @@ class AutoServiceApp:
             return
 
         # Переключаемся на вкладку "Добавить работу"
-        self.notebook.set("Добавить работу")
+        self.switch_tab("works")
 
         # Сохраняем booking_id
         self.selected_booking_id = int(booking_id)
@@ -5481,13 +4686,22 @@ class AutoServiceApp:
             self.mileage_entry.delete(0, tk.END)
             self.mileage_entry.insert(0, str(mileage) if mileage else "")
 
-            # Заполняем описание работ
-            self.work_desc_entry.delete("1.0", tk.END)
-            self.work_desc_entry.insert("1.0", description)
-
-            # Заполняем стоимость
-            self.amount_entry.delete(0, tk.END)
-            self.amount_entry.insert(0, str(amount) if amount else "")
+            # Заполняем таблицу работ
+            self.works_list = []
+            for item in self.works_tree.get_children():
+                self.works_tree.delete(item)
+            if description:
+                lines = [l.strip() for l in description.split("\n") if l.strip()]
+                if len(lines) > 1:
+                    # Несколько строк — каждая строка отдельная работа, цена распределяется поровну
+                    price_each = float(amount or 0) / len(lines)
+                    for line in lines:
+                        self.works_list.append((line, price_each))
+                        self.works_tree.insert("", tk.END, values=(line, self.format_currency(price_each)))
+                else:
+                    # Одна строка — одна работа с полной ценой
+                    self.works_list.append((description, float(amount or 0)))
+                    self.works_tree.insert("", tk.END, values=(description, self.format_currency(float(amount or 0))))
 
             # Выбираем мастера
             if worker_id:
