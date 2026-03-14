@@ -1,0 +1,1613 @@
+# -*- coding: utf-8 -*-
+"""
+Telegram бот для автосервиса - единый файл для PyInstaller
+"""
+
+import asyncio
+import logging
+import os
+import re
+import json
+import threading
+import sys
+import subprocess
+from datetime import datetime, timedelta, date as dt_date
+
+import aiohttp
+import aiomysql
+from aiogram import Bot, Dispatcher, Router, F
+
+# System tray
+import pystray
+from PIL import Image, ImageDraw
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from dotenv import load_dotenv
+from pathlib import Path
+
+# ==================== CONFIG ====================
+
+def get_base_path():
+    """Получить базовый путь приложения (работает и для PyInstaller)"""
+    if getattr(sys, 'frozen', False):
+        # Запущено как exe (PyInstaller)
+        return Path(sys.executable).parent
+    else:
+        # Запущено как скрипт
+        return Path(__file__).parent.parent
+
+_base_path = get_base_path()
+
+# Загружаем .env из config/
+_env_path = _base_path / "config" / ".env"
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "database": os.getenv("DB_NAME", "alexauto")
+}
+
+WORKING_HOURS_START = 10
+WORKING_HOURS_END = 20
+SLOT_DURATION = 2
+TIME_SLOTS = [f"{hour:02d}:00" for hour in range(WORKING_HOURS_START, WORKING_HOURS_END + 1, SLOT_DURATION)]
+
+# Загружаем настройки из settings.json
+_settings_path = _base_path / "config" / "settings.json"
+try:
+    with open(_settings_path, "r", encoding="utf-8") as f:
+        _settings = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    _settings = {}
+
+# Данные компании
+COMPANY_NAME = _settings.get("company_name", "Автосервис")
+COMPANY_ADDRESS = _settings.get("company_address", "")
+COMPANY_PHONE = _settings.get("company_phone", "")
+COMPANY_INFO = f"{COMPANY_NAME}\n{COMPANY_ADDRESS}\nТел: {COMPANY_PHONE}"
+
+# Переопределяем из settings.json если есть
+WORKING_HOURS_START = _settings.get("working_hours_start", WORKING_HOURS_START)
+WORKING_HOURS_END = _settings.get("working_hours_end", WORKING_HOURS_END)
+SLOT_DURATION_MINUTES = _settings.get("slot_duration_minutes", 120)
+MAX_BOOKINGS_PER_USER = _settings.get("max_bookings_per_user", 2)
+
+# Генерация слотов времени (поддержка любого интервала в минутах)
+def _generate_time_slots():
+    slots = []
+    start_minutes = WORKING_HOURS_START * 60
+    end_minutes = WORKING_HOURS_END * 60
+    current = start_minutes
+    while current <= end_minutes:
+        hours = current // 60
+        minutes = current % 60
+        slots.append(f"{hours:02d}:{minutes:02d}")
+        current += SLOT_DURATION_MINUTES
+    return slots
+
+TIME_SLOTS = _generate_time_slots()
+
+# ==================== DATABASE ====================
+class Database:
+    def __init__(self):
+        self.pool = None
+
+    async def connect(self):
+        self.pool = await aiomysql.create_pool(
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            db=DB_CONFIG["database"],
+            autocommit=True
+        )
+
+    async def close(self):
+        if self.pool:
+            self.pool.close()
+            await self.pool.wait_closed()
+
+    async def init_tables(self):
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS clients (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        telegram_user_id BIGINT UNIQUE,
+                        tg_username VARCHAR(255),
+                        full_name VARCHAR(255),
+                        phone VARCHAR(50),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_phone (phone)
+                    ) ENGINE=InnoDB
+                """)
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS bookings (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        client_id INT,
+                        car_id INT,
+                        booking_date DATE NOT NULL,
+                        booking_time VARCHAR(10) NOT NULL,
+                        status VARCHAR(20) DEFAULT 'waiting',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_booking_datetime (booking_date, booking_time)
+                    ) ENGINE=InnoDB
+                """)
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS telegraph_pages (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        user_id BIGINT NOT NULL UNIQUE,
+                        page_path VARCHAR(255),
+                        access_token VARCHAR(255),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB
+                """)
+                for alter in [
+                    "ALTER TABLE bookings ADD COLUMN status VARCHAR(20) DEFAULT 'waiting'",
+                    "ALTER TABLE bookings ADD COLUMN client_id INT AFTER id",
+                    "ALTER TABLE bookings ADD COLUMN car_id INT AFTER client_id",
+                    "ALTER TABLE bookings ADD COLUMN reminder_sent BOOLEAN DEFAULT FALSE",
+                    "ALTER TABLE bookings ADD COLUMN reminder_1h_sent BOOLEAN DEFAULT FALSE",
+                ]:
+                    try:
+                        await cur.execute(alter)
+                    except:
+                        pass
+                try:
+                    await cur.execute("ALTER TABLE bookings DROP INDEX unique_booking")
+                except:
+                    pass
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS client_cars (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        client_id INT,
+                        car_brand VARCHAR(100),
+                        car_model VARCHAR(100),
+                        car_number VARCHAR(20),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY unique_car_number (car_number)
+                    ) ENGINE=InnoDB
+                """)
+                try:
+                    await cur.execute("ALTER TABLE client_cars ADD COLUMN client_id INT AFTER id")
+                except:
+                    pass
+                for idx in [
+                    "CREATE INDEX idx_bookings_client_id ON bookings(client_id)",
+                    "CREATE INDEX idx_client_cars_client_id ON client_cars(client_id)",
+                ]:
+                    try:
+                        await cur.execute(idx)
+                    except:
+                        pass
+
+    def _normalize_phone(self, phone: str) -> str | None:
+        if not phone:
+            return None
+        digits = re.sub(r'\D', '', phone)
+        if len(digits) == 11 and digits.startswith('8'):
+            digits = '7' + digits[1:]
+        if len(digits) == 11 and digits.startswith('7'):
+            return '+' + digits
+        if len(digits) == 10:
+            return '+7' + digits
+        return '+' + digits if digits else None
+
+    async def get_or_create_client(self, telegram_user_id: int, full_name: str = None, phone: str = None, tg_username: str = None, car_number: str = None) -> int:
+        normalized_phone = self._normalize_phone(phone)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                # 1. Ищем по telegram_user_id
+                if telegram_user_id:
+                    await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
+                    result = await cur.fetchone()
+                    if result:
+                        if full_name or normalized_phone or tg_username:
+                            await cur.execute("""
+                                UPDATE clients SET
+                                    tg_username = COALESCE(%s, tg_username),
+                                    full_name = COALESCE(%s, full_name),
+                                    phone = COALESCE(%s, phone)
+                                WHERE id = %s
+                            """, (tg_username, full_name, normalized_phone, result[0]))
+                        return result[0]
+                # 2. Ищем по телефону
+                if normalized_phone and len(normalized_phone) >= 10:
+                    phone_suffix = normalized_phone[-10:]
+                    await cur.execute(
+                        "SELECT id FROM clients WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s",
+                        (phone_suffix,)
+                    )
+                    result = await cur.fetchone()
+                    if result:
+                        await cur.execute("""
+                            UPDATE clients SET
+                                telegram_user_id = COALESCE(%s, telegram_user_id),
+                                tg_username = COALESCE(%s, tg_username),
+                                full_name = COALESCE(%s, full_name),
+                                phone = COALESCE(%s, phone)
+                            WHERE id = %s
+                        """, (telegram_user_id, tg_username, full_name, normalized_phone, result[0]))
+                        return result[0]
+                # 3. Ищем по госномеру машины
+                if car_number:
+                    await cur.execute("""
+                        SELECT client_id FROM client_cars
+                        WHERE UPPER(car_number) = UPPER(%s) AND client_id IS NOT NULL
+                    """, (car_number,))
+                    result = await cur.fetchone()
+                    if result:
+                        client_id = result[0]
+                        await cur.execute("""
+                            UPDATE clients SET
+                                telegram_user_id = COALESCE(%s, telegram_user_id),
+                                tg_username = COALESCE(%s, tg_username),
+                                full_name = COALESCE(%s, full_name),
+                                phone = COALESCE(%s, phone)
+                            WHERE id = %s
+                        """, (telegram_user_id, tg_username, full_name, normalized_phone, client_id))
+                        return client_id
+                # 4. Создаём нового
+                await cur.execute("""
+                    INSERT INTO clients (telegram_user_id, tg_username, full_name, phone)
+                    VALUES (%s, %s, %s, %s)
+                """, (telegram_user_id, tg_username, full_name, normalized_phone))
+                return cur.lastrowid
+
+    async def get_client_by_telegram_id(self, telegram_user_id: int) -> dict | None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT * FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
+                return await cur.fetchone()
+
+    async def get_or_create_car(self, client_id: int, car_brand: str, car_model: str, car_number: str) -> int | None:
+        if not car_number:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT id FROM client_cars WHERE UPPER(car_number) = UPPER(%s)", (car_number,))
+                result = await cur.fetchone()
+                if result:
+                    if client_id:
+                        await cur.execute("UPDATE client_cars SET client_id = %s WHERE id = %s", (client_id, result[0]))
+                    return result[0]
+                await cur.execute("""
+                    INSERT INTO client_cars (client_id, car_brand, car_model, car_number)
+                    VALUES (%s, %s, %s, %s)
+                """, (client_id, car_brand, car_model, car_number.upper()))
+                return cur.lastrowid
+
+    async def is_slot_available(self, booking_date: dt_date, booking_time: str) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM bookings WHERE booking_date = %s AND booking_time = %s AND status IN ('waiting', 'in_progress')",
+                    (booking_date, booking_time)
+                )
+                result = await cur.fetchone()
+                return result[0] == 0
+
+    async def get_booked_slots(self, booking_date: dt_date) -> list:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT booking_time FROM bookings WHERE booking_date = %s AND status IN ('waiting', 'in_progress')",
+                    (booking_date,)
+                )
+                result = await cur.fetchall()
+                return [row[0] for row in result]
+
+    async def create_booking(self, booking_date: dt_date, booking_time: str, client_id: int, car_id: int = None) -> bool:
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """DELETE FROM bookings WHERE booking_date = %s AND booking_time = %s AND status NOT IN ('waiting', 'in_progress')""",
+                        (booking_date, booking_time)
+                    )
+                    await cur.execute(
+                        """INSERT INTO bookings (client_id, car_id, booking_date, booking_time, status) VALUES (%s, %s, %s, %s, 'waiting')""",
+                        (client_id, car_id, booking_date, booking_time)
+                    )
+                    return True
+        except Exception as e:
+            print(f"Ошибка создания записи: {e}")
+            return False
+
+    async def get_user_bookings(self, user_id: int) -> list:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                client_row = await cur.fetchone()
+                if not client_row:
+                    return []
+                client_id = client_row['id']
+                await cur.execute(
+                    """SELECT b.id, b.booking_date, b.booking_time, b.status, b.created_at,
+                       c.full_name as client_name, c.phone as client_phone,
+                       CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_display
+                       FROM bookings b
+                       JOIN clients c ON b.client_id = c.id
+                       LEFT JOIN client_cars cc ON b.car_id = cc.id
+                       WHERE b.client_id = %s AND b.booking_date >= CURDATE() AND b.status IN ('waiting', 'in_progress')
+                       ORDER BY b.booking_date, b.booking_time""",
+                    (client_id,)
+                )
+                return await cur.fetchall()
+
+    async def cancel_booking(self, booking_id: int, user_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                client_row = await cur.fetchone()
+                if not client_row:
+                    return False
+                await cur.execute("UPDATE bookings SET status = 'cancelled' WHERE id = %s AND client_id = %s", (booking_id, client_row[0]))
+                return cur.rowcount > 0
+
+    async def count_user_active_bookings(self, user_id: int) -> int:
+        """Подсчёт активных записей пользователя"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                client_row = await cur.fetchone()
+                if not client_row:
+                    return 0
+                await cur.execute(
+                    """SELECT COUNT(*) FROM bookings
+                       WHERE client_id = %s AND booking_date >= CURDATE() AND status IN ('waiting', 'in_progress')""",
+                    (client_row[0],)
+                )
+                result = await cur.fetchone()
+                return result[0] if result else 0
+
+    async def get_user_phone(self, user_id: int) -> str | None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT phone FROM clients WHERE telegram_user_id = %s AND phone IS NOT NULL", (user_id,))
+                result = await cur.fetchone()
+                return result[0] if result and result[0] else None
+
+    async def get_client_cars(self, user_id: int) -> list[tuple]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                client_row = await cur.fetchone()
+                if not client_row:
+                    return []
+                client_id = client_row[0]
+                await cur.execute("""
+                    SELECT DISTINCT car_brand, car_model, car_number
+                    FROM client_cars WHERE client_id = %s AND car_brand IS NOT NULL AND car_brand != ''
+                    ORDER BY car_brand, car_model
+                """, (client_id,))
+                return list(await cur.fetchall())
+
+    async def get_user_phones(self, user_id: int) -> list[str]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT phone FROM clients WHERE telegram_user_id = %s AND phone IS NOT NULL", (user_id,))
+                result = await cur.fetchone()
+                if result and result[0]:
+                    return [result[0]]
+                return []
+
+    async def get_car_history_by_user_id(self, telegram_user_id: int) -> list:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
+                client_row = await cur.fetchone()
+                if not client_row:
+                    return []
+                client_id = client_row['id']
+                await cur.execute(
+                    """SELECT w.id as work_id, w.work_date,
+                              cc.car_brand, cc.car_model, cc.car_number,
+                              w.description, w.amount, w.order_number, cc.mileage,
+                              (SELECT COALESCE(SUM(p.part_price), 0) FROM parts p WHERE p.work_id = w.id) as parts_total
+                       FROM works w
+                       JOIN client_cars cc ON w.car_id = cc.id
+                       WHERE cc.client_id = %s
+                       ORDER BY w.work_date DESC, w.id DESC
+                       LIMIT 20""",
+                    (client_id,)
+                )
+                return await cur.fetchall()
+
+    async def get_parts_by_work_id(self, work_id: int) -> list:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT part_name, part_price FROM parts WHERE work_id = %s", (work_id,))
+                return await cur.fetchall()
+
+    async def get_keywords_with_intervals(self) -> list:
+        """Получить ключевые слова с настроенными интервалами ТО"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT id, keyword, interval_km_min, interval_km_max
+                    FROM keywords
+                    WHERE interval_km_min IS NOT NULL AND interval_km_max IS NOT NULL
+                    ORDER BY keyword
+                """)
+                return await cur.fetchall()
+
+    async def get_car_works_for_analysis(self, car_id: int) -> list:
+        """Получить все работы по авто для анализа ТО"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT w.id, w.description, w.work_date, w.mileage as work_mileage
+                    FROM works w
+                    WHERE w.car_id = %s
+                    ORDER BY w.work_date DESC, w.id DESC
+                """, (car_id,))
+                return await cur.fetchall()
+
+    async def get_car_by_id_full(self, car_id: int) -> dict | None:
+        """Получить полную информацию об авто по ID"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT id, client_id, car_brand, car_model, car_number, mileage
+                    FROM client_cars WHERE id = %s
+                """, (car_id,))
+                return await cur.fetchone()
+
+    async def update_car_mileage(self, car_id: int, mileage: int):
+        """Обновить пробег авто"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (str(mileage), car_id))
+
+    async def get_client_cars_with_id(self, user_id: int) -> list:
+        """Получить машины клиента с ID"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                client_row = await cur.fetchone()
+                if not client_row:
+                    return []
+                client_id = client_row['id']
+                await cur.execute("""
+                    SELECT id, car_brand, car_model, car_number, mileage
+                    FROM client_cars WHERE client_id = %s AND car_brand IS NOT NULL AND car_brand != ''
+                    ORDER BY car_brand, car_model
+                """, (client_id,))
+                return await cur.fetchall()
+
+    async def get_telegraph_page(self, user_id: int) -> dict | None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT page_path, access_token FROM telegraph_pages WHERE user_id = %s", (user_id,))
+                return await cur.fetchone()
+
+    async def save_telegraph_page(self, user_id: int, page_path: str, access_token: str):
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """INSERT INTO telegraph_pages (user_id, page_path, access_token)
+                       VALUES (%s, %s, %s)
+                       ON DUPLICATE KEY UPDATE page_path = %s, access_token = %s""",
+                    (user_id, page_path, access_token, page_path, access_token)
+                )
+
+    async def get_tomorrow_bookings_for_reminder(self) -> list:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT b.id, b.booking_date, b.booking_time, c.telegram_user_id, c.full_name
+                    FROM bookings b
+                    JOIN clients c ON b.client_id = c.id
+                    WHERE b.booking_date = DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+                      AND b.status = 'waiting'
+                      AND (b.reminder_sent IS NULL OR b.reminder_sent = FALSE)
+                      AND c.telegram_user_id IS NOT NULL
+                """)
+                return await cur.fetchall()
+
+    async def mark_reminder_sent(self, booking_id: int):
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE bookings SET reminder_sent = TRUE WHERE id = %s", (booking_id,))
+
+    async def get_bookings_for_1h_reminder(self) -> list:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT b.id, b.booking_date, b.booking_time, c.telegram_user_id, c.full_name
+                    FROM bookings b
+                    JOIN clients c ON b.client_id = c.id
+                    WHERE b.booking_date = CURDATE()
+                      AND b.status = 'waiting'
+                      AND (b.reminder_1h_sent IS NULL OR b.reminder_1h_sent = FALSE)
+                      AND c.telegram_user_id IS NOT NULL
+                      AND TIME(CONCAT(b.booking_time, ':00')) BETWEEN
+                          ADDTIME(CURTIME(), '00:30:00') AND ADDTIME(CURTIME(), '01:30:00')
+                """)
+                return await cur.fetchall()
+
+    async def mark_reminder_1h_sent(self, booking_id: int):
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE bookings SET reminder_1h_sent = TRUE WHERE id = %s", (booking_id,))
+
+
+db = Database()
+
+# ==================== TELEGRAPH ====================
+TELEGRAPH_API = "https://api.telegra.ph"
+
+async def telegraph_create_account(short_name: str) -> dict | None:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{TELEGRAPH_API}/createAccount", data={"short_name": short_name}) as resp:
+                result = await resp.json()
+                if result.get("ok"):
+                    return result["result"]
+    except:
+        pass
+    return None
+
+async def telegraph_create_page(access_token: str, title: str, content: list) -> dict | None:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{TELEGRAPH_API}/createPage", data={
+                "access_token": access_token,
+                "title": title,
+                "content": json.dumps(content),
+                "return_content": "false"
+            }) as resp:
+                result = await resp.json()
+                if result.get("ok"):
+                    return result["result"]
+    except:
+        pass
+    return None
+
+async def telegraph_edit_page(access_token: str, path: str, title: str, content: list) -> dict | None:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{TELEGRAPH_API}/editPage", data={
+                "access_token": access_token,
+                "path": path,
+                "title": title,
+                "content": json.dumps(content),
+                "return_content": "false"
+            }) as resp:
+                result = await resp.json()
+                if result.get("ok"):
+                    return result["result"]
+    except:
+        pass
+    return None
+
+# ==================== BOT ====================
+router = Router()
+
+class BookingStates(StatesGroup):
+    waiting_for_date = State()
+    waiting_for_time = State()
+    waiting_for_phone = State()
+    waiting_for_car = State()
+
+
+class CarCheckStates(StatesGroup):
+    selecting_car = State()
+    entering_mileage = State()
+
+
+def get_persistent_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📋 Меню"), KeyboardButton(text="🚗 История авто")]],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
+
+def get_main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Записаться", callback_data="book")],
+        [InlineKeyboardButton(text="📝 Мои записи", callback_data="my_bookings")],
+        [InlineKeyboardButton(text="🚗 История авто", callback_data="car_history")],
+        [InlineKeyboardButton(text="🔍 Проверить состояние авто", callback_data="check_car")],
+        [InlineKeyboardButton(text="❌ Отменить запись", callback_data="cancel_booking")]
+    ])
+
+
+def get_book_again_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Записаться снова", callback_data="book")],
+        [InlineKeyboardButton(text="📋 Главное меню", callback_data="back_to_menu")]
+    ])
+
+
+def get_date_keyboard():
+    buttons = []
+    today = datetime.now().date()
+    for i in range(7):
+        date = today + timedelta(days=i)
+        date_str = date.strftime("%d.%m.%Y")
+        day_name = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][date.weekday()]
+        buttons.append([InlineKeyboardButton(text=f"{day_name} {date_str}", callback_data=f"date_{date.isoformat()}")])
+    buttons.append([InlineKeyboardButton(text="Назад", callback_data="back_to_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def get_time_keyboard(booking_date: str):
+    date_obj = dt_date.fromisoformat(booking_date)
+    booked_slots = await db.get_booked_slots(date_obj)
+
+    # Проверяем, является ли дата сегодняшней
+    now = datetime.now()
+    is_today = date_obj == now.date()
+    current_time = now.hour * 60 + now.minute  # текущее время в минутах
+
+    buttons = []
+    row = []
+    for time_slot in TIME_SLOTS:
+        # Если сегодня - пропускаем прошедшие слоты
+        if is_today:
+            slot_hour, slot_min = map(int, time_slot.split(':'))
+            slot_time = slot_hour * 60 + slot_min
+            if slot_time <= current_time:
+                continue  # пропускаем прошедший слот
+
+        if time_slot in booked_slots:
+            row.append(InlineKeyboardButton(text=f"{time_slot} (занято)", callback_data="slot_busy"))
+        else:
+            row.append(InlineKeyboardButton(text=f"{time_slot}", callback_data=f"time_{booking_date}_{time_slot}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="Назад", callback_data="book")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def validate_phone(phone: str) -> str | None:
+    digits = re.sub(r'\D', '', phone)
+    if len(digits) == 11 and digits.startswith('8'):
+        digits = '7' + digits[1:]
+    if len(digits) == 11 and digits.startswith('7'):
+        return '+' + digits
+    return None
+
+
+async def show_car_selection_or_create_booking(message_or_callback, state: FSMContext, user_id: int, username: str,
+                                                full_name: str, phone: str, booking_date, booking_time: str,
+                                                is_callback: bool = False):
+    client_id = await db.get_or_create_client(user_id, full_name, phone, tg_username=username)
+    cars = await db.get_client_cars(user_id)
+
+    if len(cars) >= 1:
+        await state.update_data(
+            phone=phone,
+            booking_date=booking_date.isoformat() if hasattr(booking_date, 'isoformat') else booking_date,
+            booking_time=booking_time,
+            client_id=client_id
+        )
+        await state.set_state(BookingStates.waiting_for_car)
+        buttons = []
+        for i, (brand, model, number) in enumerate(cars):
+            car_display = f"{brand} {model} {number}".strip()
+            buttons.append([InlineKeyboardButton(text=f"🚗 {car_display}", callback_data=f"selectcar_{i}")])
+        buttons.append([InlineKeyboardButton(text="➕ Другое авто", callback_data="selectcar_skip")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        cars_list = [f"{b} {m} {n}".strip() for b, m, n in cars]
+        await state.update_data(cars_list=cars_list)
+        date_display = booking_date.strftime("%d.%m.%Y") if hasattr(booking_date, 'strftime') else booking_date
+        text = f"📅 Дата: {date_display}\n🕐 Время: {booking_time}\n📱 Телефон: {phone}\n\n🚗 Выберите автомобиль:"
+        if is_callback:
+            await message_or_callback.message.edit_text(text, reply_markup=keyboard)
+        else:
+            await message_or_callback.answer(text, reply_markup=keyboard)
+        return
+
+    car_id = None
+    success = await db.create_booking(booking_date=booking_date, booking_time=booking_time, client_id=client_id, car_id=car_id)
+    await state.clear()
+    date_display = booking_date.strftime("%d.%m.%Y") if hasattr(booking_date, 'strftime') else booking_date
+
+    if success:
+        text = f"✅ <b>Вы успешно записаны!</b>\n\n📅 Дата: {date_display}\n🕐 Время: {booking_time}\n📱 Телефон: {phone}"
+        text += f"\n\n{COMPANY_INFO}\n\nЖдём вас!"
+        if is_callback:
+            await message_or_callback.message.edit_text(text, reply_markup=get_main_menu(), parse_mode="HTML")
+        else:
+            await message_or_callback.answer(text, reply_markup=get_main_menu(), parse_mode="HTML")
+    else:
+        if is_callback:
+            await message_or_callback.message.edit_text("❌ Произошла ошибка при записи.\nПопробуйте ещё раз.", reply_markup=get_main_menu())
+        else:
+            await message_or_callback.answer("❌ Произошла ошибка при записи.\nПопробуйте ещё раз.", reply_markup=get_main_menu())
+
+
+async def format_telegraph_content(history: list) -> list:
+    content = []
+    if not history:
+        content.append({"tag": "p", "children": ["История пуста. Вы ещё не обслуживались у нас."]})
+        return content
+
+    # Определяем количество уникальных авто
+    unique_cars = set()
+    for work in history:
+        car_key = f"{work['car_brand'] or ''} {work['car_model'] or ''} {work['car_number'] or ''}".strip()
+        if car_key:
+            unique_cars.add(car_key)
+    multiple_cars = len(unique_cars) > 1
+
+    cars = {}
+    for work in history:
+        car_key = f"{work['car_brand'] or ''} {work['car_model'] or ''} {work['car_number'] or ''}".strip()
+        if not car_key:
+            car_key = "Автомобиль не указан"
+        if car_key not in cars:
+            cars[car_key] = []
+        cars[car_key].append(work)
+
+    for car, works in cars.items():
+        # Заголовок автомобиля (только если одно авто)
+        if not multiple_cars:
+            content.append({"tag": "h3", "children": [f"🚙 {car}"]})
+        for work in works:
+            date_str = work['work_date'].strftime("%d.%m.%Y") if work['work_date'] else "—"
+            work_amount = float(work['amount'] or 0)
+            parts_total = float(work['parts_total'] or 0)
+            total = work_amount + parts_total
+            # Авто (если несколько машин - показываем в каждой записи)
+            if multiple_cars:
+                content.append({"tag": "p", "children": [{"tag": "strong", "children": [f"🚙 {car}"]}]})
+            header = f"📅 {date_str}"
+            if work['order_number']:
+                header += f" • №{work['order_number']}"
+            content.append({"tag": "p", "children": [{"tag": "strong", "children": [header]}]})
+            if work['mileage']:
+                content.append({"tag": "p", "children": [f"🔢 Пробег: {work['mileage']} км"]})
+            if work['description']:
+                content.append({"tag": "p", "children": [f"📝 Работы: {work_amount:,.0f} ₽"]})
+                work_items = [item.strip() for item in work['description'].split(',') if item.strip()]
+                list_items = [{"tag": "li", "children": [item]} for item in work_items]
+                content.append({"tag": "ul", "children": list_items})
+            if work.get('work_id'):
+                parts = await db.get_parts_by_work_id(work['work_id'])
+                if parts:
+                    content.append({"tag": "p", "children": [f"🔧 Запчасти: {parts_total:,.0f} ₽"]})
+                    parts_items = [{"tag": "li", "children": [f"{p[0]} — {float(p[1]):,.0f} ₽"]} for p in parts]
+                    content.append({"tag": "ul", "children": parts_items})
+            content.append({"tag": "p", "children": [f"💰 Итого: {total:,.0f} ₽"]})
+            content.append({"tag": "p", "children": ["\n━━━━━━━━━━━━━━━━━━━━━\n"]})
+    content.append({"tag": "p", "children": [{"tag": "em", "children": [f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"]}]})
+    return content
+
+
+async def analyze_car_maintenance(car_id: int, current_mileage: int) -> list:
+    """Анализ состояния авто на основе пробега и истории работ"""
+    keywords = await db.get_keywords_with_intervals()
+    if not keywords:
+        return []
+
+    works = await db.get_car_works_for_analysis(car_id)
+    results = []
+
+    # Находим ПЕРВОЕ посещение (минимальный пробег) — для тех работ что никогда не делались
+    first_visit_mileage = None
+    first_visit_date = None
+    for work in works:
+        mileage = work.get('work_mileage')
+        if mileage is not None:
+            try:
+                m = int(mileage)
+                if first_visit_mileage is None or m < first_visit_mileage:
+                    first_visit_mileage = m
+                    first_visit_date = work.get('work_date')
+            except:
+                pass
+
+    for kw in keywords:
+        keyword = kw['keyword'].lower()
+        interval_min = kw['interval_km_min']
+        interval_max = kw['interval_km_max']
+
+        # Ищем последнюю работу с этим ключевым словом
+        last_work = None
+        last_mileage = None
+        never_done = False  # Флаг: никогда не делалось
+
+        for work in works:
+            description = (work['description'] or '').lower()
+            if keyword in description:
+                last_work = work
+                mileage = work.get('work_mileage')
+                if mileage is not None:
+                    try:
+                        last_mileage = int(mileage)
+                    except:
+                        last_mileage = None
+                break
+
+        # Если НЕТ записи с этим keyword — считаем от первого посещения
+        if last_mileage is None and first_visit_mileage is not None:
+            last_mileage = first_visit_mileage
+            last_work = {'work_date': first_visit_date}
+            never_done = True  # Помечаем что никогда не делалось
+
+        if last_mileage is not None:
+            km_since = current_mileage - last_mileage
+            km_until_max = interval_max - km_since
+            overdue_km = km_since - interval_max if km_since > interval_max else 0
+
+            if km_since < interval_min:
+                status = 'ok'
+            elif km_since <= interval_max:
+                status = 'soon'
+            else:
+                status = 'overdue'
+
+            results.append({
+                'name': kw['keyword'],
+                'status': status,
+                'last_mileage': last_mileage,
+                'last_date': last_work.get('work_date') if last_work else None,
+                'km_since': km_since,
+                'km_until': km_until_max,
+                'overdue_km': overdue_km,
+                'interval_min': interval_min,
+                'interval_max': interval_max,
+                'never_done': never_done  # Никогда не менялось
+            })
+
+    # Сортируем: сначала overdue, потом soon, потом ok
+    # Внутри категории: сначала never_done, потом по величине просрочки
+    def sort_key(x):
+        status_order = {'overdue': 0, 'soon': 1, 'ok': 2}
+        never = 0 if x.get('never_done') else 1
+        overdue = -(x.get('overdue_km') or 0)
+        return (status_order.get(x['status'], 3), never, overdue)
+
+    results.sort(key=sort_key)
+
+    return results
+
+
+def format_maintenance_report(car_info: dict, current_mileage: int, results: list) -> str:
+    """Форматирование отчёта о состоянии авто"""
+    car_display = f"{car_info.get('car_brand', '')} {car_info.get('car_model', '')} ({car_info.get('car_number', '')})".strip()
+
+    text = f"🚗 <b>СОСТОЯНИЕ АВТО</b>\n"
+    text += f"{car_display}\n"
+    text += f"Текущий пробег: {current_mileage:,} км\n".replace(',', ' ')
+    text += "\n━━━━━━━━━━━━━━━━━━━━\n"
+
+    # Группируем по статусу
+    # "Обратить внимание" - ВСЕ что никогда не менялось (независимо от пробега)
+    attention = [r for r in results if r.get('never_done')]
+    # Остальные категории - только реально замененные
+    overdue = [r for r in results if r['status'] == 'overdue' and not r.get('never_done')]
+    soon = [r for r in results if r['status'] == 'soon' and not r.get('never_done')]
+    ok = [r for r in results if r['status'] == 'ok' and not r.get('never_done')]
+
+    if overdue:
+        text += "\n🔴 <b>КРИТИЧНО - ЗАМЕНА ПРОСРОЧЕНА:</b>\n\n"
+        for item in overdue:
+            interval_min = item.get('interval_min', 0)
+            interval_max = item.get('interval_max', 0)
+            text += f"⛔ {item['name']}\n"
+            text += f"   Последняя замена: {item['last_mileage']:,} км".replace(',', ' ')
+            if item['last_date']:
+                text += f" ({item['last_date'].strftime('%d.%m.%Y')})"
+            text += "\n"
+            text += f"   Рекомендуемый интервал замены: {interval_min:,} - {interval_max:,} км\n".replace(',', ' ')
+            text += f"   Пройдено: {item['km_since']:,} км\n".replace(',', ' ')
+            text += f"   ❗ Просрочено на {item['overdue_km']:,} км!\n\n".replace(',', ' ')
+
+    if soon:
+        text += "\n🟡 <b>ПОРА МЕНЯТЬ:</b>\n\n"
+        for item in soon:
+            interval_min = item.get('interval_min', 0)
+            interval_max = item.get('interval_max', 0)
+            text += f"⚠️ {item['name']}\n"
+            text += f"   Последняя замена: {item['last_mileage']:,} км\n".replace(',', ' ')
+            text += f"   Рекомендуемый интервал замены: {interval_min:,} - {interval_max:,} км\n".replace(',', ' ')
+            text += f"   Пройдено: {item['km_since']:,} км\n".replace(',', ' ')
+            if item['km_until'] > 0:
+                text += f"   До критичного: ~{item['km_until']:,} км\n\n".replace(',', ' ')
+            else:
+                text += "\n"
+
+    if attention:
+        text += "\n🟠 <b>ОБРАТИТЬ ВНИМАНИЕ:</b>\n\n"
+        for item in attention:
+            km_ago = item['km_since'] if item['km_since'] else 0
+            interval_min = item.get('interval_min', 0)
+            interval_max = item.get('interval_max', 0)
+            text += f"❓ {item['name']}\n"
+            text += f"   Нет данных о замене\n"
+            text += f"   С первого посещения вы проехали: {km_ago:,} км\n".replace(',', ' ')
+            text += f"   Рекомендуемый интервал замены: {interval_min:,} - {interval_max:,} км\n\n".replace(',', ' ')
+
+    if ok:
+        text += "\n🟢 <b>В НОРМЕ:</b>\n\n"
+        for item in ok:
+            km_ago = item['km_since'] if item['km_since'] else 0
+            text += f"✅ {item['name']} ({km_ago:,} км назад)\n".replace(',', ' ')
+
+    if not results:
+        text += "\n⚠️ Нет данных для анализа.\n"
+        text += "Добавьте интервалы ТО в настройках.\n"
+
+    text += "\n━━━━━━━━━━━━━━━━━━━━\n"
+
+    return text
+
+
+async def get_or_create_telegraph_page(user_id: int, user_name: str, history: list) -> str | None:
+    title = f"История обслуживания - {user_name}"
+    content = await format_telegraph_content(history)
+    page_data = await db.get_telegraph_page(user_id)
+    if page_data:
+        result = await telegraph_edit_page(page_data['access_token'], page_data['page_path'], title, content)
+        if result:
+            return f"https://telegra.ph/{page_data['page_path']}"
+    account = await telegraph_create_account(f"user_{user_id}")
+    if not account:
+        return None
+    page = await telegraph_create_page(account['access_token'], title, content)
+    if not page:
+        return None
+    await db.save_telegraph_page(user_id, page['path'], account['access_token'])
+    return page['url']
+
+
+# ==================== HANDLERS ====================
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        f"🚗 Добро пожаловать в автосервис!\n\n⏰ Режим работы: 10:00 - 20:00\n📅 Запись каждые 2 часа.\n\nИспользуйте кнопки внизу экрана для навигации.",
+        reply_markup=get_persistent_menu()
+    )
+    await message.answer("Выберите действие:", reply_markup=get_main_menu())
+
+
+@router.message(Command("menu"))
+async def cmd_menu(message: Message):
+    await message.answer("Выберите действие:", reply_markup=get_main_menu())
+
+
+@router.message(F.text == "📋 Меню")
+async def btn_menu(message: Message):
+    await message.answer("Выберите действие:", reply_markup=get_main_menu())
+
+
+@router.message(F.text == "📝 Мои записи")
+async def btn_my_bookings(message: Message):
+    bookings = await db.get_user_bookings(message.from_user.id)
+    if not bookings:
+        await message.answer("У вас нет активных записей.", reply_markup=get_main_menu())
+    else:
+        text = "📝 Ваши записи:\n\n"
+        for b in bookings:
+            date_display = b["booking_date"].strftime("%d.%m.%Y")
+            text += f"• {date_display} в {b['booking_time']}\n"
+        await message.answer(text, reply_markup=get_main_menu())
+
+
+@router.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Выберите действие:", reply_markup=get_main_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "book")
+async def start_booking(callback: CallbackQuery, state: FSMContext):
+    # Проверяем лимит активных записей
+    active_count = await db.count_user_active_bookings(callback.from_user.id)
+    if active_count >= MAX_BOOKINGS_PER_USER:
+        try:
+            await callback.message.edit_text(
+                f"⚠️ У вас уже есть {MAX_BOOKINGS_PER_USER} активных записей.\n\nДождитесь выполнения или отмените одну из них.",
+                reply_markup=get_main_menu()
+            )
+        except TelegramBadRequest:
+            pass
+        await callback.answer("У вас максимум записей", show_alert=True)
+        return
+
+    await state.set_state(BookingStates.waiting_for_date)
+    await callback.message.edit_text("Выберите дату записи:", reply_markup=get_date_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("date_"))
+async def select_date(callback: CallbackQuery, state: FSMContext):
+    date_str = callback.data.replace("date_", "")
+    await state.update_data(booking_date=date_str)
+    await state.set_state(BookingStates.waiting_for_time)
+    keyboard = await get_time_keyboard(date_str)
+    date_display = datetime.fromisoformat(date_str).strftime("%d.%m.%Y")
+    await callback.message.edit_text(f"Дата: {date_display}\n\nВыберите время:", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "slot_busy")
+async def slot_busy(callback: CallbackQuery):
+    await callback.answer("Это время уже занято!", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("usephone_"))
+async def use_saved_phone(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    phone = parts[1]
+    date_str = parts[2]
+    time_str = parts[3]
+    booking_date = dt_date.fromisoformat(date_str)
+    booking_time = time_str
+    if not await db.is_slot_available(booking_date, booking_time):
+        await callback.message.edit_text("К сожалению, это время уже занято.\nПожалуйста, выберите другое время.", reply_markup=get_main_menu())
+        await callback.answer()
+        return
+    await show_car_selection_or_create_booking(callback, state, user_id=callback.from_user.id, username=callback.from_user.username or "",
+                                                full_name=callback.from_user.full_name, phone=phone, booking_date=booking_date,
+                                                booking_time=booking_time, is_callback=True)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("enter_new_phone_"))
+async def enter_new_phone(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    date_str = parts[3]
+    time_str = parts[4]
+    await state.update_data(booking_date=date_str, booking_time=time_str)
+    await state.set_state(BookingStates.waiting_for_phone)
+    date_display = datetime.fromisoformat(date_str).strftime("%d.%m.%Y")
+    await callback.message.edit_text(f"Дата: {date_display}\nВремя: {time_str}\n\nВведите ваш номер телефона:")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("time_"))
+async def select_time(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    date_str = parts[1]
+    time_str = parts[2]
+    await state.update_data(booking_time=time_str)
+    date_display = datetime.fromisoformat(date_str).strftime("%d.%m.%Y")
+    await state.update_data(bot_message_id=callback.message.message_id)
+    saved_phones = await db.get_user_phones(callback.from_user.id)
+    if saved_phones:
+        buttons = []
+        for phone in saved_phones:
+            formatted = f"+7 ({phone[2:5]}) {phone[5:8]}-{phone[8:10]}-{phone[10:12]}"
+            buttons.append([InlineKeyboardButton(text=f"📱 {formatted}", callback_data=f"usephone_{phone}_{date_str}_{time_str}")])
+        buttons.append([InlineKeyboardButton(text="✏️ Ввести другой номер", callback_data=f"enter_new_phone_{date_str}_{time_str}")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await callback.message.edit_text(f"📅 Дата: {date_display}\n🕐 Время: {time_str}\n\n📱 Выберите номер или введите новый:", reply_markup=keyboard)
+    else:
+        await state.set_state(BookingStates.waiting_for_phone)
+        await callback.message.edit_text(f"📅 Дата: {date_display}\n🕐 Время: {time_str}\n\nДля продолжения записи\n📱 Введите ваш номер телефона:")
+    await callback.answer()
+
+
+@router.message(BookingStates.waiting_for_phone)
+async def process_phone(message: Message, state: FSMContext):
+    raw_phone = message.text
+    data = await state.get_data()
+    phone = validate_phone(raw_phone)
+    if not phone:
+        await message.answer("❌ Неверный формат номера!\n\nВведите номер из 11 цифр, например:\n• 79056789012\n• +7-905-678-90-12\n• 8(905)678-90-12")
+        return
+    booking_date = dt_date.fromisoformat(data["booking_date"])
+    booking_time = data["booking_time"]
+    bot_message_id = data.get("bot_message_id")
+    try:
+        if bot_message_id:
+            await message.bot.delete_message(message.chat.id, bot_message_id)
+        await message.delete()
+    except:
+        pass
+    if not await db.is_slot_available(booking_date, booking_time):
+        await message.answer("❌ К сожалению, это время уже занято.\nПожалуйста, выберите другое время.", reply_markup=get_main_menu())
+        await state.clear()
+        return
+    await show_car_selection_or_create_booking(message, state, user_id=message.from_user.id, username=message.from_user.username or "",
+                                                full_name=message.from_user.full_name, phone=phone, booking_date=booking_date,
+                                                booking_time=booking_time, is_callback=False)
+
+
+@router.callback_query(F.data == "my_bookings")
+async def show_my_bookings(callback: CallbackQuery):
+    bookings = await db.get_user_bookings(callback.from_user.id)
+    if not bookings:
+        await callback.message.edit_text("У вас нет активных записей.", reply_markup=get_main_menu())
+    else:
+        text = "Ваши записи:\n\n"
+        for b in bookings:
+            date_display = b["booking_date"].strftime("%d.%m.%Y")
+            text += f"- {date_display} в {b['booking_time']}\n"
+        await callback.message.edit_text(text, reply_markup=get_main_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cancel_booking")
+async def show_cancel_options(callback: CallbackQuery):
+    bookings = await db.get_user_bookings(callback.from_user.id)
+    if not bookings:
+        await callback.message.edit_text("У вас нет записей для отмены.", reply_markup=get_main_menu())
+    else:
+        buttons = []
+        for b in bookings:
+            date_display = b["booking_date"].strftime("%d.%m.%Y")
+            buttons.append([InlineKeyboardButton(text=f"{date_display} в {b['booking_time']}", callback_data=f"cancel_{b['id']}")])
+        buttons.append([InlineKeyboardButton(text="Назад", callback_data="back_to_menu")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await callback.message.edit_text("Выберите запись для отмены:", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cancel_"))
+async def cancel_selected_booking(callback: CallbackQuery):
+    booking_id = int(callback.data.replace("cancel_", ""))
+    success = await db.cancel_booking(booking_id, callback.from_user.id)
+    if success:
+        await callback.message.edit_text("Запись успешно отменена!", reply_markup=get_main_menu())
+    else:
+        await callback.message.edit_text("Не удалось отменить запись.", reply_markup=get_main_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("selectcar_"))
+async def select_car(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    phone = data.get("phone")
+    booking_date_str = data.get("booking_date")
+    booking_time = data.get("booking_time")
+    cars_list = data.get("cars_list", [])
+    client_id = data.get("client_id")
+    booking_date = dt_date.fromisoformat(booking_date_str)
+    if not client_id:
+        client_id = await db.get_or_create_client(callback.from_user.id, callback.from_user.full_name, phone, tg_username=callback.from_user.username)
+    car_info = None
+    car_id = None
+    choice = callback.data.replace("selectcar_", "")
+    if choice != "skip" and choice.isdigit():
+        idx = int(choice)
+        if 0 <= idx < len(cars_list):
+            car_info = cars_list[idx]
+            parts = car_info.strip().split()
+            if len(parts) >= 3:
+                car_number = parts[-1]
+                car_model = parts[-2]
+                car_brand = ' '.join(parts[:-2])
+                car_id = await db.get_or_create_car(client_id, car_brand, car_model, car_number)
+    if not await db.is_slot_available(booking_date, booking_time):
+        await callback.message.edit_text("❌ К сожалению, это время уже занято.\nПожалуйста, выберите другое время.", reply_markup=get_main_menu())
+        await state.clear()
+        await callback.answer()
+        return
+    success = await db.create_booking(booking_date=booking_date, booking_time=booking_time, client_id=client_id, car_id=car_id)
+    await state.clear()
+    if success:
+        date_display = booking_date.strftime("%d.%m.%Y")
+        text = f"✅ <b>Вы успешно записаны!</b>\n\n📅 Дата: {date_display}\n🕐 Время: {booking_time}\n📱 Телефон: {phone}"
+        if car_info:
+            text += f"\n🚗 Авто: {car_info}"
+        text += f"\n\n{COMPANY_INFO}\n\nЖдём вас!"
+        await callback.message.edit_text(text, reply_markup=get_main_menu(), parse_mode="HTML")
+    else:
+        await callback.message.edit_text("❌ Произошла ошибка при записи.\nПопробуйте ещё раз.", reply_markup=get_main_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "car_history")
+async def show_car_history(callback: CallbackQuery):
+    history = await db.get_car_history_by_user_id(callback.from_user.id)
+    if not history:
+        try:
+            await callback.message.edit_text("🔍 История не найдена.\n\nИстория появится после того, как вы пройдёте обслуживание.", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+        await callback.answer()
+        return
+    await callback.answer("⏳ Формирую историю...")
+    user_name = callback.from_user.full_name or f"Клиент #{callback.from_user.id}"
+    page_url = await get_or_create_telegraph_page(callback.from_user.id, user_name, history)
+    if page_url:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📖 Открыть историю", url=page_url)],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="car_history")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+        ])
+        update_time = datetime.now().strftime("%H:%M:%S")
+        try:
+            await callback.message.edit_text(f"🚗 <b>История вашего авто</b>\n\nНажмите кнопку ниже, чтобы открыть полную историю обслуживания.\n\n<i>Обновлено: {update_time}</i>",
+                                             reply_markup=keyboard, parse_mode="HTML")
+        except TelegramBadRequest:
+            await callback.answer("✅ История уже актуальна", show_alert=False)
+    else:
+        try:
+            await callback.message.edit_text("❌ Не удалось сформировать историю.\nПопробуйте позже.", reply_markup=get_main_menu())
+        except TelegramBadRequest:
+            pass
+
+
+@router.message(F.text == "🚗 История авто")
+async def btn_car_history(message: Message):
+    history = await db.get_car_history_by_user_id(message.from_user.id)
+    if not history:
+        await message.answer("🔍 История не найдена.\n\nИстория появится после того, как вы пройдёте обслуживание.", reply_markup=get_main_menu())
+        return
+    loading_msg = await message.answer("⏳ Формирую историю...")
+    user_name = message.from_user.full_name or f"Клиент #{message.from_user.id}"
+    page_url = await get_or_create_telegraph_page(message.from_user.id, user_name, history)
+    await loading_msg.delete()
+    if page_url:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📖 Открыть историю", url=page_url)],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="car_history")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+        ])
+        await message.answer(f"🚗 <b>История вашего авто</b>\n\nНажмите кнопку ниже, чтобы открыть полную историю обслуживания.",
+                             reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await message.answer("❌ Не удалось сформировать историю.\nПопробуйте позже.", reply_markup=get_main_menu())
+
+
+# ==================== ПРОВЕРКА СОСТОЯНИЯ АВТО ====================
+
+@router.callback_query(F.data == "check_car")
+async def start_car_check(callback: CallbackQuery, state: FSMContext):
+    """Начало проверки состояния авто"""
+    cars = await db.get_client_cars_with_id(callback.from_user.id)
+
+    if not cars:
+        await callback.message.edit_text(
+            "🔍 У вас нет зарегистрированных автомобилей.\n\n"
+            "Автомобили появятся после того, как вы пройдёте обслуживание.",
+            reply_markup=get_main_menu()
+        )
+        await callback.answer()
+        return
+
+    if len(cars) == 1:
+        # Одна машина - сразу запрашиваем пробег
+        car = cars[0]
+        await state.update_data(car_id=car['id'])
+        await state.set_state(CarCheckStates.entering_mileage)
+
+        car_display = f"{car['car_brand']} {car['car_model']} ({car['car_number']})"
+        current_mileage = car.get('mileage') or 'не указан'
+
+        await callback.message.edit_text(
+            f"🚗 <b>{car_display}</b>\n\n"
+            f"Последний известный пробег: {current_mileage}\n\n"
+            f"📝 Введите текущий пробег (только число в км):",
+            parse_mode="HTML"
+        )
+    else:
+        # Несколько машин - показываем выбор
+        await state.set_state(CarCheckStates.selecting_car)
+        buttons = []
+        for car in cars:
+            car_display = f"{car['car_brand']} {car['car_model']} ({car['car_number']})"
+            buttons.append([InlineKeyboardButton(text=f"🚗 {car_display}", callback_data=f"checkcar_{car['id']}")])
+        buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+        await callback.message.edit_text("🔍 Выберите автомобиль для проверки:", reply_markup=keyboard)
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("checkcar_"), CarCheckStates.selecting_car)
+async def select_car_for_check(callback: CallbackQuery, state: FSMContext):
+    """Выбор авто для проверки"""
+    car_id = int(callback.data.replace("checkcar_", ""))
+    car = await db.get_car_by_id_full(car_id)
+
+    if not car:
+        await callback.message.edit_text("❌ Автомобиль не найден.", reply_markup=get_main_menu())
+        await state.clear()
+        await callback.answer()
+        return
+
+    await state.update_data(car_id=car_id)
+    await state.set_state(CarCheckStates.entering_mileage)
+
+    car_display = f"{car['car_brand']} {car['car_model']} ({car['car_number']})"
+    current_mileage = car.get('mileage') or 'не указан'
+
+    await callback.message.edit_text(
+        f"🚗 <b>{car_display}</b>\n\n"
+        f"Последний известный пробег: {current_mileage}\n\n"
+        f"📝 Введите текущий пробег (только число в км):",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(CarCheckStates.entering_mileage)
+async def process_mileage_input(message: Message, state: FSMContext):
+    """Обработка ввода пробега"""
+    # Извлекаем число из текста
+    mileage_text = re.sub(r'\D', '', message.text)
+
+    if not mileage_text:
+        await message.answer("❌ Введите число!\n\nПример: 57000")
+        return
+
+    mileage = int(mileage_text)
+
+    if mileage < 0 or mileage > 999999:
+        await message.answer("❌ Некорректный пробег!\n\nВведите число от 0 до 999 999 км.")
+        return
+
+    data = await state.get_data()
+    car_id = data.get('car_id')
+
+    if not car_id:
+        await message.answer("❌ Ошибка. Попробуйте снова.", reply_markup=get_main_menu())
+        await state.clear()
+        return
+
+    # Обновляем пробег в БД
+    await db.update_car_mileage(car_id, mileage)
+
+    # Получаем информацию об авто
+    car = await db.get_car_by_id_full(car_id)
+
+    # Анализируем состояние
+    loading_msg = await message.answer("⏳ Анализирую состояние авто...")
+
+    results = await analyze_car_maintenance(car_id, mileage)
+
+    await loading_msg.delete()
+
+    if not results:
+        await message.answer(
+            "⚠️ <b>Нет данных для анализа</b>\n\n"
+            "Для работы этой функции нужно:\n"
+            "1. Добавить интервалы ТО в настройках\n"
+            "2. Иметь историю обслуживания с указанием пробега\n\n"
+            "Обратитесь к администратору для настройки.",
+            reply_markup=get_main_menu(),
+            parse_mode="HTML"
+        )
+        await state.clear()
+        return
+
+    # Формируем отчёт
+    report = format_maintenance_report(car, mileage, results)
+
+    # Кнопки под отчётом
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Записаться на ТО", callback_data="book")],
+        [InlineKeyboardButton(text="🔄 Проверить снова", callback_data="check_car")],
+        [InlineKeyboardButton(text="📋 Главное меню", callback_data="back_to_menu")]
+    ])
+
+    await message.answer(report, reply_markup=keyboard, parse_mode="HTML")
+    await state.clear()
+
+
+# ==================== LOGGING ====================
+# Путь к файлу логов
+LOG_FILE = os.path.join(_base_path, 'logs', 'bot.log')
+
+# Создаём папку logs если не существует
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+# Настройка логирования в файл и консоль
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ==================== SCHEDULER ====================
+
+bot_instance: Bot = None
+scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+
+
+async def send_evening_reminders():
+    try:
+        bookings = await db.get_tomorrow_bookings_for_reminder()
+        for booking in bookings:
+            try:
+                telegram_user_id = booking.get('telegram_user_id')
+                if not telegram_user_id:
+                    continue
+                booking_date = booking.get('booking_date')
+                booking_time = booking.get('booking_time')
+                if hasattr(booking_date, 'strftime'):
+                    date_str = booking_date.strftime('%d.%m')
+                else:
+                    date_str = str(booking_date)
+                message = (f"🔔 <b>Напоминание о записи!</b>\n\n📅 Завтра, <b>{date_str}</b> в <b>{booking_time}</b>\n"
+                           f"вы записаны в автосервис.\n\nЖдём вас!\n\n{COMPANY_INFO}")
+                await bot_instance.send_message(chat_id=telegram_user_id, text=message, parse_mode="HTML")
+                await db.mark_reminder_sent(booking['id'])
+                logger.info(f"Вечернее напоминание отправлено: user_id={telegram_user_id}, booking_id={booking['id']}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки вечернего напоминания booking_id={booking.get('id')}: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка в send_evening_reminders: {e}")
+
+
+async def send_1h_reminders():
+    try:
+        bookings = await db.get_bookings_for_1h_reminder()
+        for booking in bookings:
+            try:
+                telegram_user_id = booking.get('telegram_user_id')
+                if not telegram_user_id:
+                    continue
+                booking_time = booking.get('booking_time')
+                message = (f"⏰ <b>Напоминание!</b>\n\nВ <b>{booking_time}</b> вы записаны в автосервис.\n\n"
+                           f"Ждём вас!\n\n{COMPANY_INFO}")
+                await bot_instance.send_message(chat_id=telegram_user_id, text=message, parse_mode="HTML")
+                await db.mark_reminder_1h_sent(booking['id'])
+                logger.info(f"Напоминание за 1 час отправлено: user_id={telegram_user_id}, booking_id={booking['id']}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки напоминания за 1 час booking_id={booking.get('id')}: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка в send_1h_reminders: {e}")
+
+
+async def on_startup():
+    await db.connect()
+    await db.init_tables()
+    logger.info("База данных подключена и таблицы созданы")
+    scheduler.add_job(send_evening_reminders, 'cron', hour=20, minute=0)
+    scheduler.add_job(send_1h_reminders, 'cron', hour='9-20', minute='0,30')
+    scheduler.start()
+    logger.info("Планировщик напоминаний запущен")
+
+
+async def on_shutdown():
+    scheduler.shutdown()
+    await db.close()
+    logger.info("Планировщик остановлен, соединение с БД закрыто")
+
+
+# ==================== SYSTEM TRAY ====================
+tray_icon = None
+bot_loop = None
+stop_event = threading.Event()
+
+
+def create_tray_icon():
+    """Создание иконки для системного трея"""
+    # Создаём простую иконку 64x64 с изображением автомобиля
+    size = 64
+    image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+
+    # Фон - круг
+    draw.ellipse([2, 2, size-2, size-2], fill=(52, 152, 219))
+
+    # Корпус автомобиля (упрощённый)
+    draw.rectangle([12, 28, 52, 42], fill='white')  # основа
+    draw.polygon([(18, 28), (26, 18), (42, 18), (48, 28)], fill='white')  # крыша
+
+    # Колёса
+    draw.ellipse([14, 38, 24, 48], fill=(44, 62, 80))
+    draw.ellipse([40, 38, 50, 48], fill=(44, 62, 80))
+
+    return image
+
+
+def on_tray_logs(icon, item):
+    """Открыть окно с логами в live режиме"""
+    try:
+        # Открываем PowerShell с Get-Content -Wait для live просмотра
+        cmd = f'powershell -Command "Get-Content -Path \'{LOG_FILE}\' -Wait -Tail 100"'
+        subprocess.Popen(
+            cmd,
+            creationflags=subprocess.CREATE_NEW_CONSOLE
+        )
+        logger.info("Открыто окно логов")
+    except Exception as e:
+        logger.error(f"Ошибка открытия логов: {e}")
+
+
+def on_tray_exit(icon, item):
+    """Обработчик выхода из трея"""
+    global bot_loop, tray_icon
+    logger.info("Завершение работы через системный трей...")
+    stop_event.set()
+
+    # Останавливаем бот
+    if bot_loop and bot_loop.is_running():
+        bot_loop.call_soon_threadsafe(bot_loop.stop)
+
+    # Останавливаем иконку трея
+    if icon:
+        icon.stop()
+
+
+def setup_tray():
+    """Настройка системного трея"""
+    global tray_icon
+
+    icon_image = create_tray_icon()
+
+    menu = pystray.Menu(
+        pystray.MenuItem("Автосервис Бот", None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Логи", on_tray_logs),
+        pystray.MenuItem("Выход", on_tray_exit)
+    )
+
+    tray_icon = pystray.Icon(
+        name="autoservice_bot",
+        icon=icon_image,
+        title="Автосервис - Telegram бот",
+        menu=menu
+    )
+
+    return tray_icon
+
+
+async def main():
+    global bot_instance, bot_loop
+
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN не найден! Проверьте файл .env")
+        input("Нажмите Enter для выхода...")
+        return
+
+    bot_loop = asyncio.get_event_loop()
+    bot_instance = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+    dp = Dispatcher()
+    dp.include_router(router)
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    logger.info("Бот запускается...")
+
+    try:
+        await dp.start_polling(bot_instance)
+    except asyncio.CancelledError:
+        logger.info("Polling отменён")
+    finally:
+        await on_shutdown()
+
+
+def run_bot():
+    """Запуск бота в отдельном потоке"""
+    asyncio.run(main())
+
+
+if __name__ == "__main__":
+    try:
+        # Создаём и запускаем системный трей
+        icon = setup_tray()
+
+        # Запускаем бота в отдельном потоке
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+
+        logger.info("Приложение запущено в системном трее")
+
+        # Запускаем трей (блокирующий вызов)
+        icon.run()
+
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+        input("Нажмите Enter для выхода...")
