@@ -285,8 +285,11 @@ class LabelTooltip:
 class AutoServiceApp:
     """Главный класс приложения"""
 
-    def __init__(self, root):
+    def __init__(self, root, current_user=None):
         self.root = root
+        self.current_user = current_user or {"id": 0, "username": "?", "full_name": "", "role": "user"}
+        self.logged_out = False
+        self.root.protocol("WM_DELETE_WINDOW", self._confirm_close)
         self.root.title("Калькулятор автосервиса")
         self.root.minsize(800, 600)
         self.root.after(100, lambda: self.root.state('zoomed'))  # Открытие во весь экран
@@ -314,12 +317,12 @@ class AutoServiceApp:
         self.sidebar_title.pack(pady=(20, 20))
 
         # Пункты меню
+        _is_admin = self.current_user.get("role") == "admin"
         self.menu_items = [
             ("Добавить работу", "works"),
             ("Записи", "bookings"),
             ("Склад", "warehouse"),
-            ("Отчёты", "reports"),
-            ("Финансы", "expenses"),
+            *([("Отчёты", "reports"), ("Финансы", "expenses")] if _is_admin else []),
             ("Настройки", "settings")
         ]
 
@@ -333,14 +336,36 @@ class AutoServiceApp:
                 command=lambda n=name: self.switch_tab(n),
                 height=40,
                 corner_radius=8,
-                fg_color="transparent" if name != "works" else None,
-                text_color=("gray10", "gray90"),
-                hover_color=("gray70", "gray30"),
+                fg_color="#1565c0" if name == "works" else "transparent",
+                text_color="white" if name == "works" else ("gray10", "gray90"),
+                hover_color=("#1976d2", "#1976d2"),
                 anchor="w",
                 font=ctk.CTkFont(size=14)
             )
             btn.pack(fill=tk.X, pady=3, padx=10)
             self.menu_buttons[name] = btn
+
+        # Имя пользователя + кнопка выхода внизу сайдбара
+        sidebar_bottom = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        sidebar_bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+        ctk.CTkLabel(
+            sidebar_bottom,
+            text="👤 " + (self.current_user.get("full_name") or self.current_user.get("username", "?")),
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+            anchor="w",
+            wraplength=140
+        ).pack(fill=tk.X, pady=(0, 6))
+        ctk.CTkButton(
+            sidebar_bottom,
+            text="🚪 Выйти",
+            command=self._logout,
+            height=34,
+            corner_radius=8,
+            fg_color="#c62828",
+            hover_color="#b71c1c",
+            font=ctk.CTkFont(size=13)
+        ).pack(fill=tk.X)
 
         # Контейнер для контента справа
         self.content_container = ctk.CTkFrame(self.main_container, corner_radius=10)
@@ -400,6 +425,12 @@ class AutoServiceApp:
         self.keywords_frame = self.add_notebook.tab("Ключевые слова")
         self.setup_keywords_tab()
 
+        # Подвкладка пользователей (только для admin)
+        if self.current_user.get("role") == "admin":
+            self.add_notebook.add("Пользователи")
+            self.users_tab_frame = self.add_notebook.tab("Пользователи")
+            self.setup_users_tab()
+
         # Загрузка данных
         self.refresh_workers_list()
         self.refresh_workers_combo()
@@ -419,9 +450,9 @@ class AutoServiceApp:
         # Обновляем стили кнопок меню
         for name, btn in self.menu_buttons.items():
             if name == tab_name:
-                btn.configure(fg_color=("gray75", "gray25"))
+                btn.configure(fg_color="#1565c0", text_color="white")
             else:
-                btn.configure(fg_color="transparent")
+                btn.configure(fg_color="transparent", text_color=("gray10", "gray90"))
 
         self.current_tab = tab_name
 
@@ -582,6 +613,30 @@ class AutoServiceApp:
         entry_widget.bind("<Control-a>", select_all_wrapper)
         entry_widget.bind("<Control-A>", select_all_wrapper)
 
+    def _confirm_close(self):
+        """Подтверждение закрытия приложения."""
+        if messagebox.askyesno(
+            "Выход",
+            "Закрыть приложение?",
+            parent=self.root
+        ):
+            self.root.destroy()
+
+    def _logout(self):
+        """Выйти из аккаунта и вернуться на экран авторизации."""
+        if messagebox.askyesno(
+            "Выход из аккаунта",
+            "Выйти из аккаунта и вернуться к экрану входа?",
+            parent=self.root
+        ):
+            self.logged_out = True
+            self.root.destroy()
+
+    def _open_user_management(self):
+        """Открыть диалог управления пользователями (только admin)."""
+        from login_window import UserManagementDialog
+        UserManagementDialog(self.root, self.db, self.current_user)
+
     def setup_styles(self):
         """Настройка стилей"""
         style = ttk.Style()
@@ -615,6 +670,129 @@ class AutoServiceApp:
         self.row_tags = ('oddrow', 'evenrow')
 
     # ===== ВКЛАДКА РАБОТНИКОВ =====
+
+    def setup_users_tab(self):
+        main_frame = ctk.CTkFrame(self.users_tab_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        center_container = ctk.CTkFrame(main_frame)
+        center_container.pack(anchor=tk.CENTER, pady=10)
+
+        add_frame = ctk.CTkFrame(center_container)
+        add_frame.pack(fill=tk.X, pady=20)
+        ctk.CTkLabel(add_frame, text="Логин:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.new_user_login = ctk.CTkEntry(add_frame, width=120, fg_color="white", text_color="black", placeholder_text="логин")
+        self.new_user_login.pack(side=tk.LEFT, padx=5, pady=5)
+        ctk.CTkLabel(add_frame, text="Пароль:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.new_user_pass = ctk.CTkEntry(add_frame, width=120, show="•", fg_color="white", text_color="black", placeholder_text="пароль")
+        self.new_user_pass.pack(side=tk.LEFT, padx=5, pady=5)
+        ctk.CTkLabel(add_frame, text="Имя:").pack(side=tk.LEFT, padx=5, pady=5)
+        self.new_user_name = ctk.CTkEntry(add_frame, width=150, fg_color="white", text_color="black", placeholder_text="отображаемое имя")
+        self.new_user_name.pack(side=tk.LEFT, padx=5, pady=5)
+        self.new_user_role = tk.StringVar(value="user")
+        ctk.CTkRadioButton(add_frame, text="Польз.", variable=self.new_user_role, value="user").pack(side=tk.LEFT, padx=4)
+        ctk.CTkRadioButton(add_frame, text="Админ",  variable=self.new_user_role, value="admin").pack(side=tk.LEFT, padx=4)
+        ctk.CTkButton(add_frame, text="Добавить", command=self._add_user_from_tab,
+                      fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=10, pady=5)
+
+        list_frame = ctk.CTkFrame(center_container)
+        list_frame.pack(fill=tk.X, pady=10)
+        cols = ("username", "full_name", "role", "status")
+        self.users_tree = ttk.Treeview(list_frame, columns=cols, show="headings", height=15)
+        self.users_tree.heading("username",  text="Логин")
+        self.users_tree.heading("full_name", text="Имя")
+        self.users_tree.heading("role",      text="Роль")
+        self.users_tree.heading("status",    text="Статус")
+        self.users_tree.column("username",  width=140, anchor=tk.W)
+        self.users_tree.column("full_name", width=210, anchor=tk.W)
+        self.users_tree.column("role",      width=130, anchor=tk.CENTER)
+        self.users_tree.column("status",    width=110, anchor=tk.CENTER)
+        self.users_tree.tag_configure("oddrow",  background="#ffffff")
+        self.users_tree.tag_configure("evenrow", background="#f0f0f0")
+        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.users_tree.yview)
+        self.users_tree.configure(yscrollcommand=sb.set)
+        self.users_tree.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        sb.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
+
+        btn_frame = ctk.CTkFrame(center_container, fg_color="transparent")
+        btn_frame.pack(pady=10)
+        ctk.CTkButton(btn_frame, text="Сменить пароль", width=180,
+                      command=self._users_tab_change_password).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text="Блок / Разблок", width=160,
+                      fg_color="orange", hover_color="#e65100",
+                      command=self._users_tab_toggle_active).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text="Удалить", width=120,
+                      fg_color="red", hover_color="darkred",
+                      command=self._users_tab_delete).pack(side=tk.LEFT, padx=5)
+        self.refresh_users_list()
+
+    def _add_user_from_tab(self):
+        username  = self.new_user_login.get().strip()
+        password  = self.new_user_pass.get()
+        full_name = self.new_user_name.get().strip()
+        role      = self.new_user_role.get()
+        if not username or not password:
+            messagebox.showwarning("Внимание", "Введите логин и пароль!", parent=self.root)
+            return
+        if self.db.create_user(username, password, full_name, role):
+            messagebox.showinfo("Успех", f"Пользователь '{username}' добавлен!", parent=self.root)
+            self.new_user_login.delete(0, tk.END)
+            self.new_user_pass.delete(0, tk.END)
+            self.new_user_name.delete(0, tk.END)
+            self.refresh_users_list()
+        else:
+            messagebox.showerror("Ошибка", "Пользователь с таким логином уже существует!", parent=self.root)
+
+    def _users_tab_selected_id(self):
+        sel = self.users_tree.selection()
+        if not sel:
+            messagebox.showwarning("Внимание", "Выберите пользователя!", parent=self.root)
+            return None
+        return int(self.users_tree.item(sel[0])["tags"][0])
+
+    def _users_tab_change_password(self):
+        uid = self._users_tab_selected_id()
+        if uid is None:
+            return
+        from login_window import ChangePasswordDialog
+        ChangePasswordDialog(self.root, self.db, uid, on_saved=self.refresh_users_list)
+
+    def _users_tab_toggle_active(self):
+        uid = self._users_tab_selected_id()
+        if uid is None:
+            return
+        if uid == self.current_user["id"]:
+            messagebox.showwarning("Ошибка", "Нельзя заблокировать себя!", parent=self.root)
+            return
+        users = {u["id"]: u for u in self.db.get_all_users()}
+        u = users.get(uid)
+        if u:
+            self.db.set_user_active(uid, not u["is_active"])
+            self.refresh_users_list()
+
+    def _users_tab_delete(self):
+        uid = self._users_tab_selected_id()
+        if uid is None:
+            return
+        if uid == self.current_user["id"]:
+            messagebox.showwarning("Ошибка", "Нельзя удалить себя!", parent=self.root)
+            return
+        uname = self.users_tree.item(self.users_tree.selection()[0])["values"][0]
+        if messagebox.askyesno("Подтверждение", f"Удалить пользователя '{uname}'?", parent=self.root):
+            self.db.delete_user(uid)
+            self.refresh_users_list()
+
+    def refresh_users_list(self):
+        if not hasattr(self, "users_tree"):
+            return
+        for item in self.users_tree.get_children():
+            self.users_tree.delete(item)
+        for i, u in enumerate(self.db.get_all_users()):
+            role_label   = "Администратор" if u["role"] == "admin" else "Пользователь"
+            status_label = "Активен" if u["is_active"] else "Заблокирован"
+            tag = "oddrow" if i % 2 == 0 else "evenrow"
+            self.users_tree.insert("", tk.END,
+                values=(u["username"], u["full_name"] or "", role_label, status_label),
+                tags=(str(u["id"]), tag))
 
     def setup_workers_tab(self):
         """Настройка вкладки работников"""
@@ -716,7 +894,6 @@ class AutoServiceApp:
         """Настройка вкладки добавления работ"""
         # Используем прокручиваемый фрейм для поддержки маленьких экранов
         main_frame = ctk.CTkScrollableFrame(self.works_frame)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # Центрированный контейнер для всех элементов
         center_container = ctk.CTkFrame(main_frame)
@@ -900,14 +1077,29 @@ class AutoServiceApp:
         # Разделитель - Запчасти
         separator_parts = ctk.CTkFrame(center_container, height=2, fg_color="gray70")
         separator_parts.pack(fill=tk.X, pady=10)
-        ctk.CTkLabel(center_container, text="Запчасти", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=5)
+        parts_header_row = ctk.CTkFrame(center_container, fg_color="transparent")
+        parts_header_row.pack(fill=tk.X, padx=5)
 
-        # Секция запчастей (на всю ширину)
-        parts_container = ctk.CTkFrame(center_container)
-        parts_container.pack(fill=tk.X, pady=10)
+        self.parts_toggle_btn = ctk.CTkButton(
+            parts_header_row, text="+ добавить запчасть",
+            font=("Segoe UI", 14, "bold"),
+            fg_color="transparent", text_color=("gray10", "gray90"),
+            hover_color=("gray70", "gray30"), anchor="w",
+            command=self.toggle_parts_section
+        )
+        self.parts_toggle_btn.pack(side=tk.LEFT)
+
+        self.warehouse_notice_label = ctk.CTkLabel(
+            parts_header_row, text="",
+            text_color="#FF9800", font=("Segoe UI", 12, "bold")
+        )
+        self.warehouse_notice_label.pack(side=tk.LEFT, padx=10)
+
+        # Секция запчастей (на всю ширину, скрыта по умолчанию)
+        self.parts_container = ctk.CTkFrame(center_container)
 
         # Таблица запчастей (на всю ширину)
-        parts_table_frame = ctk.CTkFrame(parts_container)
+        parts_table_frame = ctk.CTkFrame(self.parts_container)
         parts_table_frame.pack(fill=tk.X, pady=5, padx=5)
 
         columns = ("part_name", "part_price")
@@ -925,7 +1117,7 @@ class AutoServiceApp:
         scrollbar_parts.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Ввод запчасти
-        parts_input_frame = ctk.CTkFrame(parts_container)
+        parts_input_frame = ctk.CTkFrame(self.parts_container)
         parts_input_frame.pack(fill=tk.X, pady=5, padx=5)
 
         # Название запчасти
@@ -946,22 +1138,32 @@ class AutoServiceApp:
         self.part_price_entry.pack(side=tk.LEFT, padx=5)
 
         # Кнопки для запчастей в один ряд
-        parts_buttons_frame = ctk.CTkFrame(parts_container)
+        parts_buttons_frame = ctk.CTkFrame(self.parts_container)
         parts_buttons_frame.pack(fill=tk.X, pady=5, padx=5)
 
         ctk.CTkButton(parts_buttons_frame, text="Добавить запчасть",
                    command=self.add_part_to_list, width=200).pack(side=tk.LEFT, padx=5)
         ctk.CTkButton(parts_buttons_frame, text="Удалить выбранную",
                    command=self.remove_part_from_list, width=200, fg_color="red", hover_color="darkred").pack(side=tk.LEFT, padx=5)
+        self.add_from_warehouse_btn = ctk.CTkButton(
+            parts_buttons_frame, text="Добавить со склада",
+            command=self.add_part_from_warehouse, width=200,
+            fg_color="#1565c0", hover_color="#0d47a1"
+        )
+        # Кнопка скрыта по умолчанию
 
         # Список запчастей (временное хранилище)
         self.parts_list = []
+        self.warehouse_part_ids = {}       # tree_item_id → warehouse_part_id
+        self.current_car_warehouse_parts = []
 
-        # Кнопка добавления записи (по центру)
-        button_frame = ctk.CTkFrame(center_container, fg_color="transparent")
-        button_frame.pack(fill=tk.X, pady=20)
+        # Кнопка добавления записи — закреплена снизу, вне скролла
+        button_frame = ctk.CTkFrame(self.works_frame, fg_color="transparent")
+        button_frame.pack(fill=tk.X, padx=10, pady=10, side=tk.BOTTOM)
         ctk.CTkButton(button_frame, text="Добавить запись",
                    command=self.add_work, width=300, height=50, fg_color="green", hover_color="darkgreen").pack(anchor=tk.CENTER)
+
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
 
     # Обработчики автокомплита для марки
     def on_brand_keyrelease(self, event):
@@ -1247,6 +1449,9 @@ class AutoServiceApp:
                         self.client_cars_combo.set(display_text)
                         break
 
+        # Проверяем склад на наличие запчастей для этого авто
+        self.check_warehouse_for_car(self.car_number_entry.get().strip())
+
     def show_client_selection_dialog(self, clients, car_number):
         """Показать диалог выбора клиента для госномера"""
         dialog = ctk.CTkToplevel(self.root)
@@ -1384,6 +1589,121 @@ class AutoServiceApp:
         self.worker_combo.configure(values=worker_names)
         self.worker_combo.set("Выберите мастера")
 
+    def check_warehouse_for_car(self, car_number):
+        """Проверить склад на наличие запчастей для данного автомобиля"""
+        if not car_number:
+            self.warehouse_notice_label.configure(text="")
+            self.add_from_warehouse_btn.pack_forget()
+            self.current_car_warehouse_parts = []
+            return
+        parts = self.db.get_warehouse_parts_by_car_number(car_number)
+        self.current_car_warehouse_parts = parts
+        if parts:
+            count = len(parts)
+            text = f"⚠ На складе есть {count} деталей для этого клиента" if count > 1 else "⚠ На складе есть деталь для этого клиента"
+            self.warehouse_notice_label.configure(text=text)
+            self.add_from_warehouse_btn.pack(side=tk.LEFT, padx=5)
+        else:
+            self.warehouse_notice_label.configure(text="")
+            self.add_from_warehouse_btn.pack_forget()
+
+    def add_part_from_warehouse(self):
+        """Добавить запчасть со склада в список"""
+        parts = self.current_car_warehouse_parts
+        if not parts:
+            return
+        self._show_warehouse_part_selection(parts)
+
+    def _add_warehouse_part_to_list(self, part):
+        """Добавить одну складскую запчасть в таблицу"""
+        part_id, part_name, quantity, price, notes = part
+        price = float(price) if price else 0.0
+
+        self.parts_list.append((part_name, price))
+        item_id = self.parts_tree.insert("", tk.END, values=(part_name, self.format_currency(price)))
+        self.warehouse_part_ids[item_id] = part_id
+
+        # Помечаем как установленную в базе
+        self.db.update_warehouse_part_status(part_id, "установлена")
+
+        # Убираем из доступных и обновляем уведомление
+        self.current_car_warehouse_parts = [p for p in self.current_car_warehouse_parts if p[0] != part_id]
+        if not self.current_car_warehouse_parts:
+            self.add_from_warehouse_btn.pack_forget()
+            self.warehouse_notice_label.configure(text="")
+        else:
+            count = len(self.current_car_warehouse_parts)
+            text = f"⚠ На складе ещё {count} деталей" if count > 1 else "⚠ На складе ещё 1 деталь"
+            self.warehouse_notice_label.configure(text=text)
+
+        self.update_total_cost()
+        self.refresh_warehouse()
+
+    def _show_warehouse_part_selection(self, parts):
+        """Диалог выбора запчастей со склада (с чекбоксами)"""
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Выбрать запчасти со склада")
+        dialog.geometry("480x" + str(min(120 + len(parts) * 48, 480)))
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        ctk.CTkLabel(dialog, text="Выберите запчасти для добавления:",
+                     font=("Segoe UI", 13, "bold")).pack(pady=(14, 6), padx=15, anchor="w")
+
+        # Кнопки — пакуем ПЕРВЫМИ с side=BOTTOM, чтобы всегда были видны
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(fill=tk.X, padx=15, pady=(6, 14), side=tk.BOTTOM)
+
+        # Список с чекбоксами — пакуем ПОСЛЕ кнопок, заполняет оставшееся место
+        scroll_frame = ctk.CTkScrollableFrame(dialog)
+        scroll_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=4)
+
+        check_vars = []
+        for part in parts:
+            part_id, part_name, quantity, price, notes = part
+            price_str = self.format_currency(float(price)) if price else "—"
+            var = tk.BooleanVar(value=False)
+            check_vars.append(var)
+            row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+            row.pack(fill=tk.X, pady=3)
+            ctk.CTkCheckBox(row, text=f"{part_name}  |  {price_str}",
+                            variable=var, font=("Segoe UI", 12)).pack(side=tk.LEFT, padx=5)
+
+        def select_all():
+            all_checked = all(v.get() for v in check_vars)
+            for v in check_vars:
+                v.set(not all_checked)
+            select_all_btn.configure(text="Снять всё" if not all_checked else "Выделить всё")
+
+        select_all_btn = ctk.CTkButton(btn_row, text="Выделить всё", width=140,
+                                       fg_color="transparent", border_width=1,
+                                       text_color=("gray10", "gray90"),
+                                       command=select_all)
+        select_all_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        def on_add():
+            selected = [parts[i] for i, v in enumerate(check_vars) if v.get()]
+            if not selected:
+                messagebox.showwarning("Внимание", "Выберите хотя бы одну запчасть!", parent=dialog)
+                return
+            dialog.destroy()
+            for part in selected:
+                self._add_warehouse_part_to_list(part)
+
+        ctk.CTkButton(btn_row, text="Добавить", width=140,
+                      fg_color="#1565c0", hover_color="#0d47a1",
+                      command=on_add).pack(side=tk.RIGHT)
+
+    def toggle_parts_section(self):
+        """Показать/скрыть секцию запчастей"""
+        if self.parts_container.winfo_ismapped():
+            self.parts_container.pack_forget()
+            self.parts_toggle_btn.configure(text="+ добавить запчасть")
+        else:
+            self.parts_container.pack(fill=tk.X, pady=10)
+            self.parts_toggle_btn.configure(text="− запчасти")
+
     def add_part_to_list(self):
         """Добавить запчасть в список"""
         part_name = self.part_name_entry.get().strip()
@@ -1419,14 +1739,29 @@ class AutoServiceApp:
             messagebox.showwarning("Внимание", "Выберите запчасть для удаления!")
             return
 
+        item_id = selected[0]
+
+        # Если запчасть добавлена со склада — возвращаем её на склад
+        if item_id in self.warehouse_part_ids:
+            wh_part_id = self.warehouse_part_ids.pop(item_id)
+            self.db.update_warehouse_part_status(wh_part_id, "на складе")
+            car_number = self.car_number_entry.get().strip()
+            self.current_car_warehouse_parts = self.db.get_warehouse_parts_by_car_number(car_number)
+            count = len(self.current_car_warehouse_parts)
+            if count:
+                text = f"⚠ На складе есть {count} деталей для этого клиента" if count > 1 else "⚠ На складе есть деталь для этого клиента"
+                self.warehouse_notice_label.configure(text=text)
+                self.add_from_warehouse_btn.pack(side=tk.LEFT, padx=5)
+            self.refresh_warehouse()
+
         # Получаем индекс выбранного элемента
-        item_index = self.parts_tree.index(selected[0])
+        item_index = self.parts_tree.index(item_id)
 
         # Удаляем из списка
         del self.parts_list[item_index]
 
         # Удаляем из таблицы
-        self.parts_tree.delete(selected[0])
+        self.parts_tree.delete(item_id)
 
         # Обновляем общую стоимость
         self.update_total_cost()
@@ -1614,7 +1949,7 @@ class AutoServiceApp:
                         messagebox.showinfo("Успех", "Работа добавлена к существующей!")
 
                         # Очищаем форму и выходим
-                        self.clear_work_form()
+                        self.clear_work_form(restore_warehouse=False)
                         return
                     # Если нет - продолжаем создавать новую работу
 
@@ -1649,7 +1984,7 @@ class AutoServiceApp:
                         messagebox.showinfo("Успех", "Работа добавлена к существующей записи!")
 
                         # Очищаем форму и выходим
-                        self.clear_work_form()
+                        self.clear_work_form(restore_warehouse=False)
                         return
                     else:
                         # Пользователь отказался - отменяем добавление
@@ -1721,10 +2056,10 @@ class AutoServiceApp:
 
             messagebox.showinfo("Успех", "Запись добавлена!")
 
-        # Очищаем форму
-        self.clear_work_form()
+        # Очищаем форму (детали со склада остаются как "установлена")
+        self.clear_work_form(restore_warehouse=False)
 
-    def clear_work_form(self):
+    def clear_work_form(self, restore_warehouse=True):
         """Очистить форму добавления работы"""
         self.works_list = []
         for item in self.works_tree.get_children():
@@ -1741,6 +2076,15 @@ class AutoServiceApp:
         self.client_cars_combo.configure(values=["Новая машина"])
         self.client_cars_combo.set("")
         self.client_cars_data = {}
+
+        # Возвращаем складские запчасти обратно на склад (только при ручной очистке)
+        if restore_warehouse:
+            for wh_part_id in self.warehouse_part_ids.values():
+                self.db.update_warehouse_part_status(wh_part_id, "на складе")
+        self.warehouse_part_ids = {}
+        self.current_car_warehouse_parts = []
+        self.warehouse_notice_label.configure(text="")
+        self.add_from_warehouse_btn.pack_forget()
 
         # Очищаем список запчастей
         self.parts_list = []
@@ -1831,13 +2175,34 @@ class AutoServiceApp:
         TreeviewTooltip(self.warehouse_tree, columns=["part_name", "notes"])
 
         # Контекстное меню для редактирования
-        self.warehouse_context_menu = tk.Menu(self.warehouse_tree, tearoff=0)
-        self.warehouse_context_menu.add_command(label="Редактировать", command=self.edit_warehouse_part)
+        self.warehouse_context_menu = tk.Menu(
+            self.warehouse_tree, tearoff=0,
+            bg="#1e1e1e", fg="white", bd=0,
+            activebackground="#2d2d2d", activeforeground="white",
+            font=("Segoe UI", 11)
+        )
+        self.warehouse_context_menu.add_command(
+            label="  ✏  Редактировать", command=self.edit_warehouse_part,
+            foreground="#64b5f6", activeforeground="#90caf9",
+            background="#1e1e1e", activebackground="#1976d2"
+        )
         self.warehouse_context_menu.add_separator()
-        self.warehouse_context_menu.add_command(label="На склад", command=lambda: self.update_part_status("на складе"))
-        self.warehouse_context_menu.add_command(label="Выдано", command=lambda: self.update_part_status("выдано"))
+        self.warehouse_context_menu.add_command(
+            label="  📦  На склад", command=lambda: self.update_part_status("на складе"),
+            foreground="#81c784", activeforeground="#a5d6a7",
+            background="#1e1e1e", activebackground="#2e7d32"
+        )
+        self.warehouse_context_menu.add_command(
+            label="  ✅  Выдано", command=lambda: self.update_part_status("выдано"),
+            foreground="#ffb74d", activeforeground="#ffcc80",
+            background="#1e1e1e", activebackground="#e65100"
+        )
         self.warehouse_context_menu.add_separator()
-        self.warehouse_context_menu.add_command(label="Удалить", command=self.delete_warehouse_part)
+        self.warehouse_context_menu.add_command(
+            label="  🗑  Удалить", command=self.delete_warehouse_part,
+            foreground="#ef5350", activeforeground="#ef9a9a",
+            background="#1e1e1e", activebackground="#c62828"
+        )
 
         def show_warehouse_context_menu(event):
             # Выбираем строку под курсором
@@ -1847,17 +2212,6 @@ class AutoServiceApp:
                 self.warehouse_context_menu.tk_popup(event.x_root, event.y_root)
 
         self.warehouse_tree.bind("<Button-3>", show_warehouse_context_menu)
-
-        # Нижняя панель с кнопками действий
-        actions_frame = ctk.CTkFrame(self.warehouse_frame)
-        actions_frame.pack(pady=10)
-
-        ctk.CTkButton(actions_frame, text="На склад", command=lambda: self.update_part_status("на складе"),
-                     fg_color="#2e7d32", hover_color="#1b5e20", width=100).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(actions_frame, text="Выдано", command=lambda: self.update_part_status("выдано"),
-                     fg_color="#7b1fa2", hover_color="#6a1b9a", width=100).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(actions_frame, text="Удалить", command=self.delete_warehouse_part,
-                     fg_color="#c62828", hover_color="#b71c1c", width=100).pack(side=tk.LEFT, padx=5)
 
         # Форма добавления запчасти (скрыта по умолчанию)
         self.add_part_form_frame = ctk.CTkFrame(self.warehouse_frame)
@@ -2308,6 +2662,13 @@ class AutoServiceApp:
 
         values = self.warehouse_tree.item(selection[0], "values")
         part_id = int(values[0])
+        current_status = values[6]  # колонка статуса
+
+        # Защита от смены статуса "выдано"
+        if current_status == "выдано":
+            if not messagebox.askyesno("Подтверждение",
+                    "Вы точно хотите вернуть выданную деталь на склад?"):
+                return
 
         # Если статус "на складе", устанавливаем дату прихода
         received_date = None
@@ -2422,6 +2783,13 @@ class AutoServiceApp:
 
             new_status = status_var.get()
             new_notes = notes_entry.get().strip() or None
+
+            # Защита от смены статуса "выдано"
+            if part_data.get('status') == 'выдано' and new_status != 'выдано':
+                if not messagebox.askyesno("Подтверждение",
+                        "Вы точно хотите вернуть выданную деталь на склад?",
+                        parent=edit_window):
+                    return
 
             self.db.update_warehouse_part(part_id, new_part_name, new_quantity, new_price, new_status, new_notes)
             edit_window.destroy()
@@ -3896,6 +4264,8 @@ class AutoServiceApp:
         self.bookings_search_entry.bind("<Return>", lambda e: self.refresh_bookings())
         ctk.CTkButton(filter_frame, text="✕", command=self.clear_bookings_search,
                      width=30, fg_color="#c62828", hover_color="#b71c1c").pack(side=tk.LEFT, padx=2)
+        ctk.CTkButton(filter_frame, text="Записать клиента", command=self.show_add_booking_window,
+                     fg_color="#1565c0", hover_color="#0d47a1", width=140).pack(side=tk.LEFT, padx=(15, 5))
 
         # Таблица записей
         table_frame = ctk.CTkFrame(self.bookings_frame)
@@ -3937,26 +4307,52 @@ class AutoServiceApp:
         self.bookings_tree.tag_configure("cancelled", background="#ffebee", foreground="#c62828")   # Красный - Отменена
 
         # Контекстное меню для записей
-        self.bookings_context_menu = tk.Menu(self.bookings_tree, tearoff=0)
-        self.bookings_context_menu.add_command(label="Начать работу", command=self.start_work_from_booking)
-        self.bookings_context_menu.add_command(label="Редактировать", command=self.edit_booking_in_add_work)
+        self.bookings_context_menu = tk.Menu(
+            self.bookings_tree, tearoff=0,
+            bg="#1e1e1e", fg="white", bd=0,
+            activebackground="#2d2d2d", activeforeground="white",
+            font=("Segoe UI", 11)
+        )
+        self.bookings_context_menu.add_command(
+            label="  🔧  Начать работу", command=self.start_work_from_booking,
+            foreground="#81c784", activeforeground="#a5d6a7",
+            background="#1e1e1e", activebackground="#2e7d32"
+        )
+        self.bookings_context_menu.add_command(
+            label="  ✏  Редактировать", command=self.edit_booking_in_add_work,
+            foreground="#64b5f6", activeforeground="#90caf9",
+            background="#1e1e1e", activebackground="#1976d2"
+        )
         self.bookings_context_menu.add_separator()
-        self.bookings_context_menu.add_command(label="Информация", command=self.show_booking_info)
-        self.bookings_context_menu.add_command(label="О клиенте", command=self.show_client_info)
+        self.bookings_context_menu.add_command(
+            label="  📋  Информация", command=self.show_booking_info,
+            foreground="#ce93d8", activeforeground="#e1bee7",
+            background="#1e1e1e", activebackground="#6a1b9a"
+        )
+        self.bookings_context_menu.add_command(
+            label="  👤  О клиенте", command=self.show_client_info,
+            foreground="#80deea", activeforeground="#b2ebf2",
+            background="#1e1e1e", activebackground="#00838f"
+        )
+        self.bookings_context_menu.add_separator()
+        self.bookings_context_menu.add_command(
+            label="  ✅  Выполнено", command=self.mark_booking_completed,
+            foreground="#81c784", activeforeground="#a5d6a7",
+            background="#1e1e1e", activebackground="#2e7d32"
+        )
+        self.bookings_context_menu.add_command(
+            label="  ❌  Отменено", command=self.mark_booking_cancelled,
+            foreground="#ffb74d", activeforeground="#ffe0b2",
+            background="#1e1e1e", activebackground="#e65100"
+        )
+        self.bookings_context_menu.add_command(
+            label="  🗑  Удалить", command=self.delete_selected_booking,
+            foreground="#ef9a9a", activeforeground="#ffcdd2",
+            background="#1e1e1e", activebackground="#c62828"
+        )
         self.bookings_tree.bind("<Button-3>", self.show_bookings_context_menu)
 
-        # Нижняя панель с кнопками действий (по центру)
-        actions_frame = ctk.CTkFrame(self.bookings_frame)
-        actions_frame.pack(pady=10)
 
-        ctk.CTkButton(actions_frame, text="Записать клиента", command=self.show_add_booking_window,
-                     fg_color="#1565c0", hover_color="#0d47a1", width=140).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(actions_frame, text="Выполнено", command=self.mark_booking_completed,
-                     fg_color="#2e7d32", hover_color="#1b5e20", width=120).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(actions_frame, text="Отменено", command=self.mark_booking_cancelled,
-                     fg_color="#f57c00", hover_color="#e65100", width=120).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(actions_frame, text="Удалить", command=self.delete_selected_booking,
-                     fg_color="#c62828", hover_color="#b71c1c", width=120).pack(side=tk.LEFT, padx=5)
 
     def clear_bookings_search(self):
         """Очистить поле поиска и обновить список"""
@@ -4062,6 +4458,17 @@ class AutoServiceApp:
 
             self.db.update_booking_status(booking_id, "completed")
             self.refresh_bookings()
+
+            # Помечаем использованные складские запчасти как "выдано"
+            work = self.db.get_work_by_booking_id(booking_id)
+            if work:
+                car_number = work[8]
+                if car_number:
+                    wh_parts = self.db.get_warehouse_parts_by_car_number(car_number, status="установлена")
+                    for wh_part in wh_parts:
+                        self.db.update_warehouse_part_status(wh_part[0], "выдано")
+                    if wh_parts:
+                        self.refresh_warehouse()
 
             # Отправляем уведомление в Telegram
             if booking and booking.get("user_id"):
@@ -5425,9 +5832,54 @@ class AutoServiceApp:
 
 
 def main():
-    root = ctk.CTk()  # Используем CustomTkinter вместо Tkinter
-    app = AutoServiceApp(root)
-    root.mainloop()
+    from license import check_license
+    from login_window import LoginWindow
+    import tkinter.messagebox as _mb
+
+    # 1. Проверка лицензии
+    ok, msg = check_license()
+    if not ok:
+        import tkinter as _tk
+        _r = _tk.Tk()
+        _r.withdraw()
+        _mb.showerror("Доступ запрещён", msg)
+        _r.destroy()
+        sys.exit(1)
+
+    # 2. Авторизация + цикл повторного входа
+    _db = Database()
+    while True:
+        login_win = LoginWindow(_db)
+        login_win.mainloop()
+        user = login_win.logged_user
+        login_win.destroy()
+
+        if user is None:
+            sys.exit(0)
+
+        # 3. Проверка обновлений (фоновая, не блокирует вход)
+        try:
+            from updater import check_for_update, show_update_dialog, apply_update
+            _upd = check_for_update()
+        except Exception:
+            _upd = None
+
+        # 4. Основное приложение
+        root = ctk.CTk()
+        app = AutoServiceApp(root, current_user=user)
+
+        # Показываем диалог обновления после открытия окна
+        if _upd:
+            def _offer_update():
+                if show_update_dialog(_upd, parent=root):
+                    apply_update(_upd["download_url"], parent_widget=root)
+            root.after(800, _offer_update)
+
+        root.mainloop()
+
+        # Если нажал «Выйти» — снова показываем логин, иначе выходим
+        if not app.logged_out:
+            break
 
 
 if __name__ == "__main__":
