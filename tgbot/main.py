@@ -11,9 +11,18 @@ import json
 import threading
 import sys
 import subprocess
+import ipaddress
+from uuid import uuid4
 from datetime import datetime, timedelta, date as dt_date
 
+try:
+    from yookassa import Configuration as YKConfiguration, Payment as YKPayment
+    YOKASSA_AVAILABLE = True
+except ImportError:
+    YOKASSA_AVAILABLE = False
+
 import aiohttp
+import aiohttp.web
 import aiomysql
 from aiogram import Bot, Dispatcher, Router, F
 
@@ -57,6 +66,20 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME", "alexauto")
 }
 
+# ЮKassa
+YOKASSA_SHOP_ID = os.getenv("YOKASSA_SHOP_ID", "")
+YOKASSA_SECRET_KEY = os.getenv("YOKASSA_SECRET_KEY", "")
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", 8080))
+ADMIN_TELEGRAM_ID_STR = os.getenv("ADMIN_TELEGRAM_ID", "")
+ADMIN_TELEGRAM_ID = int(ADMIN_TELEGRAM_ID_STR) if ADMIN_TELEGRAM_ID_STR.isdigit() else None
+YOKASSA_DEV_MODE = os.getenv("YOKASSA_DEV_MODE", "False").lower() in ("true", "1", "yes")
+
+# Настройка ЮKassa SDK
+if YOKASSA_AVAILABLE and YOKASSA_SHOP_ID and YOKASSA_SECRET_KEY:
+    YKConfiguration.account_id = YOKASSA_SHOP_ID
+    YKConfiguration.secret_key = YOKASSA_SECRET_KEY
+
 WORKING_HOURS_START = 10
 WORKING_HOURS_END = 20
 SLOT_DURATION = 2
@@ -96,6 +119,76 @@ def _generate_time_slots():
     return slots
 
 TIME_SLOTS = _generate_time_slots()
+
+# ==================== SUBSCRIPTION PLANS ====================
+SUBSCRIPTION_PLANS = {
+    'basic': {
+        'name': '🟢 Basic',
+        'price': 9900.00,
+        'features': [
+            '2 замены масла (работа бесплатно)',
+            'Диагностика ходовой 2 раза',
+            'Проверка АКБ',
+            'Проверка тормозов',
+            'Проверка жидкостей',
+            'Скидка 10% на работу',
+        ]
+    },
+    'premium': {
+        'name': '🔵 Premium',
+        'price': 23900.00,
+        'features': [
+            '2 замены масла (всё включено)',
+            'Эвакуатор 1 раз',
+            'Диагностика 3 раза',
+            'Проверка подвески',
+            'Проверка тормозов',
+            'Проверка АКБ',
+            'Проверка кондиционера',
+            'Приоритетная запись',
+            'Скидка 15% на работу',
+        ]
+    },
+    'vip': {
+        'name': '🟡 VIP',
+        'price': 39900.00,
+        'features': [
+            '2 замены масла (всё включено)',
+            'Эвакуатор 2 раза',
+            'Диагностика без ограничений',
+            'Проверка подвески',
+            'Проверка тормозов',
+            'Проверка АКБ',
+            'Проверка кондиционера',
+            'Сезонная подготовка авто',
+            'Приоритетная запись',
+            'Скидка 20% на работу',
+        ]
+    }
+}
+
+# ==================== YOKASSA IP WHITELIST ====================
+_YOKASSA_IP_NETWORKS = [
+    ipaddress.ip_network('185.71.76.0/27'),
+    ipaddress.ip_network('185.71.77.0/27'),
+    ipaddress.ip_network('77.75.153.0/25'),
+    ipaddress.ip_network('77.75.154.128/25'),
+    ipaddress.ip_network('2a02:5180::/32'),
+]
+_YOKASSA_SINGLE_IPS = {'77.75.156.11', '77.75.156.35'}
+
+
+def is_yokassa_ip(ip_str: str) -> bool:
+    if YOKASSA_DEV_MODE:
+        return True
+    try:
+        if ip_str in _YOKASSA_SINGLE_IPS:
+            return True
+        ip = ipaddress.ip_address(ip_str)
+        return any(ip in net for net in _YOKASSA_IP_NETWORKS)
+    except ValueError:
+        return False
+
 
 # ==================== DATABASE ====================
 class Database:
@@ -191,6 +284,22 @@ class Database:
                         await cur.execute(idx)
                     except:
                         pass
+
+                # Таблица подписок
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS subscriptions (
+                        id          INT AUTO_INCREMENT PRIMARY KEY,
+                        client_id   INT NOT NULL,
+                        plan        ENUM('basic','premium','vip') NOT NULL,
+                        status      ENUM('active','expired','pending') DEFAULT 'pending',
+                        started_at  DATETIME,
+                        expires_at  DATETIME,
+                        payment_id  VARCHAR(100) UNIQUE,
+                        amount      DECIMAL(10,2),
+                        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (client_id) REFERENCES clients(id)
+                    ) ENGINE=InnoDB
+                """)
 
     def _normalize_phone(self, phone: str) -> str | None:
         if not phone:
@@ -543,6 +652,89 @@ class Database:
             async with conn.cursor() as cur:
                 await cur.execute("UPDATE bookings SET reminder_1h_sent = TRUE WHERE id = %s", (booking_id,))
 
+    # --- Методы для подписок ---
+
+    async def get_active_subscription(self, client_id: int) -> dict | None:
+        """Получить активную подписку клиента"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("""
+                    SELECT * FROM subscriptions
+                    WHERE client_id = %s AND status = 'active' AND expires_at > NOW()
+                    ORDER BY expires_at DESC LIMIT 1
+                """, (client_id,))
+                return await cur.fetchone()
+
+    async def create_pending_subscription(self, client_id: int, plan: str, payment_id: str, amount: float):
+        """Создать запись о подписке со статусом pending при инициации оплаты"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    INSERT INTO subscriptions (client_id, plan, status, payment_id, amount)
+                    VALUES (%s, %s, 'pending', %s, %s)
+                """, (client_id, plan, payment_id, amount))
+
+    async def activate_subscription(self, payment_id: str) -> bool:
+        """Активировать подписку после успешной оплаты.
+        Возвращает True если активирована, False если уже была активная."""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                # Получаем pending-запись
+                await cur.execute(
+                    "SELECT client_id FROM subscriptions WHERE payment_id = %s AND status = 'pending'",
+                    (payment_id,)
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return False
+                client_id = row[0]
+                # Если уже есть активная подписка — не активируем повторно
+                await cur.execute(
+                    "SELECT id FROM subscriptions WHERE client_id = %s AND status = 'active' AND expires_at > NOW()",
+                    (client_id,)
+                )
+                if await cur.fetchone():
+                    await cur.execute(
+                        "UPDATE subscriptions SET status = 'expired' WHERE payment_id = %s",
+                        (payment_id,)
+                    )
+                    return False
+                # Активируем
+                await cur.execute("""
+                    UPDATE subscriptions
+                    SET status = 'active',
+                        started_at = NOW(),
+                        expires_at = DATE_ADD(NOW(), INTERVAL 1 YEAR)
+                    WHERE payment_id = %s AND status = 'pending'
+                """, (payment_id,))
+                return cur.rowcount > 0
+
+    async def cancel_pending_subscriptions(self, client_id: int):
+        """Отменить все pending-подписки клиента (перед созданием новой)"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE subscriptions SET status = 'expired' WHERE client_id = %s AND status = 'pending'",
+                    (client_id,)
+                )
+
+    async def get_subscription_by_payment_id(self, payment_id: str) -> dict | None:
+        """Получить подписку по ID платежа"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    "SELECT * FROM subscriptions WHERE payment_id = %s",
+                    (payment_id,)
+                )
+                return await cur.fetchone()
+
+    async def get_client_by_id(self, client_id: int) -> dict | None:
+        """Получить клиента по внутреннему ID"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT * FROM clients WHERE id = %s", (client_id,))
+                return await cur.fetchone()
+
 
 db = Database()
 
@@ -608,6 +800,10 @@ class CarCheckStates(StatesGroup):
     entering_mileage = State()
 
 
+class SubscriptionStates(StatesGroup):
+    waiting_for_confirm = State()
+
+
 def get_persistent_menu():
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📋 Меню"), KeyboardButton(text="🚗 История авто")]],
@@ -622,7 +818,18 @@ def get_main_menu():
         [InlineKeyboardButton(text="📝 Мои записи", callback_data="my_bookings")],
         [InlineKeyboardButton(text="🚗 История авто", callback_data="car_history")],
         [InlineKeyboardButton(text="🔍 Проверить состояние авто", callback_data="check_car")],
+        [InlineKeyboardButton(text="⭐ Подписка", callback_data="subscription")],
         [InlineKeyboardButton(text="❌ Отменить запись", callback_data="cancel_booking")]
+    ])
+
+
+def get_plans_keyboard():
+    """Клавиатура выбора тарифа подписки"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Basic — 9 900 ₽/год", callback_data="sub_plan_basic")],
+        [InlineKeyboardButton(text="🔵 Premium — 23 900 ₽/год", callback_data="sub_plan_premium")],
+        [InlineKeyboardButton(text="🟡 VIP — 39 900 ₽/год", callback_data="sub_plan_vip")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
 
 
@@ -1401,6 +1608,238 @@ async def process_mileage_input(message: Message, state: FSMContext):
     await state.clear()
 
 
+# ==================== ПОДПИСКА ====================
+
+@router.callback_query(F.data == "subscription")
+async def show_subscription(callback: CallbackQuery):
+    """Показать статус подписки или список тарифов"""
+    client = await db.get_client_by_telegram_id(callback.from_user.id)
+    if client:
+        sub = await db.get_active_subscription(client['id'])
+    else:
+        sub = None
+
+    if sub:
+        plan_info = SUBSCRIPTION_PLANS.get(sub['plan'], {})
+        plan_name = plan_info.get('name', sub['plan'])
+        started = sub['started_at'].strftime('%d.%m.%Y') if sub.get('started_at') else '—'
+        expires = sub['expires_at'].strftime('%d.%m.%Y') if sub.get('expires_at') else '—'
+        features_text = '\n'.join(f'• {f}' for f in plan_info.get('features', []))
+        text = (
+            f"⭐ <b>Ваша подписка: {plan_name}</b>\n\n"
+            f"📅 Действует с: {started}\n"
+            f"📅 Действует до: {expires}\n\n"
+            f"<b>Что входит:</b>\n{features_text}"
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+        ])
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        text = (
+            "⭐ <b>Подписка</b>\n\n"
+            "У вас нет активной подписки.\n\n"
+            "Подписка действует <b>1 год</b> с момента оплаты.\n"
+            "Выберите тариф:"
+        )
+        await callback.message.edit_text(text, reply_markup=get_plans_keyboard(), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sub_plan_"))
+async def show_plan_details(callback: CallbackQuery):
+    """Показать детали выбранного тарифа"""
+    plan_key = callback.data.replace("sub_plan_", "")
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan:
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+
+    price_str = f"{int(plan['price']):,}".replace(',', ' ')
+    features_text = '\n'.join(f'✅ {f}' for f in plan['features'])
+    text = (
+        f"{plan['name']} — <b>{price_str} ₽/год</b>\n\n"
+        f"{features_text}"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Купить подписку", callback_data=f"sub_buy_{plan_key}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="subscription")]
+    ])
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sub_buy_"))
+async def buy_subscription(callback: CallbackQuery):
+    """Создать платёж в ЮKassa и отправить ссылку"""
+    if not YOKASSA_AVAILABLE:
+        await callback.answer("Оплата временно недоступна. Обратитесь в сервис.", show_alert=True)
+        return
+    if not YOKASSA_SHOP_ID or not YOKASSA_SECRET_KEY:
+        await callback.answer("Оплата не настроена. Обратитесь в сервис.", show_alert=True)
+        return
+
+    plan_key = callback.data.replace("sub_buy_", "")
+    plan = SUBSCRIPTION_PLANS.get(plan_key)
+    if not plan:
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+
+    client_id = await db.get_or_create_client(
+        callback.from_user.id,
+        callback.from_user.full_name,
+        tg_username=callback.from_user.username
+    )
+
+    # Проверяем: нет ли уже активной подписки
+    sub = await db.get_active_subscription(client_id)
+    if sub:
+        await callback.answer("У вас уже есть активная подписка!", show_alert=True)
+        return
+
+    # Отменяем старые незавершённые попытки оплаты
+    await db.cancel_pending_subscriptions(client_id)
+
+    idempotency_key = str(uuid4())
+    price = plan['price']
+    plan_name = plan['name']
+    return_url = WEBHOOK_BASE_URL.rstrip('/') + "/payment-success" if WEBHOOK_BASE_URL else "https://t.me/"
+
+    try:
+        payment = await asyncio.to_thread(
+            lambda: YKPayment.create({
+                "amount": {"value": f"{price:.2f}", "currency": "RUB"},
+                "confirmation": {"type": "redirect", "return_url": return_url},
+                "capture": True,
+                "description": f"Подписка {plan_name} на 1 год — {COMPANY_NAME}",
+                "metadata": {
+                    "telegram_user_id": str(callback.from_user.id),
+                    "plan": plan_key
+                }
+            }, idempotency_key)
+        )
+
+        payment_id = payment.id
+        confirmation_url = payment.confirmation.confirmation_url
+
+        await db.create_pending_subscription(client_id, plan_key, payment_id, price)
+
+        price_str = f"{int(price):,}".replace(',', ' ')
+        await callback.message.edit_text(
+            f"💳 <b>{plan_name} — {price_str} ₽/год</b>\n\n"
+            f"Нажмите кнопку ниже — откроется страница оплаты.\n"
+            f"Подписка активируется автоматически после оплаты.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 Оплатить", url=confirmation_url)],
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data="subscription")]
+            ]),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"Ошибка создания платежа ЮKassa: {e}")
+        await callback.message.edit_text(
+            "❌ Ошибка при создании платежа.\nПожалуйста, попробуйте позже.",
+            reply_markup=get_main_menu()
+        )
+
+
+# ==================== WEBHOOK ЮKASSA ====================
+
+_webhook_runner = None
+
+
+async def handle_yokassa_webhook(request):
+    """Обработчик webhook от ЮKassa"""
+    # Проверяем IP
+    client_ip = request.headers.get('X-Forwarded-For', request.remote or '').split(',')[0].strip()
+    if not is_yokassa_ip(client_ip):
+        logger.warning(f"Webhook отклонён — неизвестный IP: {client_ip}")
+        return aiohttp.web.Response(status=403)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return aiohttp.web.Response(status=400)
+
+    event = data.get('event', '')
+    obj = data.get('object', {})
+    payment_id = obj.get('id', '')
+
+    logger.info(f"Webhook ЮKassa: event={event}, payment_id={payment_id}")
+
+    if event == 'payment.succeeded' and payment_id:
+        sub = await db.get_subscription_by_payment_id(payment_id)
+        if sub and sub['status'] == 'pending':
+            activated = await db.activate_subscription(payment_id)
+            if not activated:
+                logger.info(f"Подписка уже активна или дубль, payment_id={payment_id}")
+                return aiohttp.web.Response(status=200)
+            sub = await db.get_subscription_by_payment_id(payment_id)
+
+            if sub and bot_instance:
+                client = await db.get_client_by_id(sub['client_id'])
+                plan_info = SUBSCRIPTION_PLANS.get(sub['plan'], {})
+                plan_name = plan_info.get('name', sub['plan'])
+                expires = sub['expires_at'].strftime('%d.%m.%Y') if sub.get('expires_at') else '—'
+
+                # Уведомление клиенту
+                if client and client.get('telegram_user_id'):
+                    try:
+                        await bot_instance.send_message(
+                            chat_id=client['telegram_user_id'],
+                            text=(
+                                f"✅ <b>Подписка активирована!</b>\n\n"
+                                f"Тариф: {plan_name}\n"
+                                f"Действует до: {expires}\n\n"
+                                f"Спасибо за доверие к нашему автосервису! 🚗"
+                            ),
+                            parse_mode="HTML"
+                        )
+                        logger.info(f"Уведомление об активации подписки отправлено клиенту {client['telegram_user_id']}")
+                    except Exception as e:
+                        logger.error(f"Ошибка уведомления клиента: {e}")
+
+                # Уведомление администратору
+                if ADMIN_TELEGRAM_ID and client:
+                    client_name = client.get('full_name') or client.get('tg_username') or f"ID {client.get('telegram_user_id', '?')}"
+                    client_phone = client.get('phone') or '—'
+                    amount = float(sub.get('amount') or 0)
+                    amount_str = f"{amount:,.0f}".replace(',', ' ')
+                    try:
+                        await bot_instance.send_message(
+                            chat_id=ADMIN_TELEGRAM_ID,
+                            text=(
+                                f"💳 <b>Новая подписка!</b>\n\n"
+                                f"Клиент: {client_name}\n"
+                                f"Телефон: {client_phone}\n"
+                                f"Тариф: {plan_name}\n"
+                                f"Сумма: {amount_str} ₽\n"
+                                f"Действует до: {expires}\n"
+                                f"ID платежа: {payment_id}"
+                            ),
+                            parse_mode="HTML"
+                        )
+                        logger.info(f"Уведомление об оплате отправлено администратору")
+                    except Exception as e:
+                        logger.error(f"Ошибка уведомления администратора: {e}")
+
+    return aiohttp.web.Response(status=200)
+
+
+async def start_webhook_server():
+    """Запустить aiohttp сервер для приёма webhook от ЮKassa"""
+    global _webhook_runner
+    app = aiohttp.web.Application()
+    app.router.add_post('/yokassa/webhook', handle_yokassa_webhook)
+    _webhook_runner = aiohttp.web.AppRunner(app)
+    await _webhook_runner.setup()
+    site = aiohttp.web.TCPSite(_webhook_runner, '0.0.0.0', WEBHOOK_PORT)
+    await site.start()
+    logger.info(f"Webhook сервер запущен на порту {WEBHOOK_PORT}")
+
+
 # ==================== LOGGING ====================
 # Путь к файлу логов
 LOG_FILE = os.path.join(_base_path, 'logs', 'bot.log')
@@ -1481,8 +1920,11 @@ async def on_startup():
 
 
 async def on_shutdown():
+    global _webhook_runner
     scheduler.shutdown()
     await db.close()
+    if _webhook_runner:
+        await _webhook_runner.cleanup()
     logger.info("Планировщик остановлен, соединение с БД закрыто")
 
 
@@ -1580,6 +2022,15 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     logger.info("Бот запускается...")
+
+    # Запускаем webhook сервер если настроены ЮKassa ключи
+    if YOKASSA_SHOP_ID and YOKASSA_SECRET_KEY:
+        try:
+            await start_webhook_server()
+        except Exception as e:
+            logger.error(f"Не удалось запустить webhook сервер: {e}")
+    else:
+        logger.info("ЮKassa не настроена, webhook сервер не запущен")
 
     try:
         await dp.start_polling(bot_instance)

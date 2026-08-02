@@ -3,6 +3,7 @@
 Класс для работы с базой данных MariaDB
 """
 
+import json
 import re
 import pymysql
 from pymysql import Error as MySQLError
@@ -254,7 +255,7 @@ class Database:
                 conn.close()
                 return order_number
 
-    def add_work(self, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None):
+    def add_work(self, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None, items_json=None):
         """Добавить запись о работе и вернуть ID."""
         order_number = self.generate_order_number()
         conn = self.get_connection()
@@ -267,8 +268,8 @@ class Database:
             except:
                 mileage_int = None
         cursor.execute(
-            "INSERT INTO works (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage_int)
+            "INSERT INTO works (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage, items_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage_int, items_json)
         )
         work_id = cursor.lastrowid
         if car_id:
@@ -283,7 +284,7 @@ class Database:
         conn.close()
         return work_id
 
-    def update_work(self, work_id, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None):
+    def update_work(self, work_id, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None, items_json=None):
         """Обновить запись о работе."""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -297,9 +298,9 @@ class Database:
         cursor.execute('''
             UPDATE works
             SET worker_id = %s, description = %s, amount = %s, work_date = %s,
-                booking_id = %s, car_id = %s, mileage = %s
+                booking_id = %s, car_id = %s, mileage = %s, items_json = %s
             WHERE id = %s
-        ''', (worker_id, description, amount, work_date, booking_id, car_id, mileage_int, work_id))
+        ''', (worker_id, description, amount, work_date, booking_id, car_id, mileage_int, items_json, work_id))
         if car_id:
             if mileage:
                 # Также обновляем последний известный пробег авто
@@ -311,23 +312,47 @@ class Database:
         conn.commit()
         conn.close()
 
-    def append_to_work(self, work_id, new_description, new_amount):
+    def append_to_work(self, work_id, new_description, new_amount, new_items_json=None):
         """Добавить описание и сумму к существующей работе"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT description, amount FROM works WHERE id = %s", (work_id,))
+        cursor.execute("SELECT description, amount, items_json FROM works WHERE id = %s", (work_id,))
         row = cursor.fetchone()
         if row:
             old_desc = row[0] or ""
             old_amount = float(row[1] or 0)
             combined_desc = old_desc + "\n" + new_description if old_desc else new_description
             combined_amount = old_amount + float(new_amount or 0)
+            combined_items_json = self._merge_items_json(row[2], new_items_json)
             cursor.execute('''
-                UPDATE works SET description = %s, amount = %s WHERE id = %s
-            ''', (combined_desc, combined_amount, work_id))
+                UPDATE works SET description = %s, amount = %s, items_json = %s WHERE id = %s
+            ''', (combined_desc, combined_amount, combined_items_json, work_id))
             conn.commit()
         conn.close()
         return work_id
+
+    def _merge_items_json(self, old_items_json, new_items_json):
+        """Объединить два JSON-списка позиций работы в один (для append_to_work)"""
+        items = []
+        for raw in (old_items_json, new_items_json):
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    items.extend(parsed)
+            except (TypeError, ValueError):
+                continue
+        return json.dumps(items, ensure_ascii=False) if items else None
+
+    def get_work_items_json(self, work_id):
+        """Получить сырой JSON с позициями работы (название+цена) по ID работы"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT items_json FROM works WHERE id = %s", (work_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
 
     def get_work_by_id(self, work_id):
         """Получить работу по ID."""
@@ -500,7 +525,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT w.full_name, SUM(wk.amount) as total, COUNT(wk.id) as work_count
+            SELECT w.id, w.full_name, SUM(wk.amount) as total, COUNT(wk.id) as work_count
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
             WHERE wk.work_date BETWEEN %s AND %s
@@ -510,6 +535,24 @@ class Database:
         summary = cursor.fetchall()
         conn.close()
         return summary
+
+    def get_works_by_worker_and_period(self, worker_id, date_from, date_to):
+        """Получить все работы мастера за период (с авто и клиентом) для детального отчёта"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT wk.id, wk.description, wk.amount, wk.work_date, wk.items_json,
+                   cc.car_brand, cc.car_model, cc.car_number,
+                   cl.full_name, cl.phone
+            FROM works wk
+            LEFT JOIN client_cars cc ON wk.car_id = cc.id
+            LEFT JOIN clients cl ON cc.client_id = cl.id
+            WHERE wk.worker_id = %s AND wk.work_date BETWEEN %s AND %s
+            ORDER BY wk.work_date DESC, wk.id DESC
+        ''', (worker_id, date_from, date_to))
+        works = cursor.fetchall()
+        conn.close()
+        return works
 
     def get_recent_works(self, limit=50):
         """Получить последние записи о работах."""

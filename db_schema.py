@@ -163,6 +163,21 @@ TABLES = {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB
     ''',
+
+    'subscriptions': '''
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id              INT AUTO_INCREMENT PRIMARY KEY,
+            client_id       INT NOT NULL,
+            plan            ENUM('basic','premium','vip') NOT NULL,
+            status          ENUM('active','expired','pending') DEFAULT 'pending',
+            started_at      DATETIME,
+            expires_at      DATETIME,
+            payment_id      VARCHAR(100) UNIQUE,
+            amount          DECIMAL(10,2),
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (client_id) REFERENCES clients(id)
+        ) ENGINE=InnoDB
+    ''',
 }
 
 # Индексы для быстрого поиска
@@ -182,4 +197,6 @@ MIGRATIONS = [
     "ALTER TABLE keywords ADD COLUMN IF NOT EXISTS interval_km_max INT DEFAULT NULL",
     # Добавление пробега на момент работы в works
     "ALTER TABLE works ADD COLUMN IF NOT EXISTS mileage INT DEFAULT NULL",
+    # Хранение отдельных позиций работы (название+цена) для корректного восстановления при редактировании
+    "ALTER TABLE works ADD COLUMN IF NOT EXISTS items_json TEXT DEFAULT NULL",
 ]

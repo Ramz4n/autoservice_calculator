@@ -20,6 +20,8 @@ import os
 import tempfile
 import re
 import requests
+import webbrowser
+from urllib.parse import quote
 import customtkinter as ctk
 from dotenv import load_dotenv
 
@@ -323,6 +325,7 @@ class AutoServiceApp:
             ("Записи", "bookings"),
             ("Склад", "warehouse"),
             *([("Отчёты", "reports"), ("Финансы", "expenses")] if _is_admin else []),
+            #("Поиск деталей", "parts_search"),
             ("Настройки", "settings")
         ]
 
@@ -398,6 +401,12 @@ class AutoServiceApp:
         self.expenses_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.content_frames["expenses"] = self.expenses_frame
         self.setup_expenses_tab()
+
+        # Вкладка поиска деталей
+        self.parts_search_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["parts_search"] = self.parts_search_frame
+        self.parts_search_history = []
+        self.setup_parts_search_tab()
 
         # Вкладка настроек с подвкладками
         self.add_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -497,6 +506,29 @@ class AutoServiceApp:
 
         # Возвращаем отформатированную строку
         return f"{sign}{integer_with_separators},{decimal_part} руб."
+
+    def get_work_line_items(self, work_id, description, amount, items_json=None):
+        """Разбить работу на отдельные позиции (название, цена).
+        Использует сохранённый items_json для точных цен; если его нет (старые записи) —
+        делит сумму поровну между строками описания."""
+        if items_json is None:
+            items_json = self.db.get_work_items_json(work_id)
+        if items_json:
+            try:
+                parsed = json.loads(items_json)
+                if isinstance(parsed, list) and parsed:
+                    return [(it["name"], float(it["price"])) for it in parsed]
+            except (TypeError, ValueError, KeyError):
+                pass
+
+        amount = float(amount or 0)
+        lines = [l.strip() for l in (description or "").split("\n") if l.strip()]
+        if not lines:
+            return []
+        if len(lines) == 1:
+            return [(lines[0], amount)]
+        price_each = amount / len(lines)
+        return [(line, price_each) for line in lines]
 
     def load_settings(self):
         """Загрузить настройки из JSON файла"""
@@ -887,6 +919,153 @@ class AutoServiceApp:
             self.workers_tree.insert("", tk.END, values=(worker_name,), tags=(worker_id, row_tag))
 
             row_index += 1
+
+    # ===== ВКЛАДКА ПОИСКА ДЕТАЛЕЙ =====
+
+    def setup_parts_search_tab(self):
+        """Настройка вкладки поиска деталей"""
+        parent = self.parts_search_frame
+
+        # Заголовок
+        ctk.CTkLabel(
+            parent,
+            text="🔍 Поиск деталей",
+            font=ctk.CTkFont(size=20, weight="bold")
+        ).pack(pady=(24, 4))
+
+        ctk.CTkLabel(
+            parent,
+            text="Введите название детали или артикул — откроется браузер с результатами",
+            font=ctk.CTkFont(size=13),
+            text_color="gray"
+        ).pack(pady=(0, 20))
+
+        # Поле поиска
+        search_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        search_frame.pack(padx=40, fill=tk.X)
+
+        self.parts_search_entry = ctk.CTkEntry(
+            search_frame,
+            placeholder_text="Например: фильтр масляный Toyota Camry или артикул 90915-YZZD2",
+            height=42,
+            font=ctk.CTkFont(size=14)
+        )
+        self.parts_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.parts_search_entry.bind("<Return>", lambda e: self._parts_open_all())
+
+        ctk.CTkButton(
+            search_frame,
+            text="Искать везде",
+            command=self._parts_open_all,
+            height=42,
+            width=140,
+            font=ctk.CTkFont(size=14),
+            fg_color="#1565c0",
+            hover_color="#1976d2"
+        ).pack(side=tk.LEFT)
+
+        # Кнопки сайтов
+        ctk.CTkLabel(
+            parent,
+            text="Открыть на конкретном сайте:",
+            font=ctk.CTkFont(size=13, weight="bold")
+        ).pack(pady=(28, 8))
+
+        sites_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        sites_frame.pack()
+
+        self._parts_sites = [
+            ("exist.ru",    "https://exist.ru/Price/?pnam={q}",                          "#1565c0"),
+            ("autodoc.ru",  "https://autodoc.ru/search/{q}",                             "#2e7d32"),
+            ("emex.ru",     "https://emex.ru/goods?goodsNumber={q}",                     "#6a1b9a"),
+            ("avito.ru",    "https://www.avito.ru/rossiya/zapchasti_i_aksessuary?q={q}", "#e65100"),
+            ("drom.ru",     "https://baza.drom.ru/?action=search&query={q}",             "#37474f"),
+        ]
+
+        for i, (label, url_tpl, color) in enumerate(self._parts_sites):
+            ctk.CTkButton(
+                sites_frame,
+                text=label,
+                command=lambda t=url_tpl: self._parts_open_site(t),
+                height=38,
+                width=130,
+                font=ctk.CTkFont(size=13),
+                fg_color=color,
+                hover_color=color
+            ).grid(row=0, column=i, padx=6)
+
+        # История поиска
+        ctk.CTkLabel(
+            parent,
+            text="Последние запросы:",
+            font=ctk.CTkFont(size=13, weight="bold")
+        ).pack(pady=(30, 6))
+
+        self.parts_history_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self.parts_history_frame.pack()
+
+        ctk.CTkLabel(
+            self.parts_history_frame,
+            text="История пуста",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        ).pack()
+
+    def _parts_get_query(self) -> str:
+        return self.parts_search_entry.get().strip()
+
+    def _parts_open_site(self, url_tpl: str):
+        query = self._parts_get_query()
+        if not query:
+            return
+        self._parts_add_history(query)
+        webbrowser.open(url_tpl.replace("{q}", quote(query)))
+
+    def _parts_open_all(self):
+        query = self._parts_get_query()
+        if not query:
+            return
+        self._parts_add_history(query)
+        for _, url_tpl, _ in self._parts_sites:
+            webbrowser.open(url_tpl.replace("{q}", quote(query)))
+
+    def _parts_add_history(self, query: str):
+        if query in self.parts_search_history:
+            self.parts_search_history.remove(query)
+        self.parts_search_history.insert(0, query)
+        self.parts_search_history = self.parts_search_history[:8]
+        self._parts_refresh_history()
+
+    def _parts_refresh_history(self):
+        for w in self.parts_history_frame.winfo_children():
+            w.destroy()
+        if not self.parts_search_history:
+            ctk.CTkLabel(
+                self.parts_history_frame,
+                text="История пуста",
+                font=ctk.CTkFont(size=12),
+                text_color="gray"
+            ).pack()
+            return
+        for item in self.parts_search_history:
+            row = ctk.CTkFrame(self.parts_history_frame, fg_color="transparent")
+            row.pack(fill=tk.X, pady=1)
+            ctk.CTkButton(
+                row,
+                text=f"🕐  {item}",
+                command=lambda q=item: self._parts_use_history(q),
+                height=30,
+                fg_color="transparent",
+                text_color=("#1565c0", "#90caf9"),
+                hover_color=("#e3f2fd", "#1e3a5f"),
+                anchor="w",
+                font=ctk.CTkFont(size=13)
+            ).pack(side=tk.LEFT)
+
+    def _parts_use_history(self, query: str):
+        self.parts_search_entry.delete(0, tk.END)
+        self.parts_search_entry.insert(0, query)
+        self._parts_open_all()
 
     # ===== ВКЛАДКА ДОБАВЛЕНИЯ РАБОТ =====
 
@@ -1856,6 +2035,11 @@ class AutoServiceApp:
 
         description = "\n".join(name for name, _ in self.works_list)
         amount = sum(price for _, price in self.works_list)
+        # Сохраняем точные цены по каждой позиции отдельно, чтобы не терять их при редактировании
+        items_json = json.dumps(
+            [{"name": name, "price": price} for name, price in self.works_list],
+            ensure_ascii=False
+        )
 
         worker_id = self.workers_data[selected_worker]
         car_brand = self.car_brand_entry.get().strip()
@@ -1912,7 +2096,7 @@ class AutoServiceApp:
             car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number) if client_id else None
 
             # Обновляем запись
-            self.db.update_work(self.editing_work_id, worker_id, description, amount, work_date, mileage, vin, booking_id, car_id)
+            self.db.update_work(self.editing_work_id, worker_id, description, amount, work_date, mileage, vin, booking_id, car_id, items_json)
 
             # Удаляем старые запчасти и добавляем новые
             self.db.delete_parts_by_work_id(self.editing_work_id)
@@ -1940,7 +2124,7 @@ class AutoServiceApp:
 
                     if messagebox.askyesno("Запись уже имеет работу", msg):
                         # Объединяем с существующей работой
-                        self.db.append_to_work(existing_work["work_id"], description, amount)
+                        self.db.append_to_work(existing_work["work_id"], description, amount, items_json)
 
                         # Добавляем запчасти к существующей работе
                         if self.parts_list:
@@ -1975,7 +2159,7 @@ class AutoServiceApp:
                     if messagebox.askyesno("Машина уже в работе", msg):
                         # Объединяем с существующей работой
                         existing_work_id = active_work["work_id"]
-                        self.db.append_to_work(existing_work_id, description, amount)
+                        self.db.append_to_work(existing_work_id, description, amount, items_json)
 
                         # Добавляем запчасти к существующей работе
                         if self.parts_list:
@@ -2044,7 +2228,7 @@ class AutoServiceApp:
             car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number) if client_id else None
 
             # Добавляем работу и получаем ID
-            work_id = self.db.add_work(worker_id, description, amount, work_date, mileage, vin, booking_id, car_id)
+            work_id = self.db.add_work(worker_id, description, amount, work_date, mileage, vin, booking_id, car_id, items_json)
 
             # Если есть запчасти - сохраняем их
             if self.parts_list:
@@ -2061,6 +2245,7 @@ class AutoServiceApp:
 
     def clear_work_form(self, restore_warehouse=True):
         """Очистить форму добавления работы"""
+        self.editing_work_id = None
         self.works_list = []
         for item in self.works_tree.get_children():
             self.works_tree.delete(item)
@@ -2889,6 +3074,20 @@ class AutoServiceApp:
 
         self.summary_tree.pack()
 
+        # Контекстное меню для сводки по мастерам
+        self.summary_context_menu = tk.Menu(
+            self.summary_tree, tearoff=0,
+            bg="#1e1e1e", fg="white", bd=0,
+            activebackground="#2d2d2d", activeforeground="white",
+            font=("Segoe UI", 11)
+        )
+        self.summary_context_menu.add_command(
+            label="  📋  Подробно", command=self.show_master_report_details,
+            foreground="#64b5f6", activeforeground="#90caf9",
+            background="#1e1e1e", activebackground="#1976d2"
+        )
+        self.summary_tree.bind("<Button-3>", self.show_summary_context_menu)
+
         # Общая сумма - фрейм с разноцветными label-ами
         self.total_frame = ctk.CTkFrame(summary_frame)
         self.total_frame.pack(pady=10)
@@ -2942,6 +3141,10 @@ class AutoServiceApp:
             messagebox.showwarning("Внимание", "Дата 'С' не может быть больше даты 'По'!")
             return
 
+        # Запоминаем период сформированного отчёта (для окна "Подробно" по мастеру)
+        self.report_date_from = date_from
+        self.report_date_to = date_to
+
         # Получаем процент
         try:
             percent = float(self.percent_var.get().replace(',', '.'))
@@ -2961,7 +3164,7 @@ class AutoServiceApp:
         total_percent_sum = 0
         summary_row_index = 0
         for row in summary:
-            name, total, count = row
+            worker_id, name, total, count = row
             total = float(total)  # MariaDB возвращает Decimal
             grand_total += total
             worker_share = total * percent / 100
@@ -2970,12 +3173,13 @@ class AutoServiceApp:
             # Определяем тег для чередующихся строк
             row_tag = 'oddrow' if summary_row_index % 2 == 0 else 'evenrow'
 
+            # ID мастера сохраняем в тегах вместе с цветом (для контекстного меню "Подробно")
             self.summary_tree.insert("", tk.END, values=(
                 name,
                 count,
                 self.format_currency(total),
                 self.format_currency(worker_share)
-            ), tags=(row_tag,))
+            ), tags=(str(worker_id), row_tag))
 
             summary_row_index += 1
 
@@ -3002,6 +3206,141 @@ class AutoServiceApp:
         # Цвет прибыли зависит от значения
         profit_color = "#2e7d32" if net_profit >= 0 else "#c62828"  # Зелёный если >= 0, красный если < 0
         self.profit_label.configure(text=f"ЧИСТАЯ ПРИБЫЛЬ: {self.format_currency(net_profit)}", text_color=profit_color)
+
+    def show_summary_context_menu(self, event):
+        """Показать контекстное меню для строки сводки по мастеру"""
+        item = self.summary_tree.identify_row(event.y)
+        if item:
+            self.summary_tree.selection_set(item)
+            self.summary_context_menu.post(event.x_root, event.y_root)
+
+    def show_master_report_details(self):
+        """Показать окно с детализацией работ мастера за сформированный период"""
+        selection = self.summary_tree.selection()
+        if not selection:
+            messagebox.showwarning("Внимание", "Выберите мастера!")
+            return
+
+        item = self.summary_tree.item(selection[0])
+        worker_id = item['tags'][0]
+        worker_name = item['values'][0]
+
+        date_from = getattr(self, 'report_date_from', None)
+        date_to = getattr(self, 'report_date_to', None)
+        if not date_from or not date_to:
+            messagebox.showwarning("Внимание", "Сначала сформируйте отчёт!")
+            return
+
+        works = self.db.get_works_by_worker_and_period(int(worker_id), date_from, date_to)
+
+        # Создаём окно детализации
+        details_window = ctk.CTkToplevel(self.root)
+        details_window.title(f"Детализация: {worker_name}")
+        details_window.geometry("900x600")
+        details_window.transient(self.root)
+        details_window.grab_set()
+
+        period_str = f"{datetime.strptime(date_from, '%Y-%m-%d').strftime('%d.%m.%Y')} — {datetime.strptime(date_to, '%Y-%m-%d').strftime('%d.%m.%Y')}"
+
+        header_frame = ctk.CTkFrame(details_window, fg_color="transparent")
+        header_frame.pack(fill="x", padx=15, pady=(15, 5))
+        ctk.CTkLabel(
+            header_frame,
+            text=f"👤  {worker_name}",
+            font=("Arial", 18, "bold")
+        ).pack(side="left")
+        ctk.CTkLabel(
+            header_frame,
+            text=f"Период: {period_str}",
+            font=("Arial", 13),
+            text_color=("gray30", "gray70")
+        ).pack(side="right")
+
+        table_frame = ctk.CTkFrame(details_window, fg_color="transparent")
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
+
+        columns = ("date", "client", "work", "price")
+        details_tree = ttk.Treeview(table_frame, columns=columns, show="tree headings")
+        details_tree.heading("#0", text="Автомобиль")
+        details_tree.heading("date", text="Дата")
+        details_tree.heading("client", text="Клиент")
+        details_tree.heading("work", text="Работа")
+        details_tree.heading("price", text="Цена")
+        details_tree.column("#0", width=220)
+        details_tree.column("date", width=90, anchor=tk.CENTER)
+        details_tree.column("client", width=150)
+        details_tree.column("work", width=250)
+        details_tree.column("price", width=120, anchor=tk.CENTER)
+
+        scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=details_tree.yview)
+        details_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        details_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        details_tree.tag_configure('carrow', background='#dbe9fb', font=("Segoe UI", 10, "bold"))
+        details_tree.tag_configure('oddrow', background='#ffffff')
+        details_tree.tag_configure('evenrow', background='#f0f0f0')
+
+        # Группируем работы по автомобилю, сохраняя порядок первого появления (сначала недавние - works уже отсортирован по дате)
+        cars = {}
+        for work in works:
+            work_id, description, amount, work_date, items_json, car_brand, car_model, car_number, client_name, client_phone = work
+            amount = float(amount or 0)
+
+            if hasattr(work_date, 'strftime'):
+                date_str = work_date.strftime('%d.%m.%Y')
+            else:
+                date_str = str(work_date) if work_date else "-"
+
+            car_info = " ".join(filter(None, [car_brand, car_model, car_number])).strip() or "Без авто"
+            car_key = car_number or car_info
+            client_display = client_name or "-"
+
+            car_group = cars.setdefault(car_key, {
+                "car_info": car_info, "client": client_display, "items": [], "total": 0.0
+            })
+
+            for work_name, price in self.get_work_line_items(work_id, description, amount, items_json):
+                car_group["items"].append((date_str, work_name, price))
+                car_group["total"] += price
+
+        grand_total = 0.0
+        for car_key, car_group in cars.items():
+            grand_total += car_group["total"]
+            work_count = len(car_group["items"])
+            car_node = details_tree.insert(
+                "", tk.END,
+                text=f"🚗 {car_group['car_info']}  ({work_count} {'работа' if work_count == 1 else 'работ'})",
+                values=("", car_group["client"], "", self.format_currency(car_group["total"])),
+                tags=('carrow',), open=True
+            )
+            for i, (date_str, work_name, price) in enumerate(car_group["items"]):
+                row_tag = 'oddrow' if i % 2 == 0 else 'evenrow'
+                details_tree.insert(
+                    car_node, tk.END,
+                    text="",
+                    values=(date_str, "", work_name, self.format_currency(price)),
+                    tags=(row_tag,)
+                )
+
+        # Итоговая строка
+        footer_frame = ctk.CTkFrame(details_window, fg_color="transparent")
+        footer_frame.pack(fill="x", padx=15, pady=(0, 15))
+        ctk.CTkLabel(
+            footer_frame,
+            text=f"Автомобилей: {len(cars)}  |  Работ: {len(works)}",
+            font=("Arial", 13),
+            text_color=("gray30", "gray70")
+        ).pack(side="left")
+        ctk.CTkLabel(
+            footer_frame,
+            text=f"ИТОГО: {self.format_currency(grand_total)}",
+            font=("Arial", 15, "bold"),
+            text_color="#2e7d32"
+        ).pack(side="right")
+
+        if not works:
+            messagebox.showinfo("Информация", f"У мастера {worker_name} нет работ за выбранный период.", parent=details_window)
 
     # ===== ВКЛАДКА МАРОК И МОДЕЛЕЙ =====
 
@@ -4061,13 +4400,13 @@ class AutoServiceApp:
                     Paragraph("<b>Сумма</b>", style_bold)
                 ]]
 
-                # Описание работ (разбиваем по запятой)
+                # Описание работ - каждая позиция отдельной строкой со своей ценой
                 if description:
-                    work_items = [item.strip() for item in description.split(',') if item.strip()]
-                    for item in work_items:
+                    work_items = self.get_work_line_items(work_id, description, work_amount)
+                    for item_name, item_price in work_items:
                         works_table_data.append([
-                            Paragraph(f"• {item}", style_normal),
-                            Paragraph("", style_normal)
+                            Paragraph(f"• {item_name}", style_normal),
+                            Paragraph(self.format_currency(item_price), style_normal)
                         ])
                 else:
                     works_table_data.append([
@@ -4503,13 +4842,12 @@ class AutoServiceApp:
                             message += f" ({car_number})"
                         message += "\n"
 
-                    # Выполненные работы со стоимостью
+                    # Выполненные работы со стоимостью каждой позиции
                     if description:
                         message += f"\n📝 <b>Работы:</b>\n"
-                        # Разбиваем по запятой
-                        work_items = [item.strip() for item in description.split(',') if item.strip()]
-                        for work_item in work_items:
-                            message += f"  • {work_item}\n"
+                        work_items = self.get_work_line_items(work_id, description, work_amount)
+                        for work_item, item_price in work_items:
+                            message += f"  • {work_item} — {item_price:,.0f} ₽\n"
                         message += f"  <i>Стоимость работ: {work_amount:,.0f} ₽</i>\n"
 
                     # Запчасти
@@ -5068,13 +5406,14 @@ class AutoServiceApp:
 
         # Если есть связанная работа - загружаем её данные
         work = self.db.get_work_by_booking_id(int(booking_id))
+        self.editing_work_id = None
         if work:
             # work: (id, worker_id, full_name, description, amount, work_date, car_brand, car_model, car_number, mileage, vin, booking_id, client_name, client_phone, order_number, car_id)
             work_id = work[0]
+            self.editing_work_id = work_id  # без этого add_work() дублирует работу через append_to_work
             worker_id = work[1]
             description = work[3] or ""
             amount = work[4] or 0
-            work_date = work[5]
             car_brand = work[6] or ""
             car_model = work[7] or ""
             car_number = work[8] or ""
@@ -5097,16 +5436,31 @@ class AutoServiceApp:
             self.works_list = []
             for item in self.works_tree.get_children():
                 self.works_tree.delete(item)
-            if description:
+
+            # Пытаемся восстановить точные цены по каждой позиции из items_json
+            items_from_json = None
+            items_json = self.db.get_work_items_json(work_id)
+            if items_json:
+                try:
+                    parsed = json.loads(items_json)
+                    if isinstance(parsed, list) and parsed:
+                        items_from_json = [(item["name"], float(item["price"])) for item in parsed]
+                except (TypeError, ValueError, KeyError):
+                    items_from_json = None
+
+            if items_from_json:
+                for name, price in items_from_json:
+                    self.works_list.append((name, price))
+                    self.works_tree.insert("", tk.END, values=(name, self.format_currency(price)))
+            elif description:
+                # Записи без items_json (созданные до этого исправления) — цена делится поровну между строками
                 lines = [l.strip() for l in description.split("\n") if l.strip()]
                 if len(lines) > 1:
-                    # Несколько строк — каждая строка отдельная работа, цена распределяется поровну
                     price_each = float(amount or 0) / len(lines)
                     for line in lines:
                         self.works_list.append((line, price_each))
                         self.works_tree.insert("", tk.END, values=(line, self.format_currency(price_each)))
                 else:
-                    # Одна строка — одна работа с полной ценой
                     self.works_list.append((description, float(amount or 0)))
                     self.works_tree.insert("", tk.END, values=(description, self.format_currency(float(amount or 0))))
 
@@ -5116,11 +5470,6 @@ class AutoServiceApp:
                     if wid == worker_id:
                         self.worker_combo.set(name)
                         break
-
-            # Заполняем дату
-            if work_date:
-                if hasattr(work_date, 'strftime'):
-                    self.work_date_entry.set_date(work_date)
 
             # Загружаем запчасти
             self.parts_list = []
@@ -5394,11 +5743,11 @@ class AutoServiceApp:
                         font=("Arial", 14, "bold")
                     ).pack(anchor="w")
 
-                    work_items = [item.strip() for item in description.split(',') if item.strip()]
-                    for work_item in work_items:
+                    work_items = self.get_work_line_items(work_id, description, work_amount)
+                    for work_item, item_price in work_items:
                         ctk.CTkLabel(
                             desc_frame,
-                            text=f"   • {work_item}",
+                            text=f"   • {work_item} — {self.format_currency(item_price)}",
                             font=("Arial", 13),
                             anchor="w"
                         ).pack(anchor="w")
@@ -5750,11 +6099,11 @@ class AutoServiceApp:
                         font=("Arial", 14, "bold")
                     ).pack(anchor="w")
 
-                    work_items = [item.strip() for item in description.split(',') if item.strip()]
-                    for work_item in work_items:
+                    work_items = self.get_work_line_items(work_id, description, work_amount)
+                    for work_item, item_price in work_items:
                         ctk.CTkLabel(
                             desc_frame,
-                            text=f"   • {work_item}",
+                            text=f"   • {work_item} — {self.format_currency(item_price)}",
                             font=("Arial", 13),
                             anchor="w",
                             wraplength=580
