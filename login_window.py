@@ -12,9 +12,42 @@
 """
 
 import sys
+import os
+import json
 import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
+
+from i18n import SUPPORTED_LANGUAGES
+
+
+def _get_base_path():
+    """Получить базовый путь приложения (работает и для PyInstaller)"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+SETTINGS_FILE = os.path.join(_get_base_path(), 'config', 'settings.json')
+
+
+def _load_settings():
+    """Загрузить настройки приложения из JSON файла"""
+    try:
+        with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_settings(settings):
+    """Сохранить настройки приложения в JSON файл"""
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Ошибка сохранения настроек: {e}")
 
 
 class LoginWindow(ctk.CTk):
@@ -53,6 +86,16 @@ class LoginWindow(ctk.CTk):
     # ──────── UI ────────
 
     def _build_ui(self):
+        # Выбор языка интерфейса (правый верхний угол)
+        current_lang = _load_settings().get('language', 'ru')
+        self.lang_var = tk.StringVar(value=current_lang)
+        self.lang_menu = ctk.CTkOptionMenu(
+            self, values=list(SUPPORTED_LANGUAGES.keys()),
+            variable=self.lang_var, width=70, height=28,
+            command=self._on_language_change
+        )
+        self.lang_menu.place(relx=1.0, x=-14, y=14, anchor="ne")
+
         # Заголовок
         ctk.CTkLabel(
             self, text="🔧 Автосервис",
@@ -111,6 +154,12 @@ class LoginWindow(ctk.CTk):
         self.username_entry.focus()
 
     # ──────── Логика входа ────────
+
+    def _on_language_change(self, value):
+        """Сохранить выбранный язык интерфейса (применится после входа)"""
+        settings = _load_settings()
+        settings['language'] = value
+        _save_settings(settings)
 
     def _toggle_password(self):
         self.password_entry.configure(
