@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 
 # Импорт класса для работы с базой данных
 from database import Database
+from i18n import I18n, SUPPORTED_LANGUAGES
 
 
 def get_base_path():
@@ -52,9 +53,34 @@ BASE_PATH = get_base_path()
 # Путь к файлу настроек приложения
 SETTINGS_FILE = os.path.join(BASE_PATH, 'config', 'settings.json')
 
+# Путь к файлу со списком запчастей для автодополнения
+SPARE_PARTS_FILE = os.path.join(BASE_PATH, 'config', 'spare_parts.txt')
+
+# Папка с переводами интерфейса
+LOCALES_DIR = os.path.join(BASE_PATH, 'config', 'locales')
+
 # Настройка темы CustomTkinter
 ctk.set_appearance_mode("light")  # "dark" или "light"
 ctk.set_default_color_theme("blue")  # "blue", "green", "dark-blue"
+
+
+def load_app_settings():
+    """Загрузить настройки приложения из JSON файла"""
+    try:
+        with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {'master_percent': 50}
+
+
+def save_app_settings(settings):
+    """Сохранить настройки приложения в JSON файл"""
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Ошибка сохранения настроек: {e}")
 
 
 def send_telegram_notification(user_id, message, with_menu=False):
@@ -291,12 +317,18 @@ class AutoServiceApp:
         self.root = root
         self.current_user = current_user or {"id": 0, "username": "?", "full_name": "", "role": "user"}
         self.logged_out = False
+
+        # Язык интерфейса (переключение — в настройках, применяется после перезапуска)
+        self.i18n = I18n(LOCALES_DIR, self.load_settings().get('language', 'ru'))
+        self.tr = self.i18n.t
+
         self.root.protocol("WM_DELETE_WINDOW", self._confirm_close)
-        self.root.title("Калькулятор автосервиса")
+        self.root.title(self.tr("app.window_title"))
         self.root.minsize(800, 600)
         self.root.after(100, lambda: self.root.state('zoomed'))  # Открытие во весь экран
 
         self.db = Database()
+        self.spare_parts_list = self.load_spare_parts()
 
         # Настройка стилей
         self.setup_styles()
@@ -313,7 +345,7 @@ class AutoServiceApp:
         # Заголовок меню
         self.sidebar_title = ctk.CTkLabel(
             self.sidebar,
-            text="Меню",
+            text=self.tr("menu.title"),
             font=ctk.CTkFont(size=18, weight="bold")
         )
         self.sidebar_title.pack(pady=(20, 20))
@@ -321,12 +353,12 @@ class AutoServiceApp:
         # Пункты меню
         _is_admin = self.current_user.get("role") == "admin"
         self.menu_items = [
-            ("Добавить работу", "works"),
-            ("Записи", "bookings"),
-            ("Склад", "warehouse"),
-            *([("Отчёты", "reports"), ("Финансы", "expenses")] if _is_admin else []),
+            (self.tr("menu.add_work"), "works"),
+            (self.tr("menu.bookings"), "bookings"),
+            (self.tr("menu.warehouse"), "warehouse"),
+            *([(self.tr("menu.reports"), "reports"), (self.tr("menu.expenses"), "expenses")] if _is_admin else []),
             #("Поиск деталей", "parts_search"),
-            ("Настройки", "settings")
+            (self.tr("menu.settings"), "settings")
         ]
 
         self.menu_buttons = {}
@@ -361,7 +393,7 @@ class AutoServiceApp:
         ).pack(fill=tk.X, pady=(0, 6))
         ctk.CTkButton(
             sidebar_bottom,
-            text="🚪 Выйти",
+            text="🚪 " + self.tr("menu.logout"),
             command=self._logout,
             height=34,
             corner_radius=8,
@@ -420,24 +452,34 @@ class AutoServiceApp:
         self.works_frame.pack(fill=tk.BOTH, expand=True)
 
         # Подвкладка работников
-        self.add_notebook.add("Мастера")
-        self.workers_frame = self.add_notebook.tab("Мастера")
+        self.add_notebook.add(self.tr("settings.workers_tab"))
+        self.workers_frame = self.add_notebook.tab(self.tr("settings.workers_tab"))
         self.setup_workers_tab()
 
         # Подвкладка марок и моделей
-        self.add_notebook.add("Марки и модели")
-        self.cars_frame = self.add_notebook.tab("Марки и модели")
+        self.add_notebook.add(self.tr("settings.cars_tab"))
+        self.cars_frame = self.add_notebook.tab(self.tr("settings.cars_tab"))
         self.setup_cars_tab()
 
         # Подвкладка ключевых слов
-        self.add_notebook.add("Ключевые слова")
-        self.keywords_frame = self.add_notebook.tab("Ключевые слова")
+        self.add_notebook.add(self.tr("settings.keywords_tab"))
+        self.keywords_frame = self.add_notebook.tab(self.tr("settings.keywords_tab"))
         self.setup_keywords_tab()
+
+        # Подвкладка запчастей
+        self.add_notebook.add(self.tr("settings.spareparts_tab"))
+        self.spare_parts_frame = self.add_notebook.tab(self.tr("settings.spareparts_tab"))
+        self.setup_spare_parts_tab()
+
+        # Подвкладка языка интерфейса
+        self.add_notebook.add(self.tr("settings.language_tab"))
+        self.language_frame = self.add_notebook.tab(self.tr("settings.language_tab"))
+        self.setup_language_tab()
 
         # Подвкладка пользователей (только для admin)
         if self.current_user.get("role") == "admin":
-            self.add_notebook.add("Пользователи")
-            self.users_tab_frame = self.add_notebook.tab("Пользователи")
+            self.add_notebook.add(self.tr("settings.users_tab"))
+            self.users_tab_frame = self.add_notebook.tab(self.tr("settings.users_tab"))
             self.setup_users_tab()
 
         # Загрузка данных
@@ -445,6 +487,7 @@ class AutoServiceApp:
         self.refresh_workers_combo()
         self.refresh_expenses()
         self.refresh_keywords_list()
+        self.refresh_spare_parts_list()
         self.refresh_bookings()
 
     def switch_tab(self, tab_name):
@@ -532,20 +575,19 @@ class AutoServiceApp:
 
     def load_settings(self):
         """Загрузить настройки из JSON файла"""
+        return load_app_settings()
+
+    def load_spare_parts(self):
+        """Загрузить список запчастей из текстового файла (по одной на строку)"""
         try:
-            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {'master_percent': 50}
+            with open(SPARE_PARTS_FILE, 'r', encoding='utf-8') as f:
+                return [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            return []
 
     def save_settings(self, settings):
         """Сохранить настройки в JSON файл"""
-        try:
-            os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-            with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"Ошибка сохранения настроек: {e}")
+        save_app_settings(settings)
 
     def on_percent_changed(self, *args):
         """Обработчик изменения процента мастеру"""
@@ -602,11 +644,11 @@ class AutoServiceApp:
             except:
                 pass
 
-        context_menu.add_command(label="Вырезать", command=cut_text)
-        context_menu.add_command(label="Копировать", command=copy_text)
-        context_menu.add_command(label="Вставить", command=paste_text)
+        context_menu.add_command(label=self.tr("ctx.cut"), command=cut_text)
+        context_menu.add_command(label=self.tr("ctx.copy"), command=copy_text)
+        context_menu.add_command(label=self.tr("ctx.paste"), command=paste_text)
         context_menu.add_separator()
-        context_menu.add_command(label="Выделить всё", command=select_all)
+        context_menu.add_command(label=self.tr("ctx.select_all"), command=select_all)
 
         def show_context_menu(event):
             try:
@@ -840,11 +882,11 @@ class AutoServiceApp:
         add_frame = ctk.CTkFrame(center_container)
         add_frame.pack(fill=tk.X, pady=20)
 
-        ctk.CTkLabel(add_frame, text="ФИО:").pack(side=tk.LEFT, padx=5, pady=5)
+        ctk.CTkLabel(add_frame, text=self.tr("workers.full_name_label")).pack(side=tk.LEFT, padx=5, pady=5)
         self.worker_name_entry = ctk.CTkEntry(add_frame, width=400, fg_color="white", text_color="black")
         self.worker_name_entry.pack(side=tk.LEFT, padx=5, pady=5)
 
-        ctk.CTkButton(add_frame, text="Добавить", command=self.add_worker, fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5, pady=5)
+        ctk.CTkButton(add_frame, text=self.tr("common.add"), command=self.add_worker, fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5, pady=5)
 
         # Список работников
         list_frame = ctk.CTkFrame(center_container)
@@ -853,7 +895,7 @@ class AutoServiceApp:
         # Таблица работников (без колонки ID) - ширина по родительскому контейнеру
         columns = ("name",)
         self.workers_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
-        self.workers_tree.heading("name", text="ФИО мастера")
+        self.workers_tree.heading("name", text=self.tr("reports.col_master_name"))
         self.workers_tree.column("name", width=500, stretch=True, anchor=tk.W)
 
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.workers_tree.yview)
@@ -867,39 +909,39 @@ class AutoServiceApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
 
         # Кнопка удаления
-        ctk.CTkButton(center_container, text="Удалить выбранного мастера",
+        ctk.CTkButton(center_container, text=self.tr("workers.delete_selected"),
                    command=self.delete_worker, width=550, fg_color="red", hover_color="darkred").pack(anchor=tk.CENTER, pady=10)
 
     def add_worker(self):
         """Добавить работника"""
         name = self.worker_name_entry.get().strip()
         if not name:
-            messagebox.showwarning("Внимание", "Введите ФИО мастера!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_enter_name"))
             return
 
         if self.db.add_worker(name):
-            messagebox.showinfo("Успех", f"Мастер '{name}' добавлен!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("workers.msg_added", name=name))
             self.worker_name_entry.delete(0, tk.END)
             self.refresh_workers_list()
             self.refresh_workers_combo()
         else:
-            messagebox.showerror("Ошибка", "Мастер с таким ФИО уже существует!")
+            messagebox.showerror(self.tr("common.error"), self.tr("workers.msg_already_exists"))
 
     def delete_worker(self):
         """Удалить работника"""
         selected = self.workers_tree.selection()
         if not selected:
-            messagebox.showwarning("Внимание", "Выберите мастера для удаления!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_select_to_delete"))
             return
 
         item = self.workers_tree.item(selected[0])
         worker_id = item['tags'][0]  # ID хранится в тегах
         worker_name = item['values'][0]  # Имя в первой колонке
 
-        if messagebox.askyesno("Подтверждение",
-                               f"Удалить мастера '{worker_name}'?\n\nВсе записи о его работах также будут удалены!"):
+        if messagebox.askyesno(self.tr("common.confirm"),
+                               self.tr("workers.msg_confirm_delete", name=worker_name)):
             self.db.delete_worker(worker_id)
-            messagebox.showinfo("Успех", "Мастер удалён!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("workers.msg_deleted"))
             self.refresh_workers_list()
             self.refresh_workers_combo()
 
@@ -1080,7 +1122,7 @@ class AutoServiceApp:
 
         title = ctk.CTkLabel(
             center_container,
-            text="Добавить запись о работе",
+            text=self.tr("works.title"),
             font=("Segoe UI", 20, "bold"),
             anchor="w"
         )
@@ -1089,14 +1131,14 @@ class AutoServiceApp:
         # Выбор работника
         row1 = ctk.CTkFrame(center_container)
         row1.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row1, text="Мастер:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row1, text=self.tr("works.master"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.worker_combo = ctk.CTkComboBox(row1, width=350, fg_color="white", text_color="black", button_color="#0078d7", button_hover_color="#005a9e")
         self.worker_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
         # Номер машины (госномер) - отдельная строка
         row_car_number = ctk.CTkFrame(center_container)
         row_car_number.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_car_number, text="Госномер:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_car_number, text=self.tr("works.car_number"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.car_number_entry = ctk.CTkEntry(row_car_number, width=250, fg_color="white", text_color="black")
         self.car_number_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         # Автозаполнение при потере фокуса или нажатии Enter
@@ -1106,7 +1148,7 @@ class AutoServiceApp:
         # Марка машины с автокомплитом
         row_car_brand = ctk.CTkFrame(center_container)
         row_car_brand.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_car_brand, text="Марка машины:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_car_brand, text=self.tr("works.car_brand"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.car_brand_entry = ctk.CTkEntry(row_car_brand, width=250, fg_color="white", text_color="black")
         self.car_brand_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self.car_brand_entry.bind('<KeyRelease>', self.on_brand_keyrelease)
@@ -1120,7 +1162,7 @@ class AutoServiceApp:
         # Модель машины с автокомплитом
         row_car_model = ctk.CTkFrame(center_container)
         row_car_model.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_car_model, text="Модель машины:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_car_model, text=self.tr("works.car_model"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.car_model_entry = ctk.CTkEntry(row_car_model, width=250, fg_color="white", text_color="black")
         self.car_model_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self.car_model_entry.bind('<KeyRelease>', self.on_model_keyrelease)
@@ -1134,28 +1176,28 @@ class AutoServiceApp:
         # VIN номер и пробег
         row_vin = ctk.CTkFrame(center_container)
         row_vin.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_vin, text="VIN:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_vin, text=self.tr("works.vin"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.vin_entry = ctk.CTkEntry(row_vin, width=200, fg_color="white", text_color="black")
         self.vin_entry.pack(side=tk.LEFT, padx=5)
 
-        ctk.CTkLabel(row_vin, text="Пробег:", width=80, anchor="w").pack(side=tk.LEFT, padx=(20, 5))
+        ctk.CTkLabel(row_vin, text=self.tr("works.mileage"), width=80, anchor="w").pack(side=tk.LEFT, padx=(20, 5))
         self.mileage_entry = ctk.CTkEntry(row_vin, width=100, fg_color="white", text_color="black")
         self.mileage_entry.pack(side=tk.LEFT, padx=5)
 
         # Контекстное меню для VIN (правая кнопка - вставить)
         self.vin_context_menu = tk.Menu(self.root, tearoff=0)
-        self.vin_context_menu.add_command(label="Вставить", command=self.paste_to_vin)
+        self.vin_context_menu.add_command(label=self.tr("works.context_paste"), command=self.paste_to_vin)
         self.vin_entry.bind("<Button-3>", self.show_vin_context_menu)
 
         # Разделитель - Данные клиента
         separator_client = ctk.CTkFrame(center_container, height=2, fg_color="gray70")
         separator_client.pack(fill=tk.X, pady=10)
-        ctk.CTkLabel(center_container, text="Данные клиента", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=5)
+        ctk.CTkLabel(center_container, text=self.tr("works.client_section"), font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=5)
 
         # Выбор записи из bookings
         row_booking = ctk.CTkFrame(center_container)
         row_booking.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_booking, text="Запись:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_booking, text=self.tr("works.booking"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.booking_combo = ctk.CTkComboBox(row_booking, width=350, fg_color="white", text_color="black",
                                               button_color="#0078d7", button_hover_color="#005a9e",
                                               command=self.on_booking_select)
@@ -1163,19 +1205,19 @@ class AutoServiceApp:
         self.booking_combo.set("")
         self.bookings_data = {}  # Словарь для хранения booking_id по тексту
 
-        ctk.CTkButton(row_booking, text="Обновить", width=80, command=self.refresh_bookings_combo).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(row_booking, text=self.tr("works.refresh"), width=80, command=self.refresh_bookings_combo).pack(side=tk.LEFT, padx=5)
 
         # Имя клиента
         row_client_name = ctk.CTkFrame(center_container)
         row_client_name.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_client_name, text="Имя клиента:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_client_name, text=self.tr("works.client_name"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.client_name_entry = ctk.CTkEntry(row_client_name, width=350, fg_color="white", text_color="black")
         self.client_name_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
         # Телефон клиента
         row_client_phone = ctk.CTkFrame(center_container)
         row_client_phone.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_client_phone, text="Телефон клиента:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_client_phone, text=self.tr("works.client_phone"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.client_phone_entry = ctk.CTkEntry(row_client_phone, width=200, fg_color="white", text_color="black")
         self.client_phone_entry.pack(side=tk.LEFT, padx=5)
         # При вводе телефона ищем данные клиента
@@ -1184,13 +1226,13 @@ class AutoServiceApp:
         # Машины клиента (если клиент уже был в сервисе)
         row_client_cars = ctk.CTkFrame(center_container)
         row_client_cars.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_client_cars, text="Машины клиента:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_client_cars, text=self.tr("works.client_cars"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.client_cars_combo = ctk.CTkComboBox(row_client_cars, width=350, fg_color="white", text_color="black",
                                                   button_color="#0078d7", button_hover_color="#005a9e",
                                                   command=self.on_client_car_select)
         self.client_cars_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self.client_cars_combo.set("")
-        self.client_cars_combo.configure(values=["Новая машина"])
+        self.client_cars_combo.configure(values=[self.tr("works.new_car")])
         self.client_cars_data = {}  # Словарь для хранения данных машин
 
         # Храним выбранный booking_id
@@ -1199,7 +1241,7 @@ class AutoServiceApp:
         # Секция работ
         separator_works = ctk.CTkFrame(center_container, height=2, fg_color="gray70")
         separator_works.pack(fill=tk.X, pady=(10, 5))
-        ctk.CTkLabel(center_container, text="Проделанные работы", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=5)
+        ctk.CTkLabel(center_container, text=self.tr("works.works_section"), font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=5)
 
         works_container = ctk.CTkFrame(center_container)
         works_container.pack(fill=tk.X, pady=5)
@@ -1210,8 +1252,8 @@ class AutoServiceApp:
 
         work_columns = ("work_name", "work_price")
         self.works_tree = ttk.Treeview(works_table_frame, columns=work_columns, show="headings", height=4)
-        self.works_tree.heading("work_name", text="Название работы")
-        self.works_tree.heading("work_price", text="Цена")
+        self.works_tree.heading("work_name", text=self.tr("works.col_work_name"))
+        self.works_tree.heading("work_price", text=self.tr("works.col_price"))
         self.works_tree.column("work_name", width=450)
         self.works_tree.column("work_price", width=150, anchor=tk.CENTER)
 
@@ -1226,7 +1268,7 @@ class AutoServiceApp:
 
         row_work_name = ctk.CTkFrame(works_input_frame)
         row_work_name.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(row_work_name, text="Название:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_work_name, text=self.tr("works.name_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.work_name_entry = ctk.CTkEntry(row_work_name, fg_color="white", text_color="black")
         self.work_name_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self.work_name_entry.bind('<KeyRelease>', self.on_work_name_keyrelease)
@@ -1239,16 +1281,16 @@ class AutoServiceApp:
 
         row_work_price = ctk.CTkFrame(works_input_frame)
         row_work_price.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(row_work_price, text="Цена:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_work_price, text=self.tr("works.price_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.work_price_entry = ctk.CTkEntry(row_work_price, width=200, fg_color="white", text_color="black")
         self.work_price_entry.pack(side=tk.LEFT, padx=5)
 
         # Кнопки работ
         works_buttons_frame = ctk.CTkFrame(works_container)
         works_buttons_frame.pack(fill=tk.X, pady=5, padx=5)
-        ctk.CTkButton(works_buttons_frame, text="Добавить работу",
+        ctk.CTkButton(works_buttons_frame, text=self.tr("works.add_work_item"),
                       command=self.add_work_to_list, width=200).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(works_buttons_frame, text="Удалить выбранную",
+        ctk.CTkButton(works_buttons_frame, text=self.tr("works.remove_selected"),
                       command=self.remove_work_from_list, width=200, fg_color="red", hover_color="darkred").pack(side=tk.LEFT, padx=5)
 
         self.works_list = []
@@ -1260,7 +1302,7 @@ class AutoServiceApp:
         parts_header_row.pack(fill=tk.X, padx=5)
 
         self.parts_toggle_btn = ctk.CTkButton(
-            parts_header_row, text="+ добавить запчасть",
+            parts_header_row, text=self.tr("works.toggle_parts"),
             font=("Segoe UI", 14, "bold"),
             fg_color="transparent", text_color=("gray10", "gray90"),
             hover_color=("gray70", "gray30"), anchor="w",
@@ -1283,8 +1325,8 @@ class AutoServiceApp:
 
         columns = ("part_name", "part_price")
         self.parts_tree = ttk.Treeview(parts_table_frame, columns=columns, show="headings", height=4)
-        self.parts_tree.heading("part_name", text="Название запчасти")
-        self.parts_tree.heading("part_price", text="Цена")
+        self.parts_tree.heading("part_name", text=self.tr("works.col_part_name"))
+        self.parts_tree.heading("part_price", text=self.tr("works.col_price"))
 
         self.parts_tree.column("part_name", width=450)
         self.parts_tree.column("part_price", width=150, anchor=tk.CENTER)
@@ -1302,9 +1344,16 @@ class AutoServiceApp:
         # Название запчасти
         row_part_name = ctk.CTkFrame(parts_input_frame)
         row_part_name.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(row_part_name, text="Название:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_part_name, text=self.tr("works.name_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.part_name_entry = ctk.CTkEntry(row_part_name, fg_color="white", text_color="black")
         self.part_name_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.part_name_entry.bind('<KeyRelease>', self.on_part_name_keyrelease)
+        self.part_name_entry.bind('<FocusOut>', self.on_part_name_focus_out)
+
+        self.part_keyword_listbox = tk.Listbox(row_part_name, height=5, width=40, takefocus=False)
+        self.part_keyword_listbox_visible = False
+        self.part_keyword_listbox.bind('<Double-Button-1>', self.on_part_keyword_select)
+        self.part_keyword_listbox.bind('<Return>', self.on_part_keyword_select)
 
         # Добавляем контекстное меню для вставки
         self.setup_entry_context_menu(self.part_name_entry)
@@ -1312,7 +1361,7 @@ class AutoServiceApp:
         # Цена запчасти
         row_part_price = ctk.CTkFrame(parts_input_frame)
         row_part_price.pack(fill=tk.X, pady=2)
-        ctk.CTkLabel(row_part_price, text="Цена:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row_part_price, text=self.tr("works.price_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.part_price_entry = ctk.CTkEntry(row_part_price, width=200, fg_color="white", text_color="black")
         self.part_price_entry.pack(side=tk.LEFT, padx=5)
 
@@ -1320,12 +1369,12 @@ class AutoServiceApp:
         parts_buttons_frame = ctk.CTkFrame(self.parts_container)
         parts_buttons_frame.pack(fill=tk.X, pady=5, padx=5)
 
-        ctk.CTkButton(parts_buttons_frame, text="Добавить запчасть",
+        ctk.CTkButton(parts_buttons_frame, text=self.tr("works.add_part"),
                    command=self.add_part_to_list, width=200).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(parts_buttons_frame, text="Удалить выбранную",
+        ctk.CTkButton(parts_buttons_frame, text=self.tr("works.remove_selected"),
                    command=self.remove_part_from_list, width=200, fg_color="red", hover_color="darkred").pack(side=tk.LEFT, padx=5)
         self.add_from_warehouse_btn = ctk.CTkButton(
-            parts_buttons_frame, text="Добавить со склада",
+            parts_buttons_frame, text=self.tr("works.add_from_warehouse"),
             command=self.add_part_from_warehouse, width=200,
             fg_color="#1565c0", hover_color="#0d47a1"
         )
@@ -1336,11 +1385,15 @@ class AutoServiceApp:
         self.warehouse_part_ids = {}       # tree_item_id → warehouse_part_id
         self.current_car_warehouse_parts = []
 
-        # Кнопка добавления записи — закреплена снизу, вне скролла
+        # Кнопки добавления записи и сброса формы — закреплены снизу, вне скролла
         button_frame = ctk.CTkFrame(self.works_frame, fg_color="transparent")
         button_frame.pack(fill=tk.X, padx=10, pady=10, side=tk.BOTTOM)
-        ctk.CTkButton(button_frame, text="Добавить запись",
-                   command=self.add_work, width=300, height=50, fg_color="green", hover_color="darkgreen").pack(anchor=tk.CENTER)
+        inner_button_frame = ctk.CTkFrame(button_frame, fg_color="transparent")
+        inner_button_frame.pack(anchor=tk.CENTER)
+        ctk.CTkButton(inner_button_frame, text=self.tr("works.save"),
+                   command=self.add_work, width=300, height=50, fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkButton(inner_button_frame, text=self.tr("works.reset"),
+                   command=self.clear_work_form, width=150, height=50, fg_color="#c62828", hover_color="#b71c1c").pack(side=tk.LEFT)
 
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
 
@@ -1420,7 +1473,7 @@ class AutoServiceApp:
             else:
                 date_str = str(booking_date)
 
-            display_text = f"{date_str} {booking_time} - {full_name or 'Без имени'} ({phone or 'Без телефона'})"
+            display_text = f"{date_str} {booking_time} - {full_name or self.tr('common.no_name')} ({phone or self.tr('common.no_phone')})"
             values.append(display_text)
             self.bookings_data[display_text] = {
                 'id': booking_id,
@@ -1445,7 +1498,7 @@ class AutoServiceApp:
             self.load_client_cars(booking_info['phone'], booking_info['name'], booking_info.get('car_id'))
         else:
             self.selected_booking_id = None
-            self.client_cars_combo.configure(values=["Новая машина"])
+            self.client_cars_combo.configure(values=[self.tr("works.new_car")])
             self.client_cars_combo.set("")
             self.client_cars_data = {}
 
@@ -1463,7 +1516,7 @@ class AutoServiceApp:
             cars = self.db.get_client_cars_by_name(name)
 
         self.client_cars_data = {}
-        values = ["Новая машина"]
+        values = [self.tr("works.new_car")]
         selected_car_display = None
 
         for car in cars:
@@ -1498,10 +1551,10 @@ class AutoServiceApp:
                 self.on_client_car_select(values[1])
             elif num_cars > 1:
                 # Несколько машин - показываем "Выберите авто" красным
-                values_with_select = ["Выберите авто"] + values[1:]  # убираем "Новая машина" из начала
-                values_with_select.append("Новая машина")  # добавляем в конец
+                values_with_select = [self.tr("works.select_car")] + values[1:]  # убираем "Новая машина" из начала
+                values_with_select.append(self.tr("works.new_car"))  # добавляем в конец
                 self.client_cars_combo.configure(values=values_with_select)
-                self.client_cars_combo.set("Выберите авто")
+                self.client_cars_combo.set(self.tr("works.select_car"))
                 self.client_cars_combo.configure(text_color="#c62828")
                 # Очищаем поля машины
                 self.car_brand_entry.delete(0, tk.END)
@@ -1509,7 +1562,7 @@ class AutoServiceApp:
                 self.car_number_entry.delete(0, tk.END)
             else:
                 # Нет машин
-                self.client_cars_combo.set("Новая машина")
+                self.client_cars_combo.set(self.tr("works.new_car"))
         # Если booking_car_id передан - старая логика для редактирования записи
         elif booking_car_id is not None:
             if selected_car_display:
@@ -1519,9 +1572,9 @@ class AutoServiceApp:
                 self.client_cars_combo.set(values[1])
                 self.on_client_car_select(values[1])
             else:
-                self.client_cars_combo.set("Новая машина")
+                self.client_cars_combo.set(self.tr("works.new_car"))
         else:
-            self.client_cars_combo.set("Новая машина")
+            self.client_cars_combo.set(self.tr("works.new_car"))
 
     def on_client_phone_keyrelease(self, event):
         """При вводе телефона - искать данные клиента и его машины"""
@@ -1557,8 +1610,8 @@ class AutoServiceApp:
             self.load_client_cars(phone_raw, client_name or "")
         else:
             # Если цифр меньше 10 - очищаем список машин
-            self.client_cars_combo.configure(values=["Новая машина"])
-            self.client_cars_combo.set("Новая машина")
+            self.client_cars_combo.configure(values=[self.tr("works.new_car")])
+            self.client_cars_combo.set(self.tr("works.new_car"))
             self.client_cars_data = {}
 
     def on_car_number_change(self, event=None):
@@ -1634,12 +1687,12 @@ class AutoServiceApp:
     def show_client_selection_dialog(self, clients, car_number):
         """Показать диалог выбора клиента для госномера"""
         dialog = ctk.CTkToplevel(self.root)
-        dialog.title(f"Выбор клиента для {car_number}")
+        dialog.title(self.tr("works.dialog_select_client_title", car_number=car_number))
         dialog.geometry("450x300")
         dialog.transient(self.root)
         dialog.grab_set()
 
-        ctk.CTkLabel(dialog, text=f"Найдено несколько клиентов для госномера {car_number}:",
+        ctk.CTkLabel(dialog, text=self.tr("works.dialog_select_client_label", car_number=car_number),
                     font=("Arial", 13)).pack(pady=(15, 10), padx=15, anchor="w")
 
         # Фрейм для списка клиентов
@@ -1654,8 +1707,8 @@ class AutoServiceApp:
             self.fill_car_and_client_info(client)
 
         for client in clients:
-            name = client.get("client_name") or "Без имени"
-            phone = client.get("client_phone") or "Без телефона"
+            name = client.get("client_name") or self.tr("common.no_name")
+            phone = client.get("client_phone") or self.tr("common.no_phone")
             btn_text = f"{name}  |  {phone}"
 
             btn = ctk.CTkButton(list_frame, text=btn_text, anchor="w",
@@ -1665,7 +1718,7 @@ class AutoServiceApp:
             btn.pack(fill=tk.X, pady=3)
 
         # Кнопка отмены
-        ctk.CTkButton(dialog, text="Отмена", command=dialog.destroy,
+        ctk.CTkButton(dialog, text=self.tr("common.cancel"), command=dialog.destroy,
                      fg_color="#757575", hover_color="#616161", width=100).pack(pady=15)
 
     def load_client_cars_without_autofill(self, phone, name):
@@ -1677,7 +1730,7 @@ class AutoServiceApp:
             cars = self.db.get_client_cars_by_name(name)
 
         self.client_cars_data = {}
-        values = ["Новая машина"]
+        values = [self.tr("works.new_car")]
 
         for car in cars:
             car_brand, car_model, car_number = car
@@ -1707,12 +1760,12 @@ class AutoServiceApp:
             self.car_model_entry.insert(0, car_info['model'])
             self.car_number_entry.delete(0, tk.END)
             self.car_number_entry.insert(0, car_info['number'])
-        elif choice == "Новая машина":
+        elif choice == self.tr("works.new_car"):
             # Очищаем поля машины для новой
             self.car_brand_entry.delete(0, tk.END)
             self.car_model_entry.delete(0, tk.END)
             self.car_number_entry.delete(0, tk.END)
-        elif choice == "Выберите авто":
+        elif choice == self.tr("works.select_car"):
             # Не делаем ничего, ждём выбора
             self.client_cars_combo.configure(text_color="#c62828")
 
@@ -1764,9 +1817,9 @@ class AutoServiceApp:
         """Обновить выпадающий список работников"""
         workers = self.db.get_all_workers()
         self.workers_data = {w[1]: w[0] for w in workers}
-        worker_names = ["Выберите мастера"] + list(self.workers_data.keys())
+        worker_names = [self.tr("works.select_master")] + list(self.workers_data.keys())
         self.worker_combo.configure(values=worker_names)
-        self.worker_combo.set("Выберите мастера")
+        self.worker_combo.set(self.tr("works.select_master"))
 
     def check_warehouse_for_car(self, car_number):
         """Проверить склад на наличие запчастей для данного автомобиля"""
@@ -1779,7 +1832,7 @@ class AutoServiceApp:
         self.current_car_warehouse_parts = parts
         if parts:
             count = len(parts)
-            text = f"⚠ На складе есть {count} деталей для этого клиента" if count > 1 else "⚠ На складе есть деталь для этого клиента"
+            text = self.tr("works.warehouse_notice_many", count=count) if count > 1 else self.tr("works.warehouse_notice_one")
             self.warehouse_notice_label.configure(text=text)
             self.add_from_warehouse_btn.pack(side=tk.LEFT, padx=5)
         else:
@@ -1812,7 +1865,7 @@ class AutoServiceApp:
             self.warehouse_notice_label.configure(text="")
         else:
             count = len(self.current_car_warehouse_parts)
-            text = f"⚠ На складе ещё {count} деталей" if count > 1 else "⚠ На складе ещё 1 деталь"
+            text = self.tr("works.warehouse_notice_left_many", count=count) if count > 1 else self.tr("works.warehouse_notice_left_one")
             self.warehouse_notice_label.configure(text=text)
 
         self.update_total_cost()
@@ -1821,13 +1874,13 @@ class AutoServiceApp:
     def _show_warehouse_part_selection(self, parts):
         """Диалог выбора запчастей со склада (с чекбоксами)"""
         dialog = ctk.CTkToplevel(self.root)
-        dialog.title("Выбрать запчасти со склада")
+        dialog.title(self.tr("works.dialog_select_from_warehouse_title"))
         dialog.geometry("480x" + str(min(120 + len(parts) * 48, 480)))
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(False, False)
 
-        ctk.CTkLabel(dialog, text="Выберите запчасти для добавления:",
+        ctk.CTkLabel(dialog, text=self.tr("works.dialog_select_from_warehouse_label"),
                      font=("Segoe UI", 13, "bold")).pack(pady=(14, 6), padx=15, anchor="w")
 
         # Кнопки — пакуем ПЕРВЫМИ с side=BOTTOM, чтобы всегда были видны
@@ -1853,9 +1906,9 @@ class AutoServiceApp:
             all_checked = all(v.get() for v in check_vars)
             for v in check_vars:
                 v.set(not all_checked)
-            select_all_btn.configure(text="Снять всё" if not all_checked else "Выделить всё")
+            select_all_btn.configure(text=self.tr("common.deselect_all") if not all_checked else self.tr("common.select_all"))
 
-        select_all_btn = ctk.CTkButton(btn_row, text="Выделить всё", width=140,
+        select_all_btn = ctk.CTkButton(btn_row, text=self.tr("common.select_all"), width=140,
                                        fg_color="transparent", border_width=1,
                                        text_color=("gray10", "gray90"),
                                        command=select_all)
@@ -1864,13 +1917,13 @@ class AutoServiceApp:
         def on_add():
             selected = [parts[i] for i, v in enumerate(check_vars) if v.get()]
             if not selected:
-                messagebox.showwarning("Внимание", "Выберите хотя бы одну запчасть!", parent=dialog)
+                messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_one_part"), parent=dialog)
                 return
             dialog.destroy()
             for part in selected:
                 self._add_warehouse_part_to_list(part)
 
-        ctk.CTkButton(btn_row, text="Добавить", width=140,
+        ctk.CTkButton(btn_row, text=self.tr("common.add"), width=140,
                       fg_color="#1565c0", hover_color="#0d47a1",
                       command=on_add).pack(side=tk.RIGHT)
 
@@ -1878,16 +1931,16 @@ class AutoServiceApp:
         """Показать/скрыть секцию запчастей"""
         if self.parts_container.winfo_ismapped():
             self.parts_container.pack_forget()
-            self.parts_toggle_btn.configure(text="+ добавить запчасть")
+            self.parts_toggle_btn.configure(text=self.tr("works.toggle_parts"))
         else:
             self.parts_container.pack(fill=tk.X, pady=10)
-            self.parts_toggle_btn.configure(text="− запчасти")
+            self.parts_toggle_btn.configure(text=self.tr("works.toggle_parts_hide"))
 
     def add_part_to_list(self):
         """Добавить запчасть в список"""
         part_name = self.part_name_entry.get().strip()
         if not part_name:
-            messagebox.showwarning("Внимание", "Введите название запчасти!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_part_name"))
             return
 
         try:
@@ -1895,7 +1948,7 @@ class AutoServiceApp:
             if part_price <= 0:
                 raise ValueError()
         except ValueError:
-            messagebox.showwarning("Внимание", "Введите корректную цену запчасти!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_valid_part_price"))
             return
 
         # Добавляем в список
@@ -1915,7 +1968,7 @@ class AutoServiceApp:
         """Удалить запчасть из списка"""
         selected = self.parts_tree.selection()
         if not selected:
-            messagebox.showwarning("Внимание", "Выберите запчасть для удаления!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_part_to_remove"))
             return
 
         item_id = selected[0]
@@ -1928,7 +1981,7 @@ class AutoServiceApp:
             self.current_car_warehouse_parts = self.db.get_warehouse_parts_by_car_number(car_number)
             count = len(self.current_car_warehouse_parts)
             if count:
-                text = f"⚠ На складе есть {count} деталей для этого клиента" if count > 1 else "⚠ На складе есть деталь для этого клиента"
+                text = self.tr("works.warehouse_notice_many", count=count) if count > 1 else self.tr("works.warehouse_notice_one")
                 self.warehouse_notice_label.configure(text=text)
                 self.add_from_warehouse_btn.pack(side=tk.LEFT, padx=5)
             self.refresh_warehouse()
@@ -1949,14 +2002,14 @@ class AutoServiceApp:
         """Добавить работу в список"""
         work_name = self.work_name_entry.get().strip()
         if not work_name:
-            messagebox.showwarning("Внимание", "Введите название работы!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_work_name"))
             return
         try:
             work_price = float(self.work_price_entry.get().replace(',', '.'))
             if work_price <= 0:
                 raise ValueError()
         except ValueError:
-            messagebox.showwarning("Внимание", "Введите корректную цену работы!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_valid_work_price"))
             return
 
         self.works_list.append((work_name, work_price))
@@ -1968,7 +2021,7 @@ class AutoServiceApp:
         """Удалить работу из списка"""
         selected = self.works_tree.selection()
         if not selected:
-            messagebox.showwarning("Внимание", "Выберите работу для удаления!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_work_to_remove"))
             return
         item_index = self.works_tree.index(selected[0])
         del self.works_list[item_index]
@@ -2017,6 +2070,49 @@ class AutoServiceApp:
                 self.hide_work_keyword_listbox()
         self.root.after(200, check_and_hide)
 
+    def on_part_name_keyrelease(self, event):
+        text = self.part_name_entry.get().strip().lower()
+        if len(text) < 1:
+            self.hide_part_keyword_listbox()
+            return
+        matches = [p for p in self.spare_parts_list if text in p.lower()][:10]
+        if matches:
+            self.show_part_keyword_listbox(matches)
+        else:
+            self.hide_part_keyword_listbox()
+
+    def show_part_keyword_listbox(self, parts):
+        self.part_keyword_listbox.delete(0, tk.END)
+        for p in parts:
+            self.part_keyword_listbox.insert(tk.END, p)
+        if not self.part_keyword_listbox_visible:
+            self.part_keyword_listbox.pack(side=tk.LEFT, padx=5)
+            self.part_keyword_listbox_visible = True
+
+    def hide_part_keyword_listbox(self):
+        if self.part_keyword_listbox_visible:
+            self.part_keyword_listbox.pack_forget()
+            self.part_keyword_listbox_visible = False
+
+    def on_part_keyword_select(self, event):
+        selection = self.part_keyword_listbox.curselection()
+        if selection:
+            part_name = self.part_keyword_listbox.get(selection[0])
+            self.part_name_entry.delete(0, tk.END)
+            self.part_name_entry.insert(0, part_name)
+            self.hide_part_keyword_listbox()
+            self.part_name_entry.focus_set()
+
+    def on_part_name_focus_out(self, event):
+        def check_and_hide():
+            try:
+                focused = self.root.focus_get()
+                if focused != self.part_keyword_listbox:
+                    self.hide_part_keyword_listbox()
+            except:
+                self.hide_part_keyword_listbox()
+        self.root.after(200, check_and_hide)
+
     def update_total_cost(self):
         """Обновить общую стоимость работы + запчасти"""
         # Метод оставлен для совместимости, но больше ничего не отображает
@@ -2025,12 +2121,12 @@ class AutoServiceApp:
     def add_work(self):
         """Добавить или обновить запись о работе"""
         selected_worker = self.worker_combo.get()
-        if not selected_worker or selected_worker == "Выберите мастера":
-            messagebox.showwarning("Внимание", "Выберите мастера!")
+        if not selected_worker or selected_worker == self.tr("works.select_master"):
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_master"))
             return
 
         if not self.works_list:
-            messagebox.showwarning("Внимание", "Добавьте хотя бы одну работу!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_add_one_work"))
             return
 
         description = "\n".join(name for name, _ in self.works_list)
@@ -2050,13 +2146,13 @@ class AutoServiceApp:
 
         # Валидация обязательных полей авто
         if not car_brand:
-            messagebox.showwarning("Внимание", "Введите марку автомобиля!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_brand"))
             return
         if not car_model:
-            messagebox.showwarning("Внимание", "Введите модель автомобиля!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_model"))
             return
         if not car_number:
-            messagebox.showwarning("Внимание", "Введите госномер автомобиля!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"))
             return
 
         # Данные клиента
@@ -2103,7 +2199,7 @@ class AutoServiceApp:
             if self.parts_list:
                 self.db.add_parts(self.editing_work_id, self.parts_list)
 
-            messagebox.showinfo("Успех", "Запись обновлена!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_record_updated"))
 
             # Сбрасываем режим редактирования
             self.editing_work_id = None
@@ -2118,11 +2214,9 @@ class AutoServiceApp:
                 if existing_work:
                     # У записи уже есть работа - спрашиваем пользователя
                     desc_preview = (existing_work['description'][:100] + "...") if existing_work['description'] and len(existing_work['description']) > 100 else (existing_work['description'] or "")
-                    msg = (f"У этой записи уже есть работа:\n\n"
-                           f"{desc_preview}\n\n"
-                           f"Добавить новую работу к существующей?")
+                    msg = self.tr("works.dialog_existing_work_body", preview=desc_preview)
 
-                    if messagebox.askyesno("Запись уже имеет работу", msg):
+                    if messagebox.askyesno(self.tr("works.dialog_existing_work_title"), msg):
                         # Объединяем с существующей работой
                         self.db.append_to_work(existing_work["work_id"], description, amount, items_json)
 
@@ -2130,7 +2224,7 @@ class AutoServiceApp:
                         if self.parts_list:
                             self.db.add_parts(existing_work["work_id"], self.parts_list)
 
-                        messagebox.showinfo("Успех", "Работа добавлена к существующей!")
+                        messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_work_merged"))
 
                         # Очищаем форму и выходим
                         self.clear_work_form(restore_warehouse=False)
@@ -2149,14 +2243,17 @@ class AutoServiceApp:
                         date_str = str(booking_date)
 
                     desc_preview = active_work['description'][:100] + "..." if len(active_work['description']) > 100 else active_work['description']
-                    msg = (f"Машина {car_number} уже в работе!\n\n"
-                           f"Клиент: {active_work['client_name']}\n"
-                           f"Телефон: {active_work['client_phone']}\n"
-                           f"Дата записи: {date_str} {active_work['booking_time']}\n"
-                           f"Текущие работы:\n{desc_preview}\n\n"
-                           f"Добавить новую работу к текущей?")
+                    msg = self.tr(
+                        "works.dialog_car_busy_body",
+                        car_number=car_number,
+                        client_name=active_work['client_name'],
+                        client_phone=active_work['client_phone'],
+                        date=date_str,
+                        time=active_work['booking_time'],
+                        preview=desc_preview,
+                    )
 
-                    if messagebox.askyesno("Машина уже в работе", msg):
+                    if messagebox.askyesno(self.tr("works.dialog_car_busy_title"), msg):
                         # Объединяем с существующей работой
                         existing_work_id = active_work["work_id"]
                         self.db.append_to_work(existing_work_id, description, amount, items_json)
@@ -2165,7 +2262,7 @@ class AutoServiceApp:
                         if self.parts_list:
                             self.db.add_parts(existing_work_id, self.parts_list)
 
-                        messagebox.showinfo("Успех", "Работа добавлена к существующей записи!")
+                        messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_work_merged_booking"))
 
                         # Очищаем форму и выходим
                         self.clear_work_form(restore_warehouse=False)
@@ -2238,7 +2335,7 @@ class AutoServiceApp:
             if booking_id:
                 self.db.update_booking_status(booking_id, "in_progress")
 
-            messagebox.showinfo("Успех", "Запись добавлена!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_record_added"))
 
         # Очищаем форму (детали со склада остаются как "установлена")
         self.clear_work_form(restore_warehouse=False)
@@ -2258,7 +2355,7 @@ class AutoServiceApp:
         self.client_phone_entry.delete(0, tk.END)
         self.booking_combo.set("")
         self.selected_booking_id = None
-        self.client_cars_combo.configure(values=["Новая машина"])
+        self.client_cars_combo.configure(values=[self.tr("works.new_car")])
         self.client_cars_combo.set("")
         self.client_cars_data = {}
 
@@ -2288,30 +2385,31 @@ class AutoServiceApp:
         top_frame.pack(fill=tk.X, padx=10, pady=10)
 
         # Заголовок
-        ctk.CTkLabel(top_frame, text="Склад запчастей", font=ctk.CTkFont(size=20, weight="bold")).pack(side=tk.LEFT, padx=10)
+        ctk.CTkLabel(top_frame, text=self.tr("warehouse.title"), font=ctk.CTkFont(size=20, weight="bold")).pack(side=tk.LEFT, padx=10)
 
         # Кнопка заказать запчасть
-        ctk.CTkButton(top_frame, text="Заказать запчасть", command=self.show_add_part_form,
+        ctk.CTkButton(top_frame, text=self.tr("warehouse.order_part"), command=self.show_add_part_form,
                      fg_color="#1565c0", hover_color="#0d47a1", width=160).pack(side=tk.RIGHT, padx=10)
 
         # Кнопка обновить
-        ctk.CTkButton(top_frame, text="Обновить", command=self.refresh_warehouse,
+        ctk.CTkButton(top_frame, text=self.tr("works.refresh"), command=self.refresh_warehouse,
                      width=100).pack(side=tk.RIGHT, padx=5)
 
         # Фильтр по статусу
         filter_frame = ctk.CTkFrame(self.warehouse_frame)
         filter_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        ctk.CTkLabel(filter_frame, text="Статус:").pack(side=tk.LEFT, padx=5)
-        self.warehouse_status_var = tk.StringVar(value="Все")
+        ctk.CTkLabel(filter_frame, text=self.tr("bookings.status_label")).pack(side=tk.LEFT, padx=5)
+        self.warehouse_status_var = tk.StringVar(value=self.tr("bookings.filter_all"))
         status_combo = ctk.CTkComboBox(filter_frame, variable=self.warehouse_status_var,
-                                        values=["Все", "В пути", "На складе", "Выдано"],
+                                        values=[self.tr("bookings.filter_all"), self.tr("warehouse.status_in_transit"),
+                                                self.tr("warehouse.status_in_stock"), self.tr("warehouse.status_issued")],
                                         width=140, command=lambda x: self.refresh_warehouse())
         status_combo.pack(side=tk.LEFT, padx=5)
 
         # Поиск по госномеру
-        ctk.CTkLabel(filter_frame, text="Госномер:").pack(side=tk.LEFT, padx=(20, 5))
-        self.warehouse_search_entry = ctk.CTkEntry(filter_frame, width=150, placeholder_text="Поиск...")
+        ctk.CTkLabel(filter_frame, text=self.tr("works.car_number")).pack(side=tk.LEFT, padx=(20, 5))
+        self.warehouse_search_entry = ctk.CTkEntry(filter_frame, width=150, placeholder_text=self.tr("warehouse.search_placeholder"))
         self.warehouse_search_entry.pack(side=tk.LEFT, padx=5)
         self.warehouse_search_entry.bind("<Return>", lambda e: self.refresh_warehouse())
         ctk.CTkButton(filter_frame, text="✕", command=self.clear_warehouse_search,
@@ -2325,15 +2423,15 @@ class AutoServiceApp:
         self.warehouse_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
 
         self.warehouse_tree.heading("id", text="ID")
-        self.warehouse_tree.heading("car_info", text="Автомобиль")
-        self.warehouse_tree.heading("client", text="Клиент")
-        self.warehouse_tree.heading("part_name", text="Запчасть")
-        self.warehouse_tree.heading("quantity", text="Кол-во")
-        self.warehouse_tree.heading("price", text="Цена")
-        self.warehouse_tree.heading("status", text="Статус")
-        self.warehouse_tree.heading("order_date", text="Дата заказа")
-        self.warehouse_tree.heading("received_date", text="Дата прихода")
-        self.warehouse_tree.heading("notes", text="Примечания")
+        self.warehouse_tree.heading("car_info", text=self.tr("bookings.col_car"))
+        self.warehouse_tree.heading("client", text=self.tr("bookings.info_label_client"))
+        self.warehouse_tree.heading("part_name", text=self.tr("warehouse.col_part_name"))
+        self.warehouse_tree.heading("quantity", text=self.tr("warehouse.col_quantity"))
+        self.warehouse_tree.heading("price", text=self.tr("works.col_price"))
+        self.warehouse_tree.heading("status", text=self.tr("bookings.col_status"))
+        self.warehouse_tree.heading("order_date", text=self.tr("warehouse.col_order_date"))
+        self.warehouse_tree.heading("received_date", text=self.tr("warehouse.col_received_date"))
+        self.warehouse_tree.heading("notes", text=self.tr("warehouse.col_notes"))
 
         self.warehouse_tree.column("id", width=0, stretch=False, minwidth=0)
         self.warehouse_tree.column("car_info", width=180)
@@ -2367,24 +2465,24 @@ class AutoServiceApp:
             font=("Segoe UI", 11)
         )
         self.warehouse_context_menu.add_command(
-            label="  ✏  Редактировать", command=self.edit_warehouse_part,
+            label="  ✏  " + self.tr("bookings.ctx_edit"), command=self.edit_warehouse_part,
             foreground="#64b5f6", activeforeground="#90caf9",
             background="#1e1e1e", activebackground="#1976d2"
         )
         self.warehouse_context_menu.add_separator()
         self.warehouse_context_menu.add_command(
-            label="  📦  На склад", command=lambda: self.update_part_status("на складе"),
+            label="  📦  " + self.tr("warehouse.status_in_stock"), command=lambda: self.update_part_status("на складе"),
             foreground="#81c784", activeforeground="#a5d6a7",
             background="#1e1e1e", activebackground="#2e7d32"
         )
         self.warehouse_context_menu.add_command(
-            label="  ✅  Выдано", command=lambda: self.update_part_status("выдано"),
+            label="  ✅  " + self.tr("warehouse.status_issued"), command=lambda: self.update_part_status("выдано"),
             foreground="#ffb74d", activeforeground="#ffcc80",
             background="#1e1e1e", activebackground="#e65100"
         )
         self.warehouse_context_menu.add_separator()
         self.warehouse_context_menu.add_command(
-            label="  🗑  Удалить", command=self.delete_warehouse_part,
+            label="  🗑  " + self.tr("bookings.ctx_delete"), command=self.delete_warehouse_part,
             foreground="#ef5350", activeforeground="#ef9a9a",
             background="#1e1e1e", activebackground="#c62828"
         )
@@ -2409,7 +2507,7 @@ class AutoServiceApp:
             return
 
         self.add_part_form_frame = ctk.CTkToplevel(self.root)
-        self.add_part_form_frame.title("Заказать запчасть")
+        self.add_part_form_frame.title(self.tr("warehouse.order_part"))
         self.add_part_form_frame.geometry("550x500")
         self.add_part_form_frame.transient(self.root)
         self.add_part_form_frame.grab_set()
@@ -2424,17 +2522,17 @@ class AutoServiceApp:
         form_container = ctk.CTkScrollableFrame(self.add_part_form_frame)
         form_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        ctk.CTkLabel(form_container, text="Заказ запчасти", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(0, 20))
+        ctk.CTkLabel(form_container, text=self.tr("warehouse.order_part_title"), font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(0, 20))
 
         # Госномер с поиском
         row1 = ctk.CTkFrame(form_container)
         row1.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row1, text="Госномер:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row1, text=self.tr("works.car_number"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
         self.wh_car_number_entry = ctk.CTkEntry(row1, width=150, fg_color="white", text_color="black")
         self.wh_car_number_entry.pack(side=tk.LEFT, padx=5)
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
         self.wh_car_number_entry.bind('<Return>', lambda e: self.search_car_for_warehouse())
-        ctk.CTkButton(row1, text="Найти", command=self.search_car_for_warehouse, width=70).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(row1, text=self.tr("warehouse.find_btn"), command=self.search_car_for_warehouse, width=70).pack(side=tk.LEFT, padx=5)
 
         # Информация о найденной машине
         self.wh_car_info_label = ctk.CTkLabel(form_container, text="", text_color="gray")
@@ -2446,12 +2544,12 @@ class AutoServiceApp:
         self.wh_new_car_visible = False
 
         # Поля для новой машины
-        ctk.CTkLabel(self.wh_new_car_frame, text="Новая машина и клиент",
+        ctk.CTkLabel(self.wh_new_car_frame, text=self.tr("warehouse.new_car_and_client"),
                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 5))
 
         row_brand = ctk.CTkFrame(self.wh_new_car_frame)
         row_brand.pack(fill=tk.X, pady=3, padx=10)
-        ctk.CTkLabel(row_brand, text="Марка:", width=100, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(row_brand, text=self.tr("bookings.add_window_brand"), width=100, anchor="w").pack(side=tk.LEFT)
         self.wh_new_brand_entry = ctk.CTkEntry(row_brand, width=200, fg_color="white", text_color="black")
         self.wh_new_brand_entry.pack(side=tk.LEFT, padx=5)
         self.wh_new_brand_entry.bind('<KeyRelease>', self.on_wh_brand_keyrelease)
@@ -2464,7 +2562,7 @@ class AutoServiceApp:
 
         row_model = ctk.CTkFrame(self.wh_new_car_frame)
         row_model.pack(fill=tk.X, pady=3, padx=10)
-        ctk.CTkLabel(row_model, text="Модель:", width=100, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(row_model, text=self.tr("bookings.add_window_model"), width=100, anchor="w").pack(side=tk.LEFT)
         self.wh_new_model_entry = ctk.CTkEntry(row_model, width=200, fg_color="white", text_color="black")
         self.wh_new_model_entry.pack(side=tk.LEFT, padx=5)
         self.wh_new_model_entry.bind('<KeyRelease>', self.on_wh_model_keyrelease)
@@ -2477,13 +2575,13 @@ class AutoServiceApp:
 
         row_client = ctk.CTkFrame(self.wh_new_car_frame)
         row_client.pack(fill=tk.X, pady=3, padx=10)
-        ctk.CTkLabel(row_client, text="Имя клиента:", width=100, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(row_client, text=self.tr("works.client_name"), width=100, anchor="w").pack(side=tk.LEFT)
         self.wh_new_client_name_entry = ctk.CTkEntry(row_client, width=200, fg_color="white", text_color="black")
         self.wh_new_client_name_entry.pack(side=tk.LEFT, padx=5)
 
         row_phone = ctk.CTkFrame(self.wh_new_car_frame)
         row_phone.pack(fill=tk.X, pady=3, padx=10)
-        ctk.CTkLabel(row_phone, text="Телефон:", width=100, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(row_phone, text=self.tr("bookings.add_window_phone"), width=100, anchor="w").pack(side=tk.LEFT)
 
         # Валидация телефона: +7 и только 10 цифр после
         def validate_wh_phone(new_value):
@@ -2509,14 +2607,14 @@ class AutoServiceApp:
         # Название запчасти
         row2 = ctk.CTkFrame(form_container)
         row2.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row2, text="Запчасть:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row2, text=self.tr("warehouse.part_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
         self.wh_part_name_entry = ctk.CTkEntry(row2, width=300, fg_color="white", text_color="black")
         self.wh_part_name_entry.pack(side=tk.LEFT, padx=5)
 
         # Количество
         row3 = ctk.CTkFrame(form_container)
         row3.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row3, text="Количество:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row3, text=self.tr("warehouse.quantity_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
         self.wh_quantity_entry = ctk.CTkEntry(row3, width=100, fg_color="white", text_color="black")
         self.wh_quantity_entry.pack(side=tk.LEFT, padx=5)
         self.wh_quantity_entry.insert(0, "1")
@@ -2524,14 +2622,14 @@ class AutoServiceApp:
         # Цена
         row4 = ctk.CTkFrame(form_container)
         row4.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row4, text="Цена:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row4, text=self.tr("works.price_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
         self.wh_price_entry = ctk.CTkEntry(row4, width=150, fg_color="white", text_color="black")
         self.wh_price_entry.pack(side=tk.LEFT, padx=5)
 
         # Примечания
         row5 = ctk.CTkFrame(form_container)
         row5.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row5, text="Примечания:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row5, text=self.tr("warehouse.notes_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
         self.wh_notes_entry = ctk.CTkEntry(row5, width=300, fg_color="white", text_color="black")
         self.wh_notes_entry.pack(side=tk.LEFT, padx=5)
 
@@ -2539,9 +2637,9 @@ class AutoServiceApp:
         buttons_frame = ctk.CTkFrame(form_container, fg_color="transparent")
         buttons_frame.pack(pady=20)
 
-        ctk.CTkButton(buttons_frame, text="Заказать", command=self.add_warehouse_part,
+        ctk.CTkButton(buttons_frame, text=self.tr("warehouse.order_btn"), command=self.add_warehouse_part,
                      fg_color="#2e7d32", hover_color="#1b5e20", width=120).pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(buttons_frame, text="Отмена", command=self.hide_add_part_form,
+        ctk.CTkButton(buttons_frame, text=self.tr("common.cancel"), command=self.hide_add_part_form,
                      fg_color="#757575", hover_color="#616161", width=120).pack(side=tk.LEFT, padx=10)
 
         self.add_part_form_visible = True
@@ -2550,7 +2648,7 @@ class AutoServiceApp:
         """Поиск машины по госномеру для склада"""
         car_number = self.wh_car_number_entry.get().strip()
         if not car_number:
-            self.wh_car_info_label.configure(text="Введите госномер", text_color="orange")
+            self.wh_car_info_label.configure(text=self.tr("warehouse.enter_car_number"), text_color="orange")
             self.wh_selected_car_id = None
             self.hide_new_car_form()
             return
@@ -2558,12 +2656,12 @@ class AutoServiceApp:
         car_info = self.db.get_car_info_by_number(car_number)
         if car_info:
             self.wh_selected_car_id = car_info.get("car_id")
-            info_text = f"{car_info.get('car_brand', '')} {car_info.get('car_model', '')} | {car_info.get('client_name', 'Без имени')} | {car_info.get('client_phone', '')}"
+            info_text = f"{car_info.get('car_brand', '')} {car_info.get('car_model', '')} | {car_info.get('client_name') or self.tr('common.no_name')} | {car_info.get('client_phone', '')}"
             self.wh_car_info_label.configure(text=info_text, text_color="green")
             self.hide_new_car_form()
         else:
             self.wh_selected_car_id = None
-            self.wh_car_info_label.configure(text="Машина не найдена — заполните данные ниже", text_color="orange")
+            self.wh_car_info_label.configure(text=self.tr("warehouse.car_not_found"), text_color="orange")
             self.show_new_car_form()
 
     def show_new_car_form(self):
@@ -2702,19 +2800,19 @@ class AutoServiceApp:
         notes = self.wh_notes_entry.get().strip()
 
         if not part_name:
-            messagebox.showwarning("Внимание", "Введите название запчасти!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_part_name"))
             return
 
         try:
             quantity = int(quantity_str) if quantity_str else 1
         except ValueError:
-            messagebox.showwarning("Внимание", "Количество должно быть числом!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_quantity_number"))
             return
 
         try:
             price = float(price_str.replace(",", ".")) if price_str else None
         except ValueError:
-            messagebox.showwarning("Внимание", "Цена должна быть числом!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_price_number"))
             return
 
         # Используем car_id если машина найдена
@@ -2735,12 +2833,12 @@ class AutoServiceApp:
             phone = self.wh_new_phone_entry.get().strip()
 
             if not brand:
-                messagebox.showwarning("Внимание", "Введите марку машины!")
+                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_enter_car_brand"))
                 return
 
             # Проверка телефона: должен быть +7 и 10 цифр
             if phone == "+7" or len(phone) < 12:
-                messagebox.showwarning("Внимание", "Введите номер телефона полностью!\nПример: +79091234567")
+                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_enter_full_phone"))
                 return
 
             # Создаём или находим клиента
@@ -2761,9 +2859,8 @@ class AutoServiceApp:
         # Предупреждение: госномер введён, но машина не привязана
         if car_number and car_id is None:
             result = messagebox.askyesno(
-                "Внимание",
-                f"Госномер '{car_number}' не найден в базе.\n\n"
-                "Добавить запчасть без привязки к машине?"
+                self.tr("common.attention"),
+                self.tr("warehouse.msg_car_not_found_confirm", car_number=car_number)
             )
             if not result:
                 return
@@ -2776,7 +2873,7 @@ class AutoServiceApp:
             notes=notes if notes else None
         )
 
-        messagebox.showinfo("Успех", "Запчасть добавлена в заказы!")
+        messagebox.showinfo(self.tr("common.success"), self.tr("warehouse.msg_part_added"))
         self.hide_add_part_form()
         self.refresh_warehouse()
 
@@ -2787,8 +2884,13 @@ class AutoServiceApp:
             self.warehouse_tree.delete(item)
 
         # Получение фильтра по статусу
-        status_filter = self.warehouse_status_var.get() if hasattr(self, 'warehouse_status_var') else "Все"
-        status_map = {"Все": None, "В пути": "в пути", "На складе": "на складе", "Выдано": "выдано"}
+        status_filter = self.warehouse_status_var.get() if hasattr(self, 'warehouse_status_var') else self.tr("bookings.filter_all")
+        status_map = {
+            self.tr("bookings.filter_all"): None,
+            self.tr("warehouse.status_in_transit"): "в пути",
+            self.tr("warehouse.status_in_stock"): "на складе",
+            self.tr("warehouse.status_issued"): "выдано",
+        }
         status = status_map.get(status_filter, None)
 
         # Поиск по госномеру
@@ -2820,6 +2922,13 @@ class AutoServiceApp:
             # Форматирование цены
             price_str = self.format_currency(float(price)) if price else "-"
 
+            # Статус для отображения (в БД статус всегда хранится по-русски)
+            status_display = {
+                "в пути": self.tr("warehouse.status_in_transit"),
+                "на складе": self.tr("warehouse.status_in_stock"),
+                "выдано": self.tr("warehouse.status_issued"),
+            }.get(part_status, part_status)
+
             self.warehouse_tree.insert("", tk.END, values=(
                 part_id,
                 car_info,
@@ -2827,7 +2936,7 @@ class AutoServiceApp:
                 part_name,
                 quantity,
                 price_str,
-                part_status,
+                status_display,
                 order_date_str,
                 received_date_str,
                 notes or "-"
@@ -2842,17 +2951,16 @@ class AutoServiceApp:
         """Обновить статус выбранной запчасти"""
         selection = self.warehouse_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите запчасть из списка!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_select_part"))
             return
 
         values = self.warehouse_tree.item(selection[0], "values")
         part_id = int(values[0])
-        current_status = values[6]  # колонка статуса
+        current_status = values[6]  # колонка статуса (уже переведённая для отображения)
 
         # Защита от смены статуса "выдано"
-        if current_status == "выдано":
-            if not messagebox.askyesno("Подтверждение",
-                    "Вы точно хотите вернуть выданную деталь на склад?"):
+        if current_status == self.tr("warehouse.status_issued"):
+            if not messagebox.askyesno(self.tr("common.confirm"), self.tr("warehouse.msg_confirm_return_to_stock")):
                 return
 
         # Если статус "на складе", устанавливаем дату прихода
@@ -2868,7 +2976,7 @@ class AutoServiceApp:
         """Редактировать выбранную запчасть"""
         selection = self.warehouse_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите запчасть из списка!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_select_part"))
             return
 
         values = self.warehouse_tree.item(selection[0], "values")
@@ -2877,12 +2985,12 @@ class AutoServiceApp:
         # Получаем данные запчасти из БД
         part_data = self.db.get_warehouse_part_by_id(part_id)
         if not part_data:
-            messagebox.showerror("Ошибка", "Запчасть не найдена!")
+            messagebox.showerror(self.tr("common.error"), self.tr("warehouse.msg_part_not_found"))
             return
 
         # Создаём окно редактирования
         edit_window = ctk.CTkToplevel(self.root)
-        edit_window.title("Редактировать запчасть")
+        edit_window.title(self.tr("warehouse.edit_part_title"))
         edit_window.geometry("450x400")
         edit_window.transient(self.root)
         edit_window.grab_set()
@@ -2896,18 +3004,18 @@ class AutoServiceApp:
         form_frame = ctk.CTkFrame(edit_window)
         form_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        ctk.CTkLabel(form_frame, text="Редактирование запчасти",
+        ctk.CTkLabel(form_frame, text=self.tr("warehouse.edit_part_header"),
                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(0, 15))
 
         # Информация о машине (только для чтения)
         car_info = f"{part_data.get('car_number', '')} {part_data.get('car_brand', '')} {part_data.get('car_model', '')}".strip()
         if car_info:
-            ctk.CTkLabel(form_frame, text=f"Авто: {car_info}", text_color="gray").pack(anchor="w", pady=(0, 10))
+            ctk.CTkLabel(form_frame, text=self.tr("warehouse.car_info_label", car_info=car_info), text_color="gray").pack(anchor="w", pady=(0, 10))
 
         # Название запчасти
         row1 = ctk.CTkFrame(form_frame, fg_color="transparent")
         row1.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row1, text="Запчасть:", width=100, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(row1, text=self.tr("warehouse.part_label"), width=100, anchor="w").pack(side=tk.LEFT)
         part_name_entry = ctk.CTkEntry(row1, width=280, fg_color="white", text_color="black")
         part_name_entry.pack(side=tk.LEFT)
         part_name_entry.insert(0, part_data.get('part_name', ''))
@@ -2915,7 +3023,7 @@ class AutoServiceApp:
         # Количество
         row2 = ctk.CTkFrame(form_frame, fg_color="transparent")
         row2.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row2, text="Количество:", width=100, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(row2, text=self.tr("warehouse.quantity_label"), width=100, anchor="w").pack(side=tk.LEFT)
         quantity_entry = ctk.CTkEntry(row2, width=100, fg_color="white", text_color="black")
         quantity_entry.pack(side=tk.LEFT)
         quantity_entry.insert(0, str(part_data.get('quantity', 1)))
@@ -2923,25 +3031,31 @@ class AutoServiceApp:
         # Цена
         row3 = ctk.CTkFrame(form_frame, fg_color="transparent")
         row3.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row3, text="Цена:", width=100, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(row3, text=self.tr("works.price_label"), width=100, anchor="w").pack(side=tk.LEFT)
         price_entry = ctk.CTkEntry(row3, width=150, fg_color="white", text_color="black")
         price_entry.pack(side=tk.LEFT)
         if part_data.get('price'):
             price_entry.insert(0, str(part_data.get('price')))
 
-        # Статус
+        # Статус (в БД хранится по-русски, в интерфейсе показываем перевод)
         row4 = ctk.CTkFrame(form_frame, fg_color="transparent")
         row4.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row4, text="Статус:", width=100, anchor="w").pack(side=tk.LEFT)
-        status_var = tk.StringVar(value=part_data.get('status', 'в пути'))
+        ctk.CTkLabel(row4, text=self.tr("bookings.status_label"), width=100, anchor="w").pack(side=tk.LEFT)
+        status_display_to_raw = {
+            self.tr("warehouse.status_in_transit"): "в пути",
+            self.tr("warehouse.status_in_stock"): "на складе",
+            self.tr("warehouse.status_issued"): "выдано",
+        }
+        status_raw_to_display = {v: k for k, v in status_display_to_raw.items()}
+        status_var = tk.StringVar(value=status_raw_to_display.get(part_data.get('status', 'в пути'), self.tr("warehouse.status_in_transit")))
         status_combo = ctk.CTkComboBox(row4, variable=status_var,
-                                        values=["в пути", "на складе", "выдано"], width=150)
+                                        values=list(status_display_to_raw.keys()), width=150)
         status_combo.pack(side=tk.LEFT)
 
         # Примечания
         row5 = ctk.CTkFrame(form_frame, fg_color="transparent")
         row5.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row5, text="Примечания:", width=100, anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(row5, text=self.tr("warehouse.notes_label"), width=100, anchor="w").pack(side=tk.LEFT)
         notes_entry = ctk.CTkEntry(row5, width=280, fg_color="white", text_color="black")
         notes_entry.pack(side=tk.LEFT)
         if part_data.get('notes'):
@@ -2950,58 +3064,57 @@ class AutoServiceApp:
         def save_changes():
             new_part_name = part_name_entry.get().strip()
             if not new_part_name:
-                messagebox.showwarning("Внимание", "Введите название запчасти!")
+                messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_part_name"))
                 return
 
             try:
                 new_quantity = int(quantity_entry.get().strip()) if quantity_entry.get().strip() else 1
             except ValueError:
-                messagebox.showwarning("Внимание", "Количество должно быть числом!")
+                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_quantity_number"))
                 return
 
             try:
                 price_str = price_entry.get().strip().replace(",", ".")
                 new_price = float(price_str) if price_str else None
             except ValueError:
-                messagebox.showwarning("Внимание", "Цена должна быть числом!")
+                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_price_number"))
                 return
 
-            new_status = status_var.get()
+            new_status = status_display_to_raw.get(status_var.get(), status_var.get())
             new_notes = notes_entry.get().strip() or None
 
             # Защита от смены статуса "выдано"
             if part_data.get('status') == 'выдано' and new_status != 'выдано':
-                if not messagebox.askyesno("Подтверждение",
-                        "Вы точно хотите вернуть выданную деталь на склад?",
+                if not messagebox.askyesno(self.tr("common.confirm"), self.tr("warehouse.msg_confirm_return_to_stock"),
                         parent=edit_window):
                     return
 
             self.db.update_warehouse_part(part_id, new_part_name, new_quantity, new_price, new_status, new_notes)
             edit_window.destroy()
             self.refresh_warehouse()
-            messagebox.showinfo("Успех", "Запчасть обновлена!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("warehouse.msg_part_updated"))
 
         # Кнопки
         buttons_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
         buttons_frame.pack(pady=20)
 
-        ctk.CTkButton(buttons_frame, text="Сохранить", command=save_changes,
+        ctk.CTkButton(buttons_frame, text=self.tr("common.save"), command=save_changes,
                      fg_color="#2e7d32", hover_color="#1b5e20", width=120).pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(buttons_frame, text="Отмена", command=edit_window.destroy,
+        ctk.CTkButton(buttons_frame, text=self.tr("common.cancel"), command=edit_window.destroy,
                      fg_color="#757575", hover_color="#616161", width=120).pack(side=tk.LEFT, padx=10)
 
     def delete_warehouse_part(self):
         """Удалить выбранную запчасть"""
         selection = self.warehouse_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите запчасть из списка!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_select_part"))
             return
 
         values = self.warehouse_tree.item(selection[0], "values")
         part_id = int(values[0])
         part_name = values[3]
 
-        if messagebox.askyesno("Подтверждение", f"Удалить запчасть '{part_name}'?"):
+        if messagebox.askyesno(self.tr("common.confirm"), self.tr("warehouse.msg_confirm_delete_part", part_name=part_name)):
             self.db.delete_warehouse_part(part_id)
             self.refresh_warehouse()
 
@@ -3014,7 +3127,7 @@ class AutoServiceApp:
         period_frame.pack(fill=tk.X, padx=10, pady=10)
         title = ctk.CTkLabel(
             period_frame,
-            text="Выберите период",
+            text=self.tr("reports.title_period"),
             font=("Segoe UI", 20, "bold"),
             anchor="center"
         )
@@ -3024,17 +3137,17 @@ class AutoServiceApp:
         dates_frame = ctk.CTkFrame(period_frame)
         dates_frame.pack()
 
-        ctk.CTkLabel(dates_frame, text="С:").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(dates_frame, text=self.tr("reports.date_from_label")).pack(side=tk.LEFT, padx=5)
         self.date_from = DateEntry(dates_frame, width=15, date_pattern='dd.mm.yyyy',
                                     locale='ru_RU')
         self.date_from.pack(side=tk.LEFT, padx=5)
 
-        ctk.CTkLabel(dates_frame, text="По:").pack(side=tk.LEFT, padx=15)
+        ctk.CTkLabel(dates_frame, text=self.tr("reports.date_to_label")).pack(side=tk.LEFT, padx=15)
         self.date_to = DateEntry(dates_frame, width=15, date_pattern='dd.mm.yyyy',
                                   locale='ru_RU')
         self.date_to.pack(side=tk.LEFT, padx=5)
 
-        ctk.CTkLabel(dates_frame, text="% мастеру:").pack(side=tk.LEFT, padx=(20, 5))
+        ctk.CTkLabel(dates_frame, text=self.tr("reports.master_percent_label")).pack(side=tk.LEFT, padx=(20, 5))
         settings = self.load_settings()
         self.percent_var = tk.StringVar(value=str(settings.get('master_percent', 50)))
         self.percent_var.trace_add('write', self.on_percent_changed)
@@ -3043,7 +3156,7 @@ class AutoServiceApp:
         self.percent_entry.pack(side=tk.LEFT, padx=5)
         ctk.CTkLabel(dates_frame, text="%").pack(side=tk.LEFT)
 
-        ctk.CTkButton(dates_frame, text="Сформировать отчёт",
+        ctk.CTkButton(dates_frame, text=self.tr("reports.generate_btn"),
                    command=self.generate_report).pack(side=tk.LEFT, padx=20)
 
         # Сводка по работникам
@@ -3051,17 +3164,17 @@ class AutoServiceApp:
         summary_frame.pack(fill=tk.X, padx=10, pady=10)
         title_masters = ctk.CTkLabel(
             summary_frame,
-            text="Сводка по мастерам",
+            text=self.tr("reports.summary_title"),
             font=("Segoe UI", 20, "bold"),
             anchor="center")
         title_masters.pack(fill=tk.X, pady=(0, 10))
 
         columns = ("name", "count", "total", "percent")
         self.summary_tree = ttk.Treeview(summary_frame, columns=columns, show="headings", height=4)
-        self.summary_tree.heading("name", text="ФИО мастера")
-        self.summary_tree.heading("count", text="Кол-во работ")
-        self.summary_tree.heading("total", text="Итого заработано")
-        self.summary_tree.heading("percent", text="% мастеру")
+        self.summary_tree.heading("name", text=self.tr("reports.col_master_name"))
+        self.summary_tree.heading("count", text=self.tr("reports.col_work_count"))
+        self.summary_tree.heading("total", text=self.tr("reports.col_total_earned"))
+        self.summary_tree.heading("percent", text=self.tr("reports.col_master_percent"))
 
         self.summary_tree.column("name", width=200)
         self.summary_tree.column("count", width=200, anchor=tk.CENTER)
@@ -3082,7 +3195,7 @@ class AutoServiceApp:
             font=("Segoe UI", 11)
         )
         self.summary_context_menu.add_command(
-            label="  📋  Подробно", command=self.show_master_report_details,
+            label="  📋  " + self.tr("reports.ctx_details"), command=self.show_master_report_details,
             foreground="#64b5f6", activeforeground="#90caf9",
             background="#1e1e1e", activebackground="#1976d2"
         )
@@ -3100,31 +3213,31 @@ class AutoServiceApp:
         settings = self.load_settings()
         initial_percent = settings.get('master_percent', 50)
 
-        self.income_label = ctk.CTkLabel(self.total_frame, text="ДОХОД (работы): 0,00 руб.",
+        self.income_label = ctk.CTkLabel(self.total_frame, text=self.tr("reports.income_label", amount="0,00 руб."),
                                         font=("Arial", 12, "bold"), text_color=green_color)
         self.income_label.pack(side=tk.LEFT, padx=5)
 
         ctk.CTkLabel(self.total_frame, text="|", font=("Arial", 12)).pack(side=tk.LEFT, padx=2)
 
-        self.other_income_label = ctk.CTkLabel(self.total_frame, text="Прочий доход: 0,00 руб.",
+        self.other_income_label = ctk.CTkLabel(self.total_frame, text=self.tr("reports.other_income_label", amount="0,00 руб."),
                                               font=("Arial", 12, "bold"), text_color=green_color)
         self.other_income_label.pack(side=tk.LEFT, padx=5)
 
         ctk.CTkLabel(self.total_frame, text="|", font=("Arial", 12)).pack(side=tk.LEFT, padx=2)
 
-        self.expenses_label = ctk.CTkLabel(self.total_frame, text="РАСХОДЫ: 0,00 руб.",
+        self.expenses_label = ctk.CTkLabel(self.total_frame, text=self.tr("reports.expenses_label", amount="0,00 руб."),
                                           font=("Arial", 12, "bold"), text_color=red_color)
         self.expenses_label.pack(side=tk.LEFT, padx=5)
 
         ctk.CTkLabel(self.total_frame, text="|", font=("Arial", 12)).pack(side=tk.LEFT, padx=2)
 
-        self.masters_label = ctk.CTkLabel(self.total_frame, text=f"Мастерам ({initial_percent:.0f}%): 0,00 руб.",
+        self.masters_label = ctk.CTkLabel(self.total_frame, text=self.tr("reports.masters_label", percent=f"{initial_percent:.0f}", amount="0,00 руб."),
                                          font=("Arial", 12, "bold"), text_color=red_color)
         self.masters_label.pack(side=tk.LEFT, padx=5)
 
         ctk.CTkLabel(self.total_frame, text="|", font=("Arial", 12)).pack(side=tk.LEFT, padx=2)
 
-        self.profit_label = ctk.CTkLabel(self.total_frame, text="ЧИСТАЯ ПРИБЫЛЬ: 0,00 руб.",
+        self.profit_label = ctk.CTkLabel(self.total_frame, text=self.tr("reports.profit_label", amount="0,00 руб."),
                                         font=("Arial", 12, "bold"), text_color=green_color)
         self.profit_label.pack(side=tk.LEFT, padx=5)
 
@@ -3138,7 +3251,7 @@ class AutoServiceApp:
         date_to = self.date_to.get_date().strftime('%Y-%m-%d')
 
         if date_from > date_to:
-            messagebox.showwarning("Внимание", "Дата 'С' не может быть больше даты 'По'!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("reports.msg_date_range_invalid"))
             return
 
         # Запоминаем период сформированного отчёта (для окна "Подробно" по мастеру)
@@ -3151,7 +3264,7 @@ class AutoServiceApp:
             if percent < 0 or percent > 100:
                 raise ValueError()
         except ValueError:
-            messagebox.showwarning("Внимание", "Введите корректный процент (0-100)!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("reports.msg_invalid_percent"))
             return
 
         # Очистка таблицы
@@ -3198,14 +3311,14 @@ class AutoServiceApp:
         self.other_income_tooltip.set_data(detailed_income)
 
         # Обновляем каждый label отдельно
-        self.income_label.configure(text=f"ДОХОД (работы): {self.format_currency(grand_total)}")
-        self.other_income_label.configure(text=f"Прочий доход: {self.format_currency(other_income)}")
-        self.expenses_label.configure(text=f"РАСХОДЫ: {self.format_currency(total_expenses)}")
-        self.masters_label.configure(text=f"Мастерам ({percent:.0f}%): {self.format_currency(total_percent_sum)}")
+        self.income_label.configure(text=self.tr("reports.income_label", amount=self.format_currency(grand_total)))
+        self.other_income_label.configure(text=self.tr("reports.other_income_label", amount=self.format_currency(other_income)))
+        self.expenses_label.configure(text=self.tr("reports.expenses_label", amount=self.format_currency(total_expenses)))
+        self.masters_label.configure(text=self.tr("reports.masters_label", percent=f"{percent:.0f}", amount=self.format_currency(total_percent_sum)))
 
         # Цвет прибыли зависит от значения
         profit_color = "#2e7d32" if net_profit >= 0 else "#c62828"  # Зелёный если >= 0, красный если < 0
-        self.profit_label.configure(text=f"ЧИСТАЯ ПРИБЫЛЬ: {self.format_currency(net_profit)}", text_color=profit_color)
+        self.profit_label.configure(text=self.tr("reports.profit_label", amount=self.format_currency(net_profit)), text_color=profit_color)
 
     def show_summary_context_menu(self, event):
         """Показать контекстное меню для строки сводки по мастеру"""
@@ -3218,7 +3331,7 @@ class AutoServiceApp:
         """Показать окно с детализацией работ мастера за сформированный период"""
         selection = self.summary_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите мастера!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_master"))
             return
 
         item = self.summary_tree.item(selection[0])
@@ -3228,14 +3341,14 @@ class AutoServiceApp:
         date_from = getattr(self, 'report_date_from', None)
         date_to = getattr(self, 'report_date_to', None)
         if not date_from or not date_to:
-            messagebox.showwarning("Внимание", "Сначала сформируйте отчёт!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("reports.msg_generate_first"))
             return
 
         works = self.db.get_works_by_worker_and_period(int(worker_id), date_from, date_to)
 
         # Создаём окно детализации
         details_window = ctk.CTkToplevel(self.root)
-        details_window.title(f"Детализация: {worker_name}")
+        details_window.title(self.tr("reports.details_window_title", name=worker_name))
         details_window.geometry("900x600")
         details_window.transient(self.root)
         details_window.grab_set()
@@ -3251,7 +3364,7 @@ class AutoServiceApp:
         ).pack(side="left")
         ctk.CTkLabel(
             header_frame,
-            text=f"Период: {period_str}",
+            text=self.tr("reports.period_label", period=period_str),
             font=("Arial", 13),
             text_color=("gray30", "gray70")
         ).pack(side="right")
@@ -3261,11 +3374,11 @@ class AutoServiceApp:
 
         columns = ("date", "client", "work", "price")
         details_tree = ttk.Treeview(table_frame, columns=columns, show="tree headings")
-        details_tree.heading("#0", text="Автомобиль")
-        details_tree.heading("date", text="Дата")
-        details_tree.heading("client", text="Клиент")
-        details_tree.heading("work", text="Работа")
-        details_tree.heading("price", text="Цена")
+        details_tree.heading("#0", text=self.tr("bookings.col_car"))
+        details_tree.heading("date", text=self.tr("bookings.col_date"))
+        details_tree.heading("client", text=self.tr("bookings.info_label_client"))
+        details_tree.heading("work", text=self.tr("reports.col_work"))
+        details_tree.heading("price", text=self.tr("works.col_price"))
         details_tree.column("#0", width=220)
         details_tree.column("date", width=90, anchor=tk.CENTER)
         details_tree.column("client", width=150)
@@ -3292,7 +3405,7 @@ class AutoServiceApp:
             else:
                 date_str = str(work_date) if work_date else "-"
 
-            car_info = " ".join(filter(None, [car_brand, car_model, car_number])).strip() or "Без авто"
+            car_info = " ".join(filter(None, [car_brand, car_model, car_number])).strip() or self.tr("reports.no_car")
             car_key = car_number or car_info
             client_display = client_name or "-"
 
@@ -3308,9 +3421,10 @@ class AutoServiceApp:
         for car_key, car_group in cars.items():
             grand_total += car_group["total"]
             work_count = len(car_group["items"])
+            work_count_text = self.tr("reports.car_works_one") if work_count == 1 else self.tr("reports.car_works_many", count=work_count)
             car_node = details_tree.insert(
                 "", tk.END,
-                text=f"🚗 {car_group['car_info']}  ({work_count} {'работа' if work_count == 1 else 'работ'})",
+                text=f"🚗 {car_group['car_info']}  ({work_count_text})",
                 values=("", car_group["client"], "", self.format_currency(car_group["total"])),
                 tags=('carrow',), open=True
             )
@@ -3328,19 +3442,19 @@ class AutoServiceApp:
         footer_frame.pack(fill="x", padx=15, pady=(0, 15))
         ctk.CTkLabel(
             footer_frame,
-            text=f"Автомобилей: {len(cars)}  |  Работ: {len(works)}",
+            text=self.tr("reports.footer_summary", cars=len(cars), works=len(works)),
             font=("Arial", 13),
             text_color=("gray30", "gray70")
         ).pack(side="left")
         ctk.CTkLabel(
             footer_frame,
-            text=f"ИТОГО: {self.format_currency(grand_total)}",
+            text=self.tr("reports.grand_total_label", amount=self.format_currency(grand_total)),
             font=("Arial", 15, "bold"),
             text_color="#2e7d32"
         ).pack(side="right")
 
         if not works:
-            messagebox.showinfo("Информация", f"У мастера {worker_name} нет работ за выбранный период.", parent=details_window)
+            messagebox.showinfo(self.tr("common.info"), self.tr("reports.msg_no_works_for_master", name=worker_name), parent=details_window)
 
     # ===== ВКЛАДКА МАРОК И МОДЕЛЕЙ =====
 
@@ -3358,31 +3472,31 @@ class AutoServiceApp:
         import_frame = ctk.CTkFrame(center_container)
         import_frame.pack(pady=10)
 
-        ctk.CTkLabel(import_frame, text="Формат JSON: {\"Марка\": [\"Модель1\", \"Модель2\"]}", anchor="w").pack(anchor=tk.W, pady=5)
-        ctk.CTkButton(import_frame, text="Импортировать из файла JSON",
+        ctk.CTkLabel(import_frame, text=self.tr("cars.import_format_label"), anchor="w").pack(anchor=tk.W, pady=5)
+        ctk.CTkButton(import_frame, text=self.tr("cars.import_btn"),
                    command=self.import_from_file, width=400, fg_color="green", hover_color="darkgreen").pack(anchor=tk.W, pady=5)
 
         # Добавление марки
         brand_frame = ctk.CTkFrame(center_container)
         brand_frame.pack(fill=tk.X, pady=10)
 
-        ctk.CTkLabel(brand_frame, text="Название марки:").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(brand_frame, text=self.tr("cars.brand_name_label")).pack(side=tk.LEFT, padx=5)
         self.brand_name_entry = ctk.CTkEntry(brand_frame, width=300, fg_color="white", text_color="black")
         self.brand_name_entry.pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(brand_frame, text="Добавить марку", command=self.add_brand, fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(brand_frame, text=self.tr("cars.add_brand_btn"), command=self.add_brand, fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5)
 
         # Добавление модели
         model_frame = ctk.CTkFrame(center_container)
         model_frame.pack(fill=tk.X, pady=10)
 
-        ctk.CTkLabel(model_frame, text="Марка:").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(model_frame, text=self.tr("bookings.add_window_brand")).pack(side=tk.LEFT, padx=5)
         self.brand_combo = ctk.CTkComboBox(model_frame, width=250, fg_color="white", text_color="black", button_color="#0078d7", button_hover_color="#005a9e")
         self.brand_combo.pack(side=tk.LEFT, padx=5)
 
-        ctk.CTkLabel(model_frame, text="Модель:").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(model_frame, text=self.tr("bookings.add_window_model")).pack(side=tk.LEFT, padx=5)
         self.model_name_entry = ctk.CTkEntry(model_frame, width=200, fg_color="white", text_color="black")
         self.model_name_entry.pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(model_frame, text="Добавить модель", command=self.add_model, fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(model_frame, text=self.tr("cars.add_model_btn"), command=self.add_model, fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5)
 
         # Список марок и моделей
         list_frame = ctk.CTkFrame(center_container)
@@ -3392,19 +3506,19 @@ class AutoServiceApp:
         left_frame = ctk.CTkFrame(list_frame)
         left_frame.pack(side=tk.LEFT, padx=5)
 
-        ctk.CTkLabel(left_frame, text="Марки:", anchor="w").pack(anchor=tk.W)
+        ctk.CTkLabel(left_frame, text=self.tr("cars.brands_label"), anchor="w").pack(anchor=tk.W)
         self.brands_listbox = tk.Listbox(left_frame, height=15, width=35)
         self.brands_listbox.pack()
         self.brands_listbox.bind('<<ListboxSelect>>', self.on_brand_listbox_select)
-        ctk.CTkButton(left_frame, text="Удалить марку", command=self.delete_brand, width=250, fg_color="red", hover_color="darkred").pack(pady=5)
+        ctk.CTkButton(left_frame, text=self.tr("cars.delete_brand_btn"), command=self.delete_brand, width=250, fg_color="red", hover_color="darkred").pack(pady=5)
 
         right_frame = ctk.CTkFrame(list_frame)
         right_frame.pack(side=tk.LEFT, padx=5)
 
-        ctk.CTkLabel(right_frame, text="Модели выбранной марки:", anchor="w").pack(anchor=tk.W)
+        ctk.CTkLabel(right_frame, text=self.tr("cars.models_of_brand_label"), anchor="w").pack(anchor=tk.W)
         self.models_listbox = tk.Listbox(right_frame, height=15, width=35)
         self.models_listbox.pack()
-        ctk.CTkButton(right_frame, text="Удалить модель", command=self.delete_model, width=250, fg_color="red", hover_color="darkred").pack(pady=5)
+        ctk.CTkButton(right_frame, text=self.tr("cars.delete_model_btn"), command=self.delete_model, width=250, fg_color="red", hover_color="darkred").pack(pady=5)
 
         # Загружаем данные
         self.refresh_brands_list()
@@ -3447,53 +3561,53 @@ class AutoServiceApp:
         """Добавить марку"""
         brand_name = self.brand_name_entry.get().strip()
         if not brand_name:
-            messagebox.showwarning("Внимание", "Введите название марки!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("cars.msg_enter_brand_name"))
             return
 
         if self.db.add_car_brand(brand_name):
-            messagebox.showinfo("Успех", f"Марка '{brand_name}' добавлена!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("cars.msg_brand_added", name=brand_name))
             self.brand_name_entry.delete(0, tk.END)
             self.refresh_brands_list()
         else:
-            messagebox.showerror("Ошибка", "Такая марка уже существует!")
+            messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_brand_exists"))
 
     def add_model(self):
         """Добавить модель"""
         if not self.brand_combo.get():
-            messagebox.showwarning("Внимание", "Выберите марку!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("cars.msg_select_brand"))
             return
 
         model_name = self.model_name_entry.get().strip()
         if not model_name:
-            messagebox.showwarning("Внимание", "Введите название модели!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("cars.msg_enter_model_name"))
             return
 
         brand_id = self.brands_data[self.brand_combo.get()]
 
         if self.db.add_car_model(brand_id, model_name):
-            messagebox.showinfo("Успех", f"Модель '{model_name}' добавлена!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("cars.msg_model_added", name=model_name))
             self.model_name_entry.delete(0, tk.END)
             # Обновляем список моделей если выбрана эта марка
             selection = self.brands_listbox.curselection()
             if selection and self.brands_listbox.get(selection[0]) == self.brand_combo.get():
                 self.on_brand_listbox_select(None)
         else:
-            messagebox.showerror("Ошибка", "Такая модель для этой марки уже существует!")
+            messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_model_exists_for_brand"))
 
     def delete_brand(self):
         """Удалить марку"""
         selection = self.brands_listbox.curselection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите марку для удаления!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("cars.msg_select_brand_to_delete"))
             return
 
         brand_name = self.brands_listbox.get(selection[0])
         brand_id = self.brands_data[brand_name]
 
-        if messagebox.askyesno("Подтверждение",
-                               f"Удалить марку '{brand_name}'?\n\nВсе модели этой марки также будут удалены!"):
+        if messagebox.askyesno(self.tr("common.confirm"),
+                               self.tr("cars.msg_confirm_delete_brand", name=brand_name)):
             self.db.delete_car_brand(brand_id)
-            messagebox.showinfo("Успех", "Марка удалена!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("cars.msg_brand_deleted"))
             self.refresh_brands_list()
             self.models_listbox.delete(0, tk.END)
 
@@ -3501,15 +3615,15 @@ class AutoServiceApp:
         """Удалить модель"""
         selection = self.models_listbox.curselection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите модель для удаления!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("cars.msg_select_model_to_delete"))
             return
 
         model_name = self.models_listbox.get(selection[0])
         model_id = self.models_data[model_name]
 
-        if messagebox.askyesno("Подтверждение", f"Удалить модель '{model_name}'?"):
+        if messagebox.askyesno(self.tr("common.confirm"), self.tr("cars.msg_confirm_delete_model", name=model_name)):
             self.db.delete_car_model(model_id)
-            messagebox.showinfo("Успех", "Модель удалена!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("cars.msg_model_deleted"))
             # Обновляем список моделей
             brand_selection = self.brands_listbox.curselection()
             if brand_selection:
@@ -3518,8 +3632,8 @@ class AutoServiceApp:
     def import_from_file(self):
         """Импорт марок и моделей из JSON файла"""
         file_path = filedialog.askopenfilename(
-            title="Выберите JSON файл",
-            filetypes=[("JSON файлы", "*.json"), ("Все файлы", "*.*")]
+            title=self.tr("cars.select_json_title"),
+            filetypes=[(self.tr("cars.json_files_label"), "*.json"), (self.tr("cars.all_files_label"), "*.*")]
         )
 
         if not file_path:
@@ -3530,18 +3644,18 @@ class AutoServiceApp:
                 data = json.load(f)
 
             if not isinstance(data, dict):
-                messagebox.showerror("Ошибка", "Неверный формат файла! Ожидается словарь {\"Марка\": [\"Модель1\", ...]}")
+                messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_invalid_json_format"))
                 return
 
             added_brands, added_models = self.db.import_brands_models_from_dict(data)
-            messagebox.showinfo("Успех",
-                              f"Импорт завершён!\n\nДобавлено марок: {added_brands}\nДобавлено моделей: {added_models}")
+            messagebox.showinfo(self.tr("common.success"),
+                              self.tr("cars.msg_import_done", brands=added_brands, models=added_models))
             self.refresh_brands_list()
 
         except json.JSONDecodeError:
-            messagebox.showerror("Ошибка", "Ошибка чтения JSON файла!")
+            messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_json_read_error"))
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Ошибка импорта: {str(e)}")
+            messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_import_error", error=str(e)))
 
     # ===== ВКЛАДКА КЛЮЧЕВЫХ СЛОВ =====
 
@@ -3556,38 +3670,38 @@ class AutoServiceApp:
         center_container.pack(anchor=tk.CENTER, pady=10)
 
         # Заголовок
-        ctk.CTkLabel(center_container, text="Ключевые слова для автодополнения",
+        ctk.CTkLabel(center_container, text=self.tr("keywords.title"),
                     font=("Segoe UI", 16, "bold")).pack(pady=10)
 
         # Импорт из файла
         import_frame = ctk.CTkFrame(center_container)
         import_frame.pack(pady=10)
 
-        ctk.CTkLabel(import_frame, text="Формат: текстовый файл (каждое слово на новой строке) или JSON (список слов)", anchor="w").pack(anchor=tk.W, pady=5)
-        ctk.CTkButton(import_frame, text="Импортировать из файла",
+        ctk.CTkLabel(import_frame, text=self.tr("keywords.import_format_label"), anchor="w").pack(anchor=tk.W, pady=5)
+        ctk.CTkButton(import_frame, text=self.tr("keywords.import_btn"),
                    command=self.import_keywords_from_file, width=400, fg_color="green", hover_color="darkgreen").pack(anchor=tk.W, pady=5)
 
         # Добавление ключевого слова
         add_frame = ctk.CTkFrame(center_container)
         add_frame.pack(fill=tk.X, pady=10)
 
-        ctk.CTkLabel(add_frame, text="Ключевое слово:", width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(add_frame, text=self.tr("keywords.add_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
         self.keyword_entry = ctk.CTkEntry(add_frame, width=350, fg_color="white", text_color="black")
         self.keyword_entry.pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(add_frame, text="Добавить", command=self.add_keyword_action,
+        ctk.CTkButton(add_frame, text=self.tr("common.add"), command=self.add_keyword_action,
                      fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5)
 
         # Список ключевых слов
         list_frame = ctk.CTkFrame(center_container)
         list_frame.pack(pady=10)
 
-        ctk.CTkLabel(list_frame, text="Список ключевых слов:", anchor="w").pack(anchor=tk.W)
+        ctk.CTkLabel(list_frame, text=self.tr("keywords.list_label"), anchor="w").pack(anchor=tk.W)
 
         # Treeview для ключевых слов
         columns = ("id", "keyword")
         self.keywords_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
         self.keywords_tree.heading("id", text="ID")
-        self.keywords_tree.heading("keyword", text="Ключевое слово")
+        self.keywords_tree.heading("keyword", text=self.tr("keywords.col_keyword"))
         self.keywords_tree.column("id", width=50, anchor=tk.CENTER)
         self.keywords_tree.column("keyword", width=450, anchor=tk.W)
 
@@ -3598,7 +3712,7 @@ class AutoServiceApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Кнопка удаления
-        ctk.CTkButton(center_container, text="Удалить выбранное ключевое слово",
+        ctk.CTkButton(center_container, text=self.tr("keywords.delete_selected_btn"),
                      command=self.delete_keyword_action, width=500,
                      fg_color="red", hover_color="darkred").pack(pady=10)
 
@@ -3614,37 +3728,37 @@ class AutoServiceApp:
         """Добавить ключевое слово"""
         keyword = self.keyword_entry.get().strip()
         if not keyword:
-            messagebox.showwarning("Внимание", "Введите ключевое слово!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("keywords.msg_enter_keyword"))
             return
 
         if self.db.add_keyword(keyword):
-            messagebox.showinfo("Успех", f"Ключевое слово '{keyword}' добавлено!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("keywords.msg_added", name=keyword))
             self.keyword_entry.delete(0, tk.END)
             self.refresh_keywords_list()
         else:
-            messagebox.showerror("Ошибка", "Такое ключевое слово уже существует!")
+            messagebox.showerror(self.tr("common.error"), self.tr("keywords.msg_already_exists"))
 
     def delete_keyword_action(self):
         """Удалить ключевое слово"""
         selected = self.keywords_tree.selection()
         if not selected:
-            messagebox.showwarning("Внимание", "Выберите ключевое слово для удаления!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("keywords.msg_select_to_delete"))
             return
 
         item = self.keywords_tree.item(selected[0])
         keyword_id = item['values'][0]
         keyword = item['values'][1]
 
-        if messagebox.askyesno("Подтверждение", f"Удалить ключевое слово '{keyword}'?"):
+        if messagebox.askyesno(self.tr("common.confirm"), self.tr("keywords.msg_confirm_delete", name=keyword)):
             self.db.delete_keyword(keyword_id)
-            messagebox.showinfo("Успех", "Ключевое слово удалено!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("keywords.msg_deleted"))
             self.refresh_keywords_list()
 
     def import_keywords_from_file(self):
         """Импорт ключевых слов из файла (TXT или JSON)"""
         file_path = filedialog.askopenfilename(
-            title="Выберите файл",
-            filetypes=[("Текстовые файлы", "*.txt"), ("JSON файлы", "*.json"), ("Все файлы", "*.*")]
+            title=self.tr("keywords.select_file_title"),
+            filetypes=[(self.tr("keywords.text_files_label"), "*.txt"), (self.tr("cars.json_files_label"), "*.json"), (self.tr("cars.all_files_label"), "*.*")]
         )
 
         if not file_path:
@@ -3661,24 +3775,232 @@ class AutoServiceApp:
                 if isinstance(data, list):
                     keywords = data
                 else:
-                    messagebox.showerror("Ошибка", "Неверный формат JSON! Ожидается список слов: ['слово1', 'слово2']")
+                    messagebox.showerror(self.tr("common.error"), self.tr("keywords.msg_invalid_json_format"))
                     return
             else:
                 # Текстовый файл - каждое слово на новой строке
                 keywords = content.strip().splitlines()
 
             if not keywords:
-                messagebox.showwarning("Внимание", "Файл пустой или не содержит ключевых слов!")
+                messagebox.showwarning(self.tr("common.attention"), self.tr("keywords.msg_empty_file"))
                 return
 
             added = self.db.import_keywords_from_list(keywords)
-            messagebox.showinfo("Успех", f"Импорт завершён! Добавлено ключевых слов: {added}")
+            messagebox.showinfo(self.tr("common.success"), self.tr("keywords.msg_import_done", count=added))
             self.refresh_keywords_list()
 
         except json.JSONDecodeError:
-            messagebox.showerror("Ошибка", "Ошибка чтения JSON файла!")
+            messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_json_read_error"))
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Ошибка импорта: {str(e)}")
+            messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_import_error", error=str(e)))
+
+    # ===== ВКЛАДКА ЗАПЧАСТЕЙ =====
+
+    def setup_spare_parts_tab(self):
+        """Настройка вкладки запчастей"""
+        # Главный контейнер
+        main_frame = ctk.CTkFrame(self.spare_parts_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Центрированный контейнер
+        center_container = ctk.CTkFrame(main_frame)
+        center_container.pack(anchor=tk.CENTER, pady=10)
+
+        # Заголовок
+        ctk.CTkLabel(center_container, text=self.tr("spareparts.title"),
+                    font=("Segoe UI", 16, "bold")).pack(pady=10)
+
+        # Импорт из файла
+        import_frame = ctk.CTkFrame(center_container)
+        import_frame.pack(pady=10)
+
+        ctk.CTkLabel(import_frame, text=self.tr("spareparts.import_format_label"), anchor="w").pack(anchor=tk.W, pady=5)
+        ctk.CTkButton(import_frame, text=self.tr("keywords.import_btn"),
+                   command=self.import_spare_parts_from_file, width=400, fg_color="green", hover_color="darkgreen").pack(anchor=tk.W, pady=5)
+
+        # Добавление запчасти
+        add_frame = ctk.CTkFrame(center_container)
+        add_frame.pack(fill=tk.X, pady=10)
+
+        ctk.CTkLabel(add_frame, text=self.tr("works.name_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.spare_part_entry = ctk.CTkEntry(add_frame, width=350, fg_color="white", text_color="black")
+        self.spare_part_entry.pack(side=tk.LEFT, padx=5)
+        self.spare_part_entry.bind('<Return>', lambda e: self.add_spare_part_action())
+        ctk.CTkButton(add_frame, text=self.tr("common.add"), command=self.add_spare_part_action,
+                     fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5)
+
+        # Список запчастей
+        list_frame = ctk.CTkFrame(center_container)
+        list_frame.pack(pady=10)
+
+        ctk.CTkLabel(list_frame, text=self.tr("spareparts.list_label"), anchor="w").pack(anchor=tk.W)
+
+        # Treeview для запчастей
+        columns = ("part_name",)
+        self.spare_parts_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+        self.spare_parts_tree.heading("part_name", text=self.tr("spareparts.col_part_name"))
+        self.spare_parts_tree.column("part_name", width=500, anchor=tk.W)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.spare_parts_tree.yview)
+        self.spare_parts_tree.configure(yscrollcommand=scrollbar.set)
+
+        self.spare_parts_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Кнопка удаления
+        ctk.CTkButton(center_container, text=self.tr("spareparts.delete_selected_btn"),
+                     command=self.delete_spare_part_action, width=500,
+                     fg_color="red", hover_color="darkred").pack(pady=10)
+
+    def refresh_spare_parts_list(self):
+        """Обновить список запчастей"""
+        for item in self.spare_parts_tree.get_children():
+            self.spare_parts_tree.delete(item)
+
+        for part_name in self.spare_parts_list:
+            self.spare_parts_tree.insert("", tk.END, values=(part_name,))
+
+    def save_spare_parts_file(self):
+        """Сохранить список запчастей в текстовый файл"""
+        try:
+            os.makedirs(os.path.dirname(SPARE_PARTS_FILE), exist_ok=True)
+            with open(SPARE_PARTS_FILE, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(self.spare_parts_list))
+        except Exception as e:
+            messagebox.showerror(self.tr("common.error"), self.tr("spareparts.msg_save_error", error=str(e)))
+
+    def add_spare_part_action(self):
+        """Добавить запчасть"""
+        part_name = self.spare_part_entry.get().strip()
+        if not part_name:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_part_name"))
+            return
+
+        if any(p.lower() == part_name.lower() for p in self.spare_parts_list):
+            messagebox.showerror(self.tr("common.error"), self.tr("spareparts.msg_already_exists"))
+            return
+
+        self.spare_parts_list.append(part_name)
+        self.save_spare_parts_file()
+        messagebox.showinfo(self.tr("common.success"), self.tr("spareparts.msg_added", name=part_name))
+        self.spare_part_entry.delete(0, tk.END)
+        self.refresh_spare_parts_list()
+
+    def delete_spare_part_action(self):
+        """Удалить запчасть"""
+        selected = self.spare_parts_tree.selection()
+        if not selected:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("spareparts.msg_select_to_delete"))
+            return
+
+        item = self.spare_parts_tree.item(selected[0])
+        part_name = item['values'][0]
+
+        if messagebox.askyesno(self.tr("common.confirm"), self.tr("spareparts.msg_confirm_delete", name=part_name)):
+            self.spare_parts_list = [p for p in self.spare_parts_list if p != part_name]
+            self.save_spare_parts_file()
+            messagebox.showinfo(self.tr("common.success"), self.tr("spareparts.msg_deleted"))
+            self.refresh_spare_parts_list()
+
+    def import_spare_parts_from_file(self):
+        """Импорт запчастей из файла (TXT или JSON)"""
+        file_path = filedialog.askopenfilename(
+            title=self.tr("keywords.select_file_title"),
+            filetypes=[(self.tr("keywords.text_files_label"), "*.txt"), (self.tr("cars.json_files_label"), "*.json"), (self.tr("cars.all_files_label"), "*.*")]
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Определяем формат файла
+            parts = []
+            if file_path.lower().endswith('.json'):
+                data = json.loads(content)
+                if isinstance(data, list):
+                    parts = data
+                else:
+                    messagebox.showerror(self.tr("common.error"), self.tr("spareparts.msg_invalid_json_format"))
+                    return
+            else:
+                # Текстовый файл - каждая запчасть на новой строке
+                parts = content.strip().splitlines()
+
+            parts = [p.strip() for p in parts if p and p.strip()]
+            if not parts:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("spareparts.msg_empty_file"))
+                return
+
+            existing_lower = {p.lower() for p in self.spare_parts_list}
+            added = 0
+            for part_name in parts:
+                if part_name.lower() not in existing_lower:
+                    self.spare_parts_list.append(part_name)
+                    existing_lower.add(part_name.lower())
+                    added += 1
+
+            self.save_spare_parts_file()
+            messagebox.showinfo(self.tr("common.success"), self.tr("spareparts.msg_import_done", count=added))
+            self.refresh_spare_parts_list()
+
+        except json.JSONDecodeError:
+            messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_json_read_error"))
+        except Exception as e:
+            messagebox.showerror(self.tr("common.error"), self.tr("cars.msg_import_error", error=str(e)))
+
+    # ===== ВКЛАДКА ЯЗЫКА =====
+
+    def setup_language_tab(self):
+        """Настройка вкладки выбора языка интерфейса"""
+        main_frame = ctk.CTkFrame(self.language_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        center_container = ctk.CTkFrame(main_frame)
+        center_container.pack(anchor=tk.CENTER, pady=10)
+
+        ctk.CTkLabel(center_container, text=self.tr("settings.language_title"),
+                    font=("Segoe UI", 16, "bold")).pack(pady=10)
+
+        row = ctk.CTkFrame(center_container)
+        row.pack(fill=tk.X, pady=10)
+        ctk.CTkLabel(row, text=self.tr("settings.language_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+
+        self._language_codes_by_name = {name: code for code, name in SUPPORTED_LANGUAGES.items()}
+        self.language_combo = ctk.CTkComboBox(row, width=250, fg_color="white", text_color="black",
+                                               button_color="#0078d7", button_hover_color="#005a9e",
+                                               values=list(SUPPORTED_LANGUAGES.values()), state="readonly")
+        self.language_combo.pack(side=tk.LEFT, padx=5)
+        self.language_combo.set(SUPPORTED_LANGUAGES.get(self.i18n.lang, SUPPORTED_LANGUAGES["ru"]))
+
+        ctk.CTkButton(center_container, text=self.tr("settings.language_save"),
+                     command=self.save_language_action, fg_color="green", hover_color="darkgreen").pack(pady=10)
+
+        ctk.CTkLabel(center_container, text=self.tr("settings.language_restart_notice"),
+                    text_color="#FF9800").pack(pady=(0, 10))
+
+    def save_language_action(self):
+        """Сохранить выбранный язык интерфейса и перезапустить приложение"""
+        selected_name = self.language_combo.get()
+        lang_code = self._language_codes_by_name.get(selected_name, "ru")
+
+        settings = self.load_settings()
+        settings['language'] = lang_code
+        self.save_settings(settings)
+
+        messagebox.showinfo(self.tr("common.success"), self.tr("settings.language_saved"))
+        self.restart_application()
+
+    def restart_application(self):
+        """Перезапустить приложение текущим интерпретатором/exe"""
+        self.root.destroy()
+        python = sys.executable
+        if getattr(sys, 'frozen', False):
+            os.execv(python, [python] + sys.argv[1:])
+        else:
+            os.execv(python, [python] + sys.argv)
 
     # ===== ВКЛАДКА РАСХОДОВ =====
 
@@ -3696,7 +4018,7 @@ class AutoServiceApp:
         switch_row = ctk.CTkFrame(center_container)
         switch_row.pack(fill=tk.X, pady=10)
 
-        self.expense_type_label = ctk.CTkLabel(switch_row, text="Расход", width=80, anchor="e",
+        self.expense_type_label = ctk.CTkLabel(switch_row, text=self.tr("finances.expense_label"), width=80, anchor="e",
                                                 font=("Segoe UI", 14, "bold"), text_color="#d32f2f")
         self.expense_type_label.pack(side=tk.LEFT, padx=5)
 
@@ -3708,45 +4030,47 @@ class AutoServiceApp:
                                            fg_color="#d32f2f", button_hover_color="#f0f0f0")
         self.income_switch.pack(side=tk.LEFT, padx=10)
 
-        self.income_type_label = ctk.CTkLabel(switch_row, text="Доход", width=80, anchor="w",
+        self.income_type_label = ctk.CTkLabel(switch_row, text=self.tr("finances.income_label"), width=80, anchor="w",
                                                font=("Segoe UI", 14), text_color="gray")
         self.income_type_label.pack(side=tk.LEFT, padx=5)
 
         # Категория
         row1 = ctk.CTkFrame(center_container)
         row1.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row1, text="Категория:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row1, text=self.tr("finances.category_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.expense_category_combo = ctk.CTkComboBox(row1, width=350,
-                                                    values=["Аренда", "Налоги", "Коммунальные услуги", "Закупка запчастей",
-                                                            "Инструменты", "Реклама", "Прочее", "Доход"],
+                                                    values=[self.tr("finances.category_rent"), self.tr("finances.category_taxes"),
+                                                            self.tr("finances.category_utilities"), self.tr("finances.category_parts_purchase"),
+                                                            self.tr("finances.category_tools"), self.tr("finances.category_ads"),
+                                                            self.tr("finances.category_other"), self.tr("finances.income_label")],
                                                     fg_color="white", text_color="black", button_color="#0078d7", button_hover_color="#005a9e")
         self.expense_category_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        self.expense_category_combo.set("Аренда")
+        self.expense_category_combo.set(self.tr("finances.category_rent"))
 
         # Описание
         row2 = ctk.CTkFrame(center_container)
         row2.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row2, text="Описание:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row2, text=self.tr("finances.description_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.expense_desc_entry = ctk.CTkEntry(row2, width=400, fg_color="white", text_color="black")
         self.expense_desc_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
         # Сумма
         row3 = ctk.CTkFrame(center_container)
         row3.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row3, text="Сумма (руб.):", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row3, text=self.tr("finances.amount_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.expense_amount_entry = ctk.CTkEntry(row3, width=200, fg_color="white", text_color="black")
         self.expense_amount_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
         # Дата
         row4 = ctk.CTkFrame(center_container)
         row4.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row4, text="Дата:", width=150, anchor="w").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(row4, text=self.tr("bookings.add_window_date"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.expense_date_entry = DateEntry(row4, width=30, date_pattern='dd.mm.yyyy',
                                              locale='ru_RU')
         self.expense_date_entry.pack(side=tk.LEFT, padx=5)
 
         # Кнопка добавления
-        self.add_expense_btn = ctk.CTkButton(center_container, text='Добавить расход',
+        self.add_expense_btn = ctk.CTkButton(center_container, text=self.tr("finances.add_expense_btn"),
                    command=self.add_expense, width=550, height=50, fg_color="#d32f2f", hover_color="#b71c1c")
         self.add_expense_btn.pack(anchor=tk.CENTER, pady=20)
 
@@ -3757,11 +4081,11 @@ class AutoServiceApp:
         columns = ("id", "type", "category", "desc", "amount", "date")
         self.expenses_tree = ttk.Treeview(history_frame, columns=columns, show="headings", height=12)
         self.expenses_tree.heading("id", text="ID")
-        self.expenses_tree.heading("type", text="Тип")
-        self.expenses_tree.heading("category", text="Категория")
-        self.expenses_tree.heading("desc", text="Описание")
-        self.expenses_tree.heading("amount", text="Сумма")
-        self.expenses_tree.heading("date", text="Дата")
+        self.expenses_tree.heading("type", text=self.tr("finances.col_type"))
+        self.expenses_tree.heading("category", text=self.tr("finances.col_category"))
+        self.expenses_tree.heading("desc", text=self.tr("finances.col_description"))
+        self.expenses_tree.heading("amount", text=self.tr("finances.col_amount"))
+        self.expenses_tree.heading("date", text=self.tr("bookings.col_date"))
 
         self.expenses_tree.column("id", width=50, anchor=tk.CENTER)
         self.expenses_tree.column("type", width=80, anchor=tk.CENTER)
@@ -3783,7 +4107,7 @@ class AutoServiceApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Кнопка удаления
-        self.delete_expense_btn = ctk.CTkButton(center_container, text="Удалить выбранную запись",
+        self.delete_expense_btn = ctk.CTkButton(center_container, text=self.tr("finances.delete_selected_btn"),
                    command=self.delete_expense, width=550, fg_color="red", hover_color="#555555")
         self.delete_expense_btn.pack(anchor=tk.CENTER, pady=10)
 
@@ -3793,23 +4117,24 @@ class AutoServiceApp:
         if is_income:
             self.expense_type_label.configure(text_color="gray", font=("Segoe UI", 14))
             self.income_type_label.configure(text_color="#4caf50", font=("Segoe UI", 14, "bold"))
-            self.add_expense_btn.configure(text="Добавить доход", fg_color="#4caf50", hover_color="#388e3c")
+            self.add_expense_btn.configure(text=self.tr("finances.add_income_btn"), fg_color="#4caf50", hover_color="#388e3c")
         else:
             self.expense_type_label.configure(text_color="#d32f2f", font=("Segoe UI", 14, "bold"))
             self.income_type_label.configure(text_color="gray", font=("Segoe UI", 14))
-            self.add_expense_btn.configure(text="Добавить расход", fg_color="#d32f2f", hover_color="#b71c1c")
+            self.add_expense_btn.configure(text=self.tr("finances.add_expense_btn"), fg_color="#d32f2f", hover_color="#b71c1c")
 
     def add_expense(self):
         """Добавить расход или доход"""
         category = self.expense_category_combo.get().strip()
         if not category:
-            messagebox.showwarning("Внимание", "Выберите категорию!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("finances.msg_select_category"))
             return
 
         description = self.expense_desc_entry.get().strip()
         is_income = self.is_income_var.get()
         if not description:
-            messagebox.showwarning("Внимание", f"Введите описание {'дохода' if is_income else 'расхода'}!")
+            messagebox.showwarning(self.tr("common.attention"),
+                                    self.tr("finances.msg_enter_income_desc") if is_income else self.tr("finances.msg_enter_expense_desc"))
             return
 
         try:
@@ -3817,14 +4142,15 @@ class AutoServiceApp:
             if amount <= 0:
                 raise ValueError()
         except ValueError:
-            messagebox.showwarning("Внимание", "Введите корректную сумму!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("finances.msg_invalid_amount"))
             return
 
         expense_date = self.expense_date_entry.get_date().strftime('%Y-%m-%d')
 
         self.db.add_expense(description, amount, expense_date, category, is_income)
 
-        messagebox.showinfo("Успех", f"{'Доход' if is_income else 'Расход'} добавлен!")
+        messagebox.showinfo(self.tr("common.success"),
+                             self.tr("finances.msg_income_added") if is_income else self.tr("finances.msg_expense_added"))
         self.expense_desc_entry.delete(0, tk.END)
         self.expense_amount_entry.delete(0, tk.END)
         self.refresh_expenses()
@@ -3845,7 +4171,7 @@ class AutoServiceApp:
                 display_date = expense_date.strftime('%d.%m.%Y')
 
             # Определяем тип записи и тег
-            type_text = "Доход" if is_income else "Расход"
+            type_text = self.tr("finances.income_label") if is_income else self.tr("finances.expense_label")
             row_tag = 'income' if is_income else 'expense'
 
             self.expenses_tree.insert("", tk.END, values=(
@@ -3863,7 +4189,7 @@ class AutoServiceApp:
         """Удалить расход или доход"""
         selected = self.expenses_tree.selection()
         if not selected:
-            messagebox.showwarning("Внимание", "Выберите запись для удаления!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("finances.msg_select_to_delete"))
             return
 
         item = self.expenses_tree.item(selected[0])
@@ -3871,9 +4197,9 @@ class AutoServiceApp:
         type_text = item['values'][1]
         description = item['values'][3]
 
-        if messagebox.askyesno("Подтверждение", f"Удалить {type_text.lower()} '{description}'?"):
+        if messagebox.askyesno(self.tr("common.confirm"), self.tr("finances.msg_confirm_delete", type=type_text.lower(), name=description)):
             self.db.delete_expense(expense_id)
-            messagebox.showinfo("Успех", f"{type_text} удалён!")
+            messagebox.showinfo(self.tr("common.success"), self.tr("finances.msg_deleted", type=type_text))
             self.refresh_expenses()
 
     # ===== QR-КОД С ТЕКСТОМ =====
@@ -4581,29 +4907,31 @@ class AutoServiceApp:
         filter_frame.pack(fill=tk.X, padx=10, pady=10)
 
         # Фильтр по статусу
-        ctk.CTkLabel(filter_frame, text="Статус:").pack(side=tk.LEFT, padx=5)
-        self.bookings_status_var = tk.StringVar(value="Все")
+        ctk.CTkLabel(filter_frame, text=self.tr("bookings.status_label")).pack(side=tk.LEFT, padx=5)
+        self.bookings_status_var = tk.StringVar(value=self.tr("bookings.filter_all"))
         status_combo = ctk.CTkComboBox(filter_frame, variable=self.bookings_status_var,
-                                        values=["Все", "В ожидании", "В работе", "Выполненные", "Отменённые"],
+                                        values=[self.tr("bookings.filter_all"), self.tr("bookings.filter_waiting"),
+                                                self.tr("bookings.filter_in_progress"), self.tr("bookings.filter_completed"),
+                                                self.tr("bookings.filter_cancelled")],
                                         width=140)
         status_combo.pack(side=tk.LEFT, padx=5)
 
         # Кнопки
-        ctk.CTkButton(filter_frame, text="Обновить", command=self.refresh_bookings,
+        ctk.CTkButton(filter_frame, text=self.tr("works.refresh"), command=self.refresh_bookings,
                      width=100).pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(filter_frame, text="Только сегодня", command=self.show_today_bookings,
+        ctk.CTkButton(filter_frame, text=self.tr("bookings.today_only"), command=self.show_today_bookings,
                      width=120).pack(side=tk.LEFT, padx=5)
 
         # Поле поиска
         ctk.CTkLabel(filter_frame, text="  🔍").pack(side=tk.LEFT, padx=(20, 0))
         self.bookings_search_entry = ctk.CTkEntry(filter_frame,
-                                                   placeholder_text="госномер или телефон",
+                                                   placeholder_text=self.tr("bookings.search_placeholder"),
                                                    placeholder_text_color="gray", width=180)
         self.bookings_search_entry.pack(side=tk.LEFT, padx=5)
         self.bookings_search_entry.bind("<Return>", lambda e: self.refresh_bookings())
         ctk.CTkButton(filter_frame, text="✕", command=self.clear_bookings_search,
                      width=30, fg_color="#c62828", hover_color="#b71c1c").pack(side=tk.LEFT, padx=2)
-        ctk.CTkButton(filter_frame, text="Записать клиента", command=self.show_add_booking_window,
+        ctk.CTkButton(filter_frame, text=self.tr("bookings.add_client"), command=self.show_add_booking_window,
                      fg_color="#1565c0", hover_color="#0d47a1", width=140).pack(side=tk.LEFT, padx=(15, 5))
 
         # Таблица записей
@@ -4615,14 +4943,14 @@ class AutoServiceApp:
 
         # Настройка колонок
         self.bookings_tree.heading("id", text="ID")
-        self.bookings_tree.heading("order_number", text="№ заказа")
-        self.bookings_tree.heading("date", text="Дата")
-        self.bookings_tree.heading("time", text="Время")
-        self.bookings_tree.heading("name", text="Имя")
-        self.bookings_tree.heading("phone", text="Телефон")
+        self.bookings_tree.heading("order_number", text=self.tr("bookings.col_order_number"))
+        self.bookings_tree.heading("date", text=self.tr("bookings.col_date"))
+        self.bookings_tree.heading("time", text=self.tr("bookings.col_time"))
+        self.bookings_tree.heading("name", text=self.tr("bookings.col_name"))
+        self.bookings_tree.heading("phone", text=self.tr("bookings.col_phone"))
         self.bookings_tree.heading("username", text="Telegram")
-        self.bookings_tree.heading("car", text="Автомобиль")
-        self.bookings_tree.heading("status", text="Статус")
+        self.bookings_tree.heading("car", text=self.tr("bookings.col_car"))
+        self.bookings_tree.heading("status", text=self.tr("bookings.col_status"))
 
         self.bookings_tree.column("id", width=0, stretch=False, minwidth=0)
         self.bookings_tree.column("order_number", width=80)
@@ -4653,39 +4981,39 @@ class AutoServiceApp:
             font=("Segoe UI", 11)
         )
         self.bookings_context_menu.add_command(
-            label="  🔧  Начать работу", command=self.start_work_from_booking,
+            label="  🔧  " + self.tr("bookings.ctx_start_work"), command=self.start_work_from_booking,
             foreground="#81c784", activeforeground="#a5d6a7",
             background="#1e1e1e", activebackground="#2e7d32"
         )
         self.bookings_context_menu.add_command(
-            label="  ✏  Редактировать", command=self.edit_booking_in_add_work,
+            label="  ✏  " + self.tr("bookings.ctx_edit"), command=self.edit_booking_in_add_work,
             foreground="#64b5f6", activeforeground="#90caf9",
             background="#1e1e1e", activebackground="#1976d2"
         )
         self.bookings_context_menu.add_separator()
         self.bookings_context_menu.add_command(
-            label="  📋  Информация", command=self.show_booking_info,
+            label="  📋  " + self.tr("bookings.ctx_info"), command=self.show_booking_info,
             foreground="#ce93d8", activeforeground="#e1bee7",
             background="#1e1e1e", activebackground="#6a1b9a"
         )
         self.bookings_context_menu.add_command(
-            label="  👤  О клиенте", command=self.show_client_info,
+            label="  👤  " + self.tr("bookings.ctx_client_info"), command=self.show_client_info,
             foreground="#80deea", activeforeground="#b2ebf2",
             background="#1e1e1e", activebackground="#00838f"
         )
         self.bookings_context_menu.add_separator()
         self.bookings_context_menu.add_command(
-            label="  ✅  Выполнено", command=self.mark_booking_completed,
+            label="  ✅  " + self.tr("bookings.ctx_completed"), command=self.mark_booking_completed,
             foreground="#81c784", activeforeground="#a5d6a7",
             background="#1e1e1e", activebackground="#2e7d32"
         )
         self.bookings_context_menu.add_command(
-            label="  ❌  Отменено", command=self.mark_booking_cancelled,
+            label="  ❌  " + self.tr("bookings.ctx_cancelled"), command=self.mark_booking_cancelled,
             foreground="#ffb74d", activeforeground="#ffe0b2",
             background="#1e1e1e", activebackground="#e65100"
         )
         self.bookings_context_menu.add_command(
-            label="  🗑  Удалить", command=self.delete_selected_booking,
+            label="  🗑  " + self.tr("bookings.ctx_delete"), command=self.delete_selected_booking,
             foreground="#ef9a9a", activeforeground="#ffcdd2",
             background="#1e1e1e", activebackground="#c62828"
         )
@@ -4707,7 +5035,13 @@ class AutoServiceApp:
         # Получение фильтра по статусу
         status_filter = self.bookings_status_var.get() if hasattr(self, 'bookings_status_var') else None
         # Преобразование русского названия в код статуса
-        status_map = {"Все": None, "В ожидании": "waiting", "В работе": "in_progress", "Выполненные": "completed", "Отменённые": "cancelled"}
+        status_map = {
+            self.tr("bookings.filter_all"): None,
+            self.tr("bookings.filter_waiting"): "waiting",
+            self.tr("bookings.filter_in_progress"): "in_progress",
+            self.tr("bookings.filter_completed"): "completed",
+            self.tr("bookings.filter_cancelled"): "cancelled",
+        }
         status = status_map.get(status_filter, None)
 
         # Получение поискового запроса
@@ -4745,7 +5079,12 @@ class AutoServiceApp:
                 date_str = str(booking_date)
 
             # Статус на русском
-            status_ru = {"waiting": "В ожидании", "in_progress": "В работе", "completed": "Выполнена", "cancelled": "Отменена"}.get(status, status)
+            status_ru = {
+                "waiting": self.tr("bookings.filter_waiting"),
+                "in_progress": self.tr("bookings.filter_in_progress"),
+                "completed": self.tr("bookings.status_completed"),
+                "cancelled": self.tr("bookings.status_cancelled"),
+            }.get(status, status)
 
             # Вставка с тегом для цвета
             self.bookings_tree.insert("", tk.END, values=(
@@ -4770,7 +5109,12 @@ class AutoServiceApp:
             else:
                 date_str = str(booking_date)
 
-            status_ru = {"waiting": "В ожидании", "in_progress": "В работе", "completed": "Выполнена", "cancelled": "Отменена"}.get(status, status)
+            status_ru = {
+                "waiting": self.tr("bookings.filter_waiting"),
+                "in_progress": self.tr("bookings.filter_in_progress"),
+                "completed": self.tr("bookings.status_completed"),
+                "cancelled": self.tr("bookings.status_cancelled"),
+            }.get(status, status)
 
             # Вставка с тегом для цвета
             self.bookings_tree.insert("", tk.END, values=(
@@ -4783,7 +5127,7 @@ class AutoServiceApp:
         """Получить ID выбранной записи"""
         selection = self.bookings_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите запись из списка")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_from_list"))
             return None
         values = self.bookings_tree.item(selection[0], "values")
         return int(values[0])
@@ -4868,11 +5212,11 @@ class AutoServiceApp:
                 message += "\n✨ Спасибо, что выбрали наш автосервис!\n━━━━━━━━━━━━━━━━━━━━\nг.Щёлково, ул.Беляева, д.6Б\n+7-960-546-62-81 AlexAuto"
 
                 if send_telegram_notification(booking["user_id"], message, with_menu=True):
-                    messagebox.showinfo("Успех", "Запись отмечена как выполненная.\nКлиент уведомлён в Telegram.")
+                    messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_completed_notified"))
                 else:
-                    messagebox.showinfo("Успех", "Запись отмечена как выполненная.\n(Не удалось отправить уведомление в Telegram)")
+                    messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_completed_notify_failed"))
             else:
-                messagebox.showinfo("Успех", "Запись отмечена как выполненная")
+                messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_completed"))
 
     def mark_booking_cancelled(self):
         """Отметить запись как отменённую"""
@@ -4880,16 +5224,16 @@ class AutoServiceApp:
         if booking_id:
             self.db.update_booking_status(booking_id, "cancelled")
             self.refresh_bookings()
-            messagebox.showinfo("Успех", "Запись отмечена как отменённая")
+            messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_cancelled"))
 
     def delete_selected_booking(self):
         """Удалить выбранную запись"""
         booking_id = self.get_selected_booking_id()
         if booking_id:
-            if messagebox.askyesno("Подтверждение", "Удалить выбранную запись?"):
+            if messagebox.askyesno(self.tr("common.confirm"), self.tr("bookings.msg_confirm_delete")):
                 self.db.delete_booking(booking_id)
                 self.refresh_bookings()
-                messagebox.showinfo("Успех", "Запись удалена")
+                messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_deleted"))
 
     def show_add_booking_window(self):
         """Показать окно для записи клиента"""
@@ -4907,7 +5251,7 @@ class AutoServiceApp:
         overlay.update()
 
         add_window = ctk.CTkToplevel(self.root)
-        add_window.title("Записать клиента")
+        add_window.title(self.tr("bookings.add_client"))
         add_window.transient(self.root)
         add_window.attributes("-topmost", True)
 
@@ -4938,7 +5282,7 @@ class AutoServiceApp:
         found_car_id = [None]
 
         # === ГОСНОМЕР (первым) ===
-        ctk.CTkLabel(main_frame, text="Госномер:", font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
+        ctk.CTkLabel(main_frame, text=self.tr("works.car_number"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
         car_number_entry = ctk.CTkEntry(main_frame, width=200, font=("Arial", 14), placeholder_text="А123БВ777")
         car_number_entry.pack(anchor="w", pady=(0, 5))
         car_status_label = ctk.CTkLabel(main_frame, text="", font=("Arial", 13))
@@ -4955,7 +5299,7 @@ class AutoServiceApp:
         # Марка с автокомплитом
         brand_row = ctk.CTkFrame(car_details_frame, fg_color="transparent")
         brand_row.pack(fill=tk.X, pady=5, padx=10)
-        ctk.CTkLabel(brand_row, text="Марка:", width=80, anchor="w", font=("Arial", 14)).pack(side=tk.LEFT)
+        ctk.CTkLabel(brand_row, text=self.tr("bookings.add_window_brand"), width=80, anchor="w", font=("Arial", 14)).pack(side=tk.LEFT)
         brand_entry = ctk.CTkEntry(brand_row, width=200, font=("Arial", 14))
         brand_entry.pack(side=tk.LEFT)
         brand_listbox = tk.Listbox(brand_row, height=5, width=25, font=("Arial", 12))
@@ -4998,7 +5342,7 @@ class AutoServiceApp:
         # Модель с автокомплитом
         model_row = ctk.CTkFrame(car_details_frame, fg_color="transparent")
         model_row.pack(fill=tk.X, pady=5, padx=10)
-        ctk.CTkLabel(model_row, text="Модель:", width=80, anchor="w", font=("Arial", 14)).pack(side=tk.LEFT)
+        ctk.CTkLabel(model_row, text=self.tr("bookings.add_window_model"), width=80, anchor="w", font=("Arial", 14)).pack(side=tk.LEFT)
         model_entry = ctk.CTkEntry(model_row, width=200, font=("Arial", 14))
         model_entry.pack(side=tk.LEFT)
         model_listbox = tk.Listbox(model_row, height=5, width=25, font=("Arial", 12))
@@ -5041,7 +5385,7 @@ class AutoServiceApp:
         model_listbox.bind('<<ListboxSelect>>', on_model_select)
 
         # === ТЕЛЕФОН ===
-        ctk.CTkLabel(main_frame, text="Телефон:", font=("Arial", 15)).pack(anchor="w", pady=(10, 5))
+        ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_phone"), font=("Arial", 15)).pack(anchor="w", pady=(10, 5))
 
         def validate_phone(new_value):
             if len(new_value) < 2:
@@ -5063,7 +5407,7 @@ class AutoServiceApp:
         phone_entry.insert(0, "+7")
 
         # === ИМЯ КЛИЕНТА ===
-        ctk.CTkLabel(main_frame, text="Имя клиента:", font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
+        ctk.CTkLabel(main_frame, text=self.tr("works.client_name"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
         name_entry = ctk.CTkEntry(main_frame, width=220, font=("Arial", 14))
         name_entry.pack(anchor="w", pady=(0, 10))
 
@@ -5081,7 +5425,7 @@ class AutoServiceApp:
                     car_model = car_info.get('car_model', '')
 
                     # Показываем информацию
-                    info_text = f"✓ Найдено: {car_brand} {car_model}"
+                    info_text = self.tr("bookings.add_window_car_found", brand=car_brand, model=car_model)
                     if owner_name:
                         info_text += f" ({owner_name})"
                     car_status_label.configure(text=info_text, text_color="#2e7d32")
@@ -5114,7 +5458,7 @@ class AutoServiceApp:
                     # Авто не найдено - показываем поля марки/модели, сбрасываем данные
                     car_found_by_number[0] = False
                     found_car_id[0] = None
-                    car_status_label.configure(text="Новое авто - введите марку и модель:", text_color="#f57c00")
+                    car_status_label.configure(text=self.tr("bookings.add_window_new_car"), text_color="#f57c00")
                     if not car_details_visible[0]:
                         car_details_frame.pack(fill=tk.X, pady=(0, 10), after=car_status_label)
                         car_details_visible[0] = True
@@ -5138,7 +5482,7 @@ class AutoServiceApp:
         car_number_entry.bind("<FocusOut>", check_car_number)
 
         # Дата
-        ctk.CTkLabel(main_frame, text="Дата:", font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
+        ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_date"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
         date_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         date_frame.pack(anchor="w", pady=(0, 5))
 
@@ -5157,7 +5501,7 @@ class AutoServiceApp:
         date_entry.pack(side=tk.LEFT)
 
         # Время
-        ctk.CTkLabel(main_frame, text="Время:", font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
+        ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_time"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
         time_combo = ctk.CTkComboBox(main_frame, values=TIME_SLOTS, width=150, font=("Arial", 14))
         time_combo.pack(anchor="w", pady=(0, 5))
 
@@ -5195,27 +5539,27 @@ class AutoServiceApp:
             existing_car_id = found_car_id[0]  # ID найденного авто или None
 
             if not name:
-                messagebox.showwarning("Внимание", "Введите имя клиента!", parent=add_window)
+                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_enter_client_name"), parent=add_window)
                 return
 
             # Валидация госномера - обязательно
             if not number:
-                messagebox.showwarning("Внимание", "Введите госномер автомобиля!", parent=add_window)
+                messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"), parent=add_window)
                 return
 
             # Если авто не найдено - нужны марка и модель
             if not car_found_by_number[0]:
                 if not brand:
-                    messagebox.showwarning("Внимание", "Введите марку автомобиля!", parent=add_window)
+                    messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_brand"), parent=add_window)
                     return
                 if not model:
-                    messagebox.showwarning("Внимание", "Введите модель автомобиля!", parent=add_window)
+                    messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_model"), parent=add_window)
                     return
 
             # Валидация телефона - должен быть +7 и 10 цифр после
             phone_digits = ''.join(c for c in phone_raw if c.isdigit())
             if len(phone_digits) != 11 or not phone_digits.startswith('7'):
-                messagebox.showwarning("Внимание", "Введите номер телефона после +7\nПример: +79091234567", parent=add_window)
+                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_enter_phone_after_plus7"), parent=add_window)
                 return
 
             # Телефон уже в нужном формате
@@ -5226,7 +5570,7 @@ class AutoServiceApp:
                 from datetime import datetime
                 booking_date = datetime.strptime(date_str, "%d.%m.%Y").date()
             except:
-                messagebox.showerror("Ошибка", "Неверный формат даты!", parent=add_window)
+                messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_invalid_date"), parent=add_window)
                 return
 
             # Проверяем доступность
@@ -5236,7 +5580,7 @@ class AutoServiceApp:
                 num_cars = len(existing_bookings)
 
                 # Формируем сообщение
-                message = f"На это время записано машин: {num_cars}\n\nГосномера:\n"
+                message = self.tr("bookings.msg_slot_busy_header", num_cars=num_cars)
                 for booking in existing_bookings:
                     car_info = f"{booking['brand']} {booking['model']}" if booking['brand'] else ""
                     message += f"• {booking['car_number']}"
@@ -5244,10 +5588,10 @@ class AutoServiceApp:
                         message += f" ({car_info})"
                     message += f" - {booking['client_name']}\n"
 
-                message += "\nЗаписать клиента на это время?"
+                message += self.tr("bookings.msg_slot_busy_footer")
 
                 # Спрашиваем пользователя
-                result = messagebox.askyesno("Время занято", message, parent=add_window)
+                result = messagebox.askyesno(self.tr("bookings.dialog_slot_busy_title"), message, parent=add_window)
                 if not result:
                     return
 
@@ -5282,19 +5626,19 @@ class AutoServiceApp:
                 car_id=car_id
             )
             if booking_id:
-                messagebox.showinfo("Успех", f"Клиент записан на {date_str} в {time_str}", parent=add_window)
+                messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_client_booked", date=date_str, time=time_str), parent=add_window)
                 on_close()
                 self.refresh_bookings()
             else:
-                messagebox.showerror("Ошибка", "Не удалось создать запись", parent=add_window)
+                messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_booking_failed"), parent=add_window)
 
         # Кнопки (в отдельном фрейме внизу окна, чтобы всегда были под всеми полями)
         btn_frame = ctk.CTkFrame(add_window, fg_color="transparent")
         btn_frame.pack(side=tk.BOTTOM, pady=15)
 
-        ctk.CTkButton(btn_frame, text="Записать", command=save_booking,
+        ctk.CTkButton(btn_frame, text=self.tr("bookings.btn_book"), command=save_booking,
                      fg_color="#2e7d32", hover_color="#1b5e20", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(btn_frame, text="Отмена", command=on_close,
+        ctk.CTkButton(btn_frame, text=self.tr("common.cancel"), command=on_close,
                      fg_color="#757575", hover_color="#616161", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
 
     def show_bookings_context_menu(self, event):
@@ -5318,7 +5662,7 @@ class AutoServiceApp:
         """Начать работу по выбранной записи - переход на вкладку добавления работы"""
         selection = self.bookings_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите запись!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
             return
 
         values = self.bookings_tree.item(selection[0], "values")
@@ -5332,12 +5676,12 @@ class AutoServiceApp:
         # Получаем данные записи
         booking = self.db.get_booking_by_id(int(booking_id))
         if not booking:
-            messagebox.showerror("Ошибка", "Запись не найдена!")
+            messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_booking_not_found"))
             return
 
         # Проверяем статус
         if booking.get("status") != "waiting":
-            messagebox.showwarning("Внимание", "Начать работу можно только для записей в статусе 'В ожидании'!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_start_work_only_waiting"))
             return
 
         # Переключаемся на вкладку "Добавить работу"
@@ -5353,8 +5697,8 @@ class AutoServiceApp:
         else:
             date_str = str(booking_date)
 
-        full_name = booking.get("full_name") or "Без имени"
-        phone = booking.get("phone") or "Без телефона"
+        full_name = booking.get("full_name") or self.tr("common.no_name")
+        phone = booking.get("phone") or self.tr("common.no_phone")
         search_text = f"{date_str} {booking.get('booking_time')} - {full_name} ({phone})"
 
         # Ищем и выбираем запись в комбобоксе
@@ -5368,7 +5712,7 @@ class AutoServiceApp:
         """Редактировать запись - переход на вкладку добавления работы (без проверки статуса)"""
         selection = self.bookings_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите запись!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
             return
 
         values = self.bookings_tree.item(selection[0], "values")
@@ -5382,7 +5726,7 @@ class AutoServiceApp:
         # Получаем данные записи
         booking = self.db.get_booking_by_id(int(booking_id))
         if not booking:
-            messagebox.showerror("Ошибка", "Запись не найдена!")
+            messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_booking_not_found"))
             return
 
         # Переключаемся на вкладку "Добавить работу"
@@ -5501,7 +5845,7 @@ class AutoServiceApp:
         """Показать окно с информацией о записи и работе"""
         selection = self.bookings_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите запись!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
             return
 
         values = self.bookings_tree.item(selection[0], "values")
@@ -5515,7 +5859,7 @@ class AutoServiceApp:
         # Получаем данные записи
         booking = self.db.get_booking_by_id(int(booking_id))
         if not booking:
-            messagebox.showerror("Ошибка", "Запись не найдена!")
+            messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_booking_not_found"))
             return
 
         # Ищем ВСЕ связанные работы
@@ -5523,7 +5867,7 @@ class AutoServiceApp:
 
         # Создаём окно информации
         info_window = ctk.CTkToplevel(self.root)
-        info_window.title("Информация о записи")
+        info_window.title(self.tr("bookings.info_window_title"))
         info_window.geometry("600x700")
         info_window.transient(self.root)
         info_window.grab_set()
@@ -5536,10 +5880,10 @@ class AutoServiceApp:
             "cancelled": ("#ef4444", "#7f1d1d")     # Красный
         }
         status_map = {
-            "waiting": "⏳ В ожидании",
-            "in_progress": "🔧 В работе",
-            "completed": "✅ Выполнена",
-            "cancelled": "❌ Отменена"
+            "waiting": "⏳ " + self.tr("bookings.filter_waiting"),
+            "in_progress": "🔧 " + self.tr("bookings.filter_in_progress"),
+            "completed": "✅ " + self.tr("bookings.status_completed"),
+            "cancelled": "❌ " + self.tr("bookings.status_cancelled"),
         }
 
         booking_status = booking.get("status", "waiting")
@@ -5562,7 +5906,7 @@ class AutoServiceApp:
 
         ctk.CTkLabel(
             header_frame,
-            text="📋  Информация о записи",
+            text="📋  " + self.tr("bookings.info_window_title"),
             font=("Arial", 18, "bold")
         ).pack(side="left")
 
@@ -5598,12 +5942,12 @@ class AutoServiceApp:
 
         # Двухколоночная раскладка
         info_data = [
-            ("📅 Дата:", date_str),
-            ("🕐 Время:", booking.get('booking_time', '-')),
-            ("👤 Клиент:", booking.get('full_name') or 'Не указано'),
-            ("📞 Телефон:", booking.get('phone') or 'Не указан'),
+            ("📅 " + self.tr("bookings.add_window_date"), date_str),
+            ("🕐 " + self.tr("bookings.add_window_time"), booking.get('booking_time', '-')),
+            ("👤 " + self.tr("bookings.info_label_client") + ":", booking.get('full_name') or self.tr("bookings.name_not_specified")),
+            ("📞 " + self.tr("bookings.col_phone") + ":", booking.get('phone') or self.tr("bookings.phone_not_specified")),
             ("💬 Telegram:", f"@{tg_username}" if tg_username != '-' else '-'),
-            ("🚗 Автомобиль:", car_info),
+            ("🚗 " + self.tr("bookings.col_car") + ":", car_info),
         ]
 
         for i, (label, value) in enumerate(info_data):
@@ -5633,13 +5977,13 @@ class AutoServiceApp:
         # Заголовок в зависимости от статуса
         if booking_status == "completed":
             works_icon = "✅"
-            works_title = "Выполненные работы"
+            works_title = self.tr("bookings.works_completed_title")
         elif booking_status == "in_progress":
             works_icon = "🔧"
-            works_title = "Работы в процессе"
+            works_title = self.tr("bookings.works_in_progress_title")
         else:
             works_icon = "📝"
-            works_title = "Работы"
+            works_title = self.tr("bookings.works_default_title")
 
         works_card = ctk.CTkFrame(main_frame, corner_radius=12)
         works_card.pack(fill="x", pady=(0, 15))
@@ -5648,7 +5992,7 @@ class AutoServiceApp:
         works_header = ctk.CTkFrame(works_card, fg_color="transparent")
         works_header.pack(fill="x", padx=15, pady=(15, 10))
 
-        works_count = f" ({len(works)} шт.)" if works else ""
+        works_count = self.tr("bookings.works_count", count=len(works)) if works else ""
         ctk.CTkLabel(
             works_header,
             text=f"{works_icon}  {works_title}{works_count}",
@@ -5665,7 +6009,7 @@ class AutoServiceApp:
         if not works:
             ctk.CTkLabel(
                 works_content,
-                text="Работы ещё не добавлены",
+                text=self.tr("bookings.no_works_yet"),
                 text_color=("gray40", "gray60"),
                 font=("Arial", 14)
             ).pack(anchor="w")
@@ -5688,14 +6032,14 @@ class AutoServiceApp:
 
                 ctk.CTkLabel(
                     work_header_row,
-                    text=f"🔹 Работа #{i}",
+                    text=self.tr("bookings.work_number", index=i),
                     font=("Arial", 15, "bold")
                 ).pack(side="left")
 
                 if order_number:
                     ctk.CTkLabel(
                         work_header_row,
-                        text=f"Наряд №{order_number}",
+                        text=self.tr("bookings.order_number_label", order_number=order_number),
                         font=("Arial", 13),
                         text_color=("gray40", "gray60")
                     ).pack(side="right")
@@ -5716,7 +6060,7 @@ class AutoServiceApp:
                     f"🚗 {car_brand or '-'} {car_model or ''} ({car_number or '-'})",
                 ]
                 if mileage:
-                    info_items.append(f"📊 {mileage} км")
+                    info_items.append(self.tr("bookings.mileage_suffix", mileage=mileage))
 
                 ctk.CTkLabel(
                     work_info_row,
@@ -5739,7 +6083,7 @@ class AutoServiceApp:
 
                     ctk.CTkLabel(
                         desc_frame,
-                        text=f"Услуги ({self.format_currency(work_amount)}):",
+                        text=self.tr("bookings.services_label", amount=self.format_currency(work_amount)),
                         font=("Arial", 14, "bold")
                     ).pack(anchor="w")
 
@@ -5759,7 +6103,7 @@ class AutoServiceApp:
 
                     ctk.CTkLabel(
                         parts_frame,
-                        text=f"Запчасти ({self.format_currency(parts_total)}):",
+                        text=self.tr("bookings.parts_label", amount=self.format_currency(parts_total)),
                         font=("Arial", 14, "bold")
                     ).pack(anchor="w")
 
@@ -5777,7 +6121,7 @@ class AutoServiceApp:
 
                 ctk.CTkLabel(
                     work_total_row,
-                    text=f"Итого: {self.format_currency(work_total)}",
+                    text=self.tr("bookings.work_total_label", amount=self.format_currency(work_total)),
                     font=("Arial", 14, "bold"),
                     text_color="#3b82f6"
                 ).pack(side="right")
@@ -5793,7 +6137,7 @@ class AutoServiceApp:
 
             ctk.CTkLabel(
                 total_inner,
-                text="💰  ОБЩИЙ ИТОГ",
+                text="💰  " + self.tr("bookings.grand_total_label"),
                 font=("Arial", 16, "bold"),
                 text_color=("#065f46", "#a7f3d0")
             ).pack(side="left")
@@ -5814,7 +6158,7 @@ class AutoServiceApp:
         if works:
             ctk.CTkButton(
                 buttons_frame,
-                text="📄  Сохранить в PDF",
+                text="📄  " + self.tr("bookings.save_pdf_btn"),
                 command=lambda: self.save_booking_to_pdf(booking, works),
                 width=160,
                 height=40,
@@ -5823,7 +6167,7 @@ class AutoServiceApp:
 
         ctk.CTkButton(
             buttons_frame,
-            text="Закрыть",
+            text=self.tr("common.close"),
             command=info_window.destroy,
             width=120,
             height=40,
@@ -5836,7 +6180,7 @@ class AutoServiceApp:
         """Показать окно с информацией о клиенте: машины и история"""
         selection = self.bookings_tree.selection()
         if not selection:
-            messagebox.showwarning("Внимание", "Выберите запись!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
             return
 
         values = self.bookings_tree.item(selection[0], "values")
@@ -5857,7 +6201,7 @@ class AutoServiceApp:
                 telegram_user_id = booking.get("user_id")
 
         if not telegram_user_id and not client_phone and not client_name:
-            messagebox.showwarning("Внимание", "Нет данных о клиенте!")
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_client_data"))
             return
 
         # Получаем машины и историю клиента (приоритет по telegram_user_id)
@@ -5879,7 +6223,7 @@ class AutoServiceApp:
 
         # Создаём окно
         client_window = ctk.CTkToplevel(self.root)
-        client_window.title(f"Клиент: {client_name or client_phone}")
+        client_window.title(self.tr("bookings.client_window_title", name=client_name or client_phone))
         client_window.geometry("700x700")
         client_window.transient(self.root)
         client_window.grab_set()
@@ -5900,7 +6244,7 @@ class AutoServiceApp:
 
         ctk.CTkLabel(
             header_frame,
-            text="👤  Информация о клиенте",
+            text="👤  " + self.tr("bookings.client_info_header"),
             font=("Arial", 18, "bold")
         ).pack(side="left")
 
@@ -5912,9 +6256,9 @@ class AutoServiceApp:
         content_frame.pack(fill="x", padx=15, pady=15)
 
         client_data = [
-            ("👤 Имя:", client_name or "Не указано"),
-            ("📞 Телефон:", client_phone or "Не указан"),
-            ("💬 Telegram:", client_telegram if client_telegram and client_telegram != '-' else "Не указан"),
+            ("👤 " + self.tr("bookings.client_name_label") + ":", client_name or self.tr("bookings.name_not_specified")),
+            ("📞 " + self.tr("bookings.col_phone") + ":", client_phone or self.tr("bookings.phone_not_specified")),
+            ("💬 Telegram:", client_telegram if client_telegram and client_telegram != '-' else self.tr("bookings.phone_not_specified")),
         ]
 
         for label, value in client_data:
@@ -5949,7 +6293,7 @@ class AutoServiceApp:
 
         ctk.CTkLabel(
             cars_header,
-            text=f"🚗  Автомобили ({len(cars)})",
+            text=self.tr("bookings.cars_header", count=len(cars)),
             font=("Arial", 18, "bold")
         ).pack(side="left")
 
@@ -5963,7 +6307,7 @@ class AutoServiceApp:
         if not cars:
             ctk.CTkLabel(
                 cars_content,
-                text="Нет данных об автомобилях",
+                text=self.tr("bookings.no_cars_data"),
                 text_color=("gray40", "gray60"),
                 font=("Arial", 14)
             ).pack(anchor="w")
@@ -5978,7 +6322,7 @@ class AutoServiceApp:
                 car_text = f"{car_brand or ''} {car_model or ''}".strip()
                 ctk.CTkLabel(
                     car_inner,
-                    text=f"🚗  {car_text}" if car_text else "🚗  Не указано",
+                    text=f"🚗  {car_text}" if car_text else "🚗  " + self.tr("bookings.name_not_specified"),
                     font=("Arial", 14, "bold"),
                     anchor="w"
                 ).pack(side="left")
@@ -6004,7 +6348,7 @@ class AutoServiceApp:
 
         ctk.CTkLabel(
             history_header,
-            text=f"📜  История работ ({len(history)})",
+            text=self.tr("bookings.history_header", count=len(history)),
             font=("Arial", 18, "bold")
         ).pack(side="left")
 
@@ -6018,7 +6362,7 @@ class AutoServiceApp:
         if not history:
             ctk.CTkLabel(
                 history_content,
-                text="История пуста",
+                text=self.tr("bookings.history_empty"),
                 text_color=("gray40", "gray60"),
                 font=("Arial", 14)
             ).pack(anchor="w")
@@ -6061,7 +6405,7 @@ class AutoServiceApp:
                 if order_number:
                     ctk.CTkLabel(
                         work_header_row,
-                        text=f"Наряд №{order_number}",
+                        text=self.tr("bookings.order_number_label", order_number=order_number),
                         font=("Arial", 13),
                         text_color=("gray40", "gray60")
                     ).pack(side="right")
@@ -6077,7 +6421,7 @@ class AutoServiceApp:
                 if car_info:
                     info_items.append(f"🚗 {car_info}")
                 if mileage:
-                    info_items.append(f"📊 {mileage} км")
+                    info_items.append(self.tr("bookings.mileage_suffix", mileage=mileage))
 
                 if info_items:
                     ctk.CTkLabel(
@@ -6095,7 +6439,7 @@ class AutoServiceApp:
 
                     ctk.CTkLabel(
                         desc_frame,
-                        text=f"Услуги ({self.format_currency(work_amount)}):",
+                        text=self.tr("bookings.services_label", amount=self.format_currency(work_amount)),
                         font=("Arial", 14, "bold")
                     ).pack(anchor="w")
 
@@ -6116,7 +6460,7 @@ class AutoServiceApp:
 
                     ctk.CTkLabel(
                         parts_frame,
-                        text=f"Запчасти ({self.format_currency(parts_total)}):",
+                        text=self.tr("bookings.parts_label", amount=self.format_currency(parts_total)),
                         font=("Arial", 14, "bold")
                     ).pack(anchor="w")
 
@@ -6134,7 +6478,7 @@ class AutoServiceApp:
 
                 ctk.CTkLabel(
                     work_total_row,
-                    text=f"Итого: {self.format_currency(work_total)}",
+                    text=self.tr("bookings.work_total_label", amount=self.format_currency(work_total)),
                     font=("Arial", 14, "bold"),
                     text_color="#3b82f6"
                 ).pack(side="right")
@@ -6150,7 +6494,7 @@ class AutoServiceApp:
 
             ctk.CTkLabel(
                 total_inner,
-                text="💳  ВСЕГО ОПЛАЧЕНО",
+                text="💳  " + self.tr("bookings.total_paid_label"),
                 font=("Arial", 16, "bold"),
                 text_color=("#1e40af", "#93c5fd")
             ).pack(side="left")
@@ -6170,7 +6514,7 @@ class AutoServiceApp:
 
         ctk.CTkButton(
             buttons_frame,
-            text="Закрыть",
+            text=self.tr("common.close"),
             command=client_window.destroy,
             width=120,
             height=40,

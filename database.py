@@ -13,6 +13,20 @@ from db_config import DB_CONFIG
 from db_schema import TABLES, INDEXES, MIGRATIONS
 
 
+def normalize_phone(phone):
+    """Привести номер телефона к единому формату +7XXXXXXXXXX"""
+    if not phone:
+        return None
+    digits = re.sub(r'\D', '', phone)
+    if len(digits) == 11 and digits.startswith('8'):
+        digits = '7' + digits[1:]
+    if len(digits) == 11 and digits.startswith('7'):
+        return '+' + digits
+    if len(digits) == 10:
+        return '+7' + digits
+    return '+' + digits if digits else None
+
+
 class Database:
     """Класс для работы с базой данных MariaDB"""
 
@@ -1040,6 +1054,7 @@ class Database:
 
     def get_or_create_client(self, telegram_user_id=None, full_name=None, phone=None, tg_username=None, car_number=None):
         """Найти или создать клиента. Возвращает client_id"""
+        phone = normalize_phone(phone)
         conn = self.get_connection()
         cursor = conn.cursor()
 
