@@ -8,5 +8,6 @@
     "slot_duration_minutes": 120,
     "max_bookings_per_user": 2,
     "master_percent": 40.0,
-    "language": "ru"
+    "language": "ru",
+    "last_username": "admin"
 }

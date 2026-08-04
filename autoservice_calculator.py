@@ -17,6 +17,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import os
+import subprocess
 import tempfile
 import re
 import requests
@@ -28,6 +29,7 @@ from dotenv import load_dotenv
 # Импорт класса для работы с базой данных
 from database import Database
 from i18n import I18n, SUPPORTED_LANGUAGES
+from sms_notifications import send_sms_notification
 
 
 def get_base_path():
@@ -3996,18 +3998,24 @@ class AutoServiceApp:
     def restart_application(self):
         """Перезапустить приложение текущим интерпретатором/exe"""
         self.root.destroy()
-        python = sys.executable
         if getattr(sys, 'frozen', False):
-            os.execv(python, [python] + sys.argv[1:])
+            # os.execv на Windows для onefile-сборки PyInstaller приводит к гонке
+            # с очисткой временной папки _MEI бывшего процесса и падению с
+            # "Can't find a usable init.tcl". Поэтому запускаем новый процесс
+            # отдельно и завершаем текущий, не дожидаясь его.
+            subprocess.Popen([sys.executable] + sys.argv[1:])
+            os._exit(0)
         else:
-            os.execv(python, [python] + sys.argv)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     # ===== ВКЛАДКА РАСХОДОВ =====
 
     def setup_expenses_tab(self):
         """Настройка вкладки расходов"""
-        # Главный контейнер
-        main_frame = ctk.CTkFrame(self.expenses_frame)
+        # Используем прокручиваемый фрейм для поддержки маленьких экранов
+        # (без этого на ноутбуках с низким разрешением кнопка "Удалить
+        # выбранную запись" внизу уходит за пределы экрана)
+        main_frame = ctk.CTkScrollableFrame(self.expenses_frame)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # Центрированный контейнер
@@ -4060,14 +4068,6 @@ class AutoServiceApp:
         ctk.CTkLabel(row3, text=self.tr("finances.amount_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.expense_amount_entry = ctk.CTkEntry(row3, width=200, fg_color="white", text_color="black")
         self.expense_amount_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-
-        # Дата
-        row4 = ctk.CTkFrame(center_container)
-        row4.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row4, text=self.tr("bookings.add_window_date"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.expense_date_entry = DateEntry(row4, width=30, date_pattern='dd.mm.yyyy',
-                                             locale='ru_RU')
-        self.expense_date_entry.pack(side=tk.LEFT, padx=5)
 
         # Кнопка добавления
         self.add_expense_btn = ctk.CTkButton(center_container, text=self.tr("finances.add_expense_btn"),
@@ -4145,15 +4145,47 @@ class AutoServiceApp:
             messagebox.showwarning(self.tr("common.attention"), self.tr("finances.msg_invalid_amount"))
             return
 
-        expense_date = self.expense_date_entry.get_date().strftime('%Y-%m-%d')
+        self._confirm_expense_date_and_save(category, description, amount, is_income)
 
-        self.db.add_expense(description, amount, expense_date, category, is_income)
+    def _confirm_expense_date_and_save(self, category, description, amount, is_income):
+        """Показывает диалог подтверждения даты перед сохранением записи.
+        Поле в календаре может «зависнуть» на старой дате, если программа
+        работает без перезапуска не первый день, поэтому по умолчанию
+        предлагаем реальную сегодняшнюю дату, а не значение из формы."""
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(self.tr("finances.confirm_date_title"))
+        dialog.geometry("360x180")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
 
-        messagebox.showinfo(self.tr("common.success"),
-                             self.tr("finances.msg_income_added") if is_income else self.tr("finances.msg_expense_added"))
-        self.expense_desc_entry.delete(0, tk.END)
-        self.expense_amount_entry.delete(0, tk.END)
-        self.refresh_expenses()
+        ctk.CTkLabel(dialog, text=self.tr("finances.confirm_date_label"),
+                     font=("Segoe UI", 13), wraplength=320).pack(pady=(20, 10))
+
+        confirm_date_entry = DateEntry(dialog, width=20, date_pattern='dd.mm.yyyy', locale='ru_RU')
+        confirm_date_entry.set_date(datetime.now().date())
+        confirm_date_entry.pack(pady=5)
+
+        def on_confirm():
+            expense_date = confirm_date_entry.get_date().strftime('%Y-%m-%d')
+            self.db.add_expense(description, amount, expense_date, category, is_income)
+            dialog.destroy()
+
+            messagebox.showinfo(self.tr("common.success"),
+                                 self.tr("finances.msg_income_added") if is_income else self.tr("finances.msg_expense_added"))
+            self.expense_desc_entry.delete(0, tk.END)
+            self.expense_amount_entry.delete(0, tk.END)
+            self.refresh_expenses()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(pady=15)
+        ctk.CTkButton(btn_row, text=self.tr("finances.confirm_date_btn"), command=on_confirm,
+                      fg_color="#4caf50", hover_color="#388e3c", width=130).pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_row, text=self.tr("common.cancel"), command=on_cancel,
+                      fg_color="gray", width=130).pack(side=tk.LEFT, padx=10)
 
     def refresh_expenses(self):
         """Обновить список расходов и доходов"""
@@ -4658,19 +4690,27 @@ class AutoServiceApp:
                 alignment=TA_CENTER,
                 spaceAfter=15
             )
-            elements.append(Paragraph("ЛИСТ НАРЯД", title_style))
+            order_numbers = ", ".join(dict.fromkeys(str(w[14]) for w in works if w[14]))
+            title_text = f"ЛИСТ НАРЯД № {order_numbers}" if order_numbers else "ЛИСТ НАРЯД"
+            elements.append(Paragraph(title_text, title_style))
 
             # ═══════════════════════════════════════════════════════
             # ИНФОРМАЦИЯ О КЛИЕНТЕ И АВТОМОБИЛЕ
+            # Одна колонка "label - значение" построчно — читается легче,
+            # чем два поля в одной строке. Дата и мастер указаны здесь один
+            # раз на весь документ, повторно в заголовках работ не дублируются.
             # ═══════════════════════════════════════════════════════
+            master_names = ", ".join(dict.fromkeys(w[2] for w in works if w[2])) or "-"
+
             info_data = [
-                [Paragraph("<b>Дата:</b>", style_normal), Paragraph(display_date, style_normal),
-                 Paragraph("<b>Клиент:</b>", style_normal), Paragraph(client_name or "-", style_normal)],
-                [Paragraph("<b>Телефон:</b>", style_normal), Paragraph(client_phone or "-", style_normal),
-                 Paragraph("<b>Автомобиль:</b>", style_normal), Paragraph(car_info or "-", style_normal)],
+                [Paragraph("<b>Дата:</b>", style_normal), Paragraph(display_date, style_normal)],
+                [Paragraph("<b>Клиент:</b>", style_normal), Paragraph(client_name or "-", style_normal)],
+                [Paragraph("<b>Телефон:</b>", style_normal), Paragraph(client_phone or "-", style_normal)],
+                [Paragraph("<b>Автомобиль:</b>", style_normal), Paragraph(car_info or "-", style_normal)],
+                [Paragraph("<b>Мастер:</b>", style_normal), Paragraph(master_names, style_normal)],
             ]
 
-            col_widths = [content_width * 0.12, content_width * 0.28, content_width * 0.15, content_width * 0.45]
+            col_widths = [content_width * 0.2, content_width * 0.8]
             info_table = Table(info_data, colWidths=col_widths)
             info_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -4678,7 +4718,6 @@ class AutoServiceApp:
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
             ]))
             elements.append(info_table)
-            elements.append(Spacer(1, 15))
 
             # ═══════════════════════════════════════════════════════
             # РАБОТЫ
@@ -4686,49 +4725,28 @@ class AutoServiceApp:
             grand_total_works = 0
             grand_total_parts = 0
 
-            for i, work in enumerate(works, 1):
-                work_id, _, worker_name, description, amount, work_date, car_brand, car_model, car_number, mileage, vin, _, _, _, order_number, _ = work
+            for work in works:
+                work_id, _, _, description, amount, _, _, _, _, mileage, _, _, _, _, _, _ = work
 
                 work_amount = float(amount or 0)
                 grand_total_works += work_amount
 
-                if hasattr(work_date, 'strftime'):
-                    work_date_str = work_date.strftime('%d.%m.%Y')
-                else:
-                    work_date_str = str(work_date) if work_date else "-"
-
-                # Заголовок работы
-                order_num_str = f"№{order_number}" if order_number else f"#{i}"
-                work_header = f"РАБОТА {order_num_str}  |  Дата: {work_date_str}  |  Мастер: {worker_name or '-'}"
-
-                # Информация об авто для этой работы
-                work_car_info = f"{car_brand or ''} {car_model or ''} {car_number or ''}".strip()
+                # Номер наряда и мастер уже указаны один раз в шапке документа
+                # и в информационном блоке — здесь для каждой работы оставляем
+                # только пробег, если он есть.
                 if mileage:
-                    work_car_info += f"  |  Пробег: {mileage} км"
-
-                # Заголовок работы (серый фон)
-                header_data = [[Paragraph(f"<b>{work_header}</b>", style_normal)]]
-                if work_car_info:
-                    header_data.append([Paragraph(f"Авто: {work_car_info}", style_normal)])
-
-                header_table = Table(header_data, colWidths=[content_width])
-                header_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.9, 0.9, 0.9)),
-                    ('TOPPADDING', (0, 0), (-1, -1), 6),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                    ('LEFTPADDING', (0, 0), (-1, -1), 8),
-                ]))
-                elements.append(header_table)
+                    elements.append(Paragraph(f"Пробег: {mileage} км", style_normal))
+                    elements.append(Spacer(1, 6))
 
                 # Таблица работ
                 works_table_data = [[
-                    Paragraph("<b>Наименование</b>", style_bold),
+                    Paragraph("<b>Наименование работ</b>", style_bold),
                     Paragraph("<b>Сумма</b>", style_bold)
                 ]]
 
                 # Описание работ - каждая позиция отдельной строкой со своей ценой
-                if description:
-                    work_items = self.get_work_line_items(work_id, description, work_amount)
+                work_items = self.get_work_line_items(work_id, description, work_amount) if description else []
+                if work_items:
                     for item_name, item_price in work_items:
                         works_table_data.append([
                             Paragraph(f"• {item_name}", style_normal),
@@ -4739,12 +4757,6 @@ class AutoServiceApp:
                         Paragraph("Работы не указаны", style_normal),
                         Paragraph("", style_normal)
                     ])
-
-                # Итого работы
-                works_table_data.append([
-                    Paragraph("<b>Итого работы:</b>", style_bold),
-                    Paragraph(f"<b>{self.format_currency(work_amount)}</b>", style_bold)
-                ])
 
                 works_table = Table(works_table_data, colWidths=[content_width * 0.75, content_width * 0.25])
                 works_table.setStyle(TableStyle([
@@ -4775,11 +4787,6 @@ class AutoServiceApp:
                             Paragraph(self.format_currency(part_price), style_normal)
                         ])
 
-                    parts_table_data.append([
-                        Paragraph("<b>Итого запчасти:</b>", style_bold),
-                        Paragraph(f"<b>{self.format_currency(parts_total)}</b>", style_bold)
-                    ])
-
                     parts_table = Table(parts_table_data, colWidths=[content_width * 0.75, content_width * 0.25])
                     parts_table.setStyle(TableStyle([
                         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -4792,27 +4799,28 @@ class AutoServiceApp:
                     elements.append(parts_table)
 
                 grand_total_parts += parts_total
-                elements.append(Spacer(1, 15))
 
             # ═══════════════════════════════════════════════════════
             # ИТОГО
+            # Без лишнего отступа и без отдельной линии-разделителя —
+            # единственная линия уже встроена в саму таблицу итогов,
+            # прямо над строкой "ИТОГО К ОПЛАТЕ".
             # ═══════════════════════════════════════════════════════
             grand_total = grand_total_works + grand_total_parts
 
-            # Линия
-            line_table2 = Table([['']], colWidths=[content_width])
-            line_table2.setStyle(TableStyle([
-                ('LINEABOVE', (0, 0), (-1, 0), 1.5, colors.black),
-            ]))
-            elements.append(line_table2)
-            elements.append(Spacer(1, 10))
-
             # Таблица итогов
+            # Строку "Запчасти" показываем, только если запчасти реально были —
+            # незачем показывать "Запчасти: 0 руб.", если их не использовали.
             totals_data = [
                 [Paragraph("Работы:", style_normal), Paragraph(self.format_currency(grand_total_works), style_normal)],
-                [Paragraph("Запчасти:", style_normal), Paragraph(self.format_currency(grand_total_parts), style_normal)],
-                [Paragraph("<b>ИТОГО К ОПЛАТЕ:</b>", style_bold), Paragraph(f"<b>{self.format_currency(grand_total)}</b>", style_bold)],
             ]
+            if grand_total_parts > 0:
+                totals_data.append(
+                    [Paragraph("Запчасти:", style_normal), Paragraph(self.format_currency(grand_total_parts), style_normal)]
+                )
+            totals_data.append(
+                [Paragraph("<b>ИТОГО К ОПЛАТЕ:</b>", style_bold), Paragraph(f"<b>{self.format_currency(grand_total)}</b>", style_bold)]
+            )
 
             totals_table = Table(totals_data, colWidths=[content_width * 0.75, content_width * 0.25])
             totals_table.setStyle(TableStyle([
@@ -5153,10 +5161,14 @@ class AutoServiceApp:
                     if wh_parts:
                         self.refresh_warehouse()
 
-            # Отправляем уведомление в Telegram
-            if booking and booking.get("user_id"):
+            # Отправляем уведомление клиенту (Telegram и/или SMS)
+            if booking:
                 # Получаем данные работы по этой записи
                 work = self.db.get_work_by_booking_id(booking_id)
+
+                car_display = ""
+                order_number = ""
+                total = None
 
                 # Формируем сообщение
                 message = "🚗 <b>Ваша машина готова, ждём вас!</b>\n\n"
@@ -5180,6 +5192,9 @@ class AutoServiceApp:
 
                     # Информация об автомобиле
                     car_info = " ".join(filter(None, [car_brand, car_model]))
+                    car_display = car_info
+                    if car_number:
+                        car_display = f"{car_display} ({car_number})".strip()
                     if car_info or car_number:
                         message += f"🚙 Авто: {car_info}"
                         if car_number:
@@ -5211,7 +5226,25 @@ class AutoServiceApp:
 
                 message += "\n✨ Спасибо, что выбрали наш автосервис!\n━━━━━━━━━━━━━━━━━━━━\nг.Щёлково, ул.Беляева, д.6Б\n+7-960-546-62-81 AlexAuto"
 
-                if send_telegram_notification(booking["user_id"], message, with_menu=True):
+                notified_channels = []
+
+                if booking.get("user_id"):
+                    if send_telegram_notification(booking["user_id"], message, with_menu=True):
+                        notified_channels.append("Telegram")
+
+                phone = booking.get("phone")
+                if phone:
+                    sms_lines = ["Ваш автомобиль" + (f" {car_display}" if car_display else "") + " готов, ждём вас!"]
+                    if order_number:
+                        sms_lines.append(f"Заказ-наряд № {order_number}.")
+                    if total is not None:
+                        sms_lines.append(f"Итого: {total:,.0f} ₽.")
+                    sms_lines.append("AlexAuto, г.Щёлково, ул.Беляева, д.6Б, +7-960-546-62-81")
+                    sms_text = " ".join(sms_lines)
+                    if send_sms_notification(phone, sms_text):
+                        notified_channels.append("SMS")
+
+                if notified_channels:
                     messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_completed_notified"))
                 else:
                     messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_completed_notify_failed"))
