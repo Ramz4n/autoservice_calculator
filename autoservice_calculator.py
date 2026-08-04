@@ -4741,7 +4741,7 @@ class AutoServiceApp:
                 # Таблица работ
                 works_table_data = [[
                     Paragraph("<b>Наименование работ</b>", style_bold),
-                    Paragraph("<b>Сумма</b>", style_bold)
+                    Paragraph("<b>Цена</b>", style_bold)
                 ]]
 
                 # Описание работ - каждая позиция отдельной строкой со своей ценой
@@ -5008,6 +5008,11 @@ class AutoServiceApp:
             label="  👤  " + self.tr("bookings.ctx_client_info"), command=self.show_client_info,
             foreground="#80deea", activeforeground="#b2ebf2",
             background="#1e1e1e", activebackground="#00838f"
+        )
+        self.bookings_context_menu.add_command(
+            label="  ✏  " + self.tr("bookings.ctx_edit_client"), command=self.edit_client_info,
+            foreground="#fff59d", activeforeground="#fffde7",
+            background="#1e1e1e", activebackground="#f9a825"
         )
         self.bookings_context_menu.add_separator()
         self.bookings_context_menu.add_command(
@@ -6208,6 +6213,68 @@ class AutoServiceApp:
             fg_color="gray50",
             hover_color="gray40"
         ).pack(side=tk.LEFT, padx=5)
+
+    def edit_client_info(self):
+        """Открыть окно редактирования имени/телефона клиента — исправление
+        опечаток оператором (например, неверно введённый номер телефона)."""
+        selection = self.bookings_tree.selection()
+        if not selection:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
+            return
+
+        values = self.bookings_tree.item(selection[0], "values")
+        if not values:
+            return
+
+        booking_id = values[0] if len(values) > 0 else None
+        booking = self.db.get_booking_by_id(int(booking_id)) if booking_id else None
+        client_id = booking.get("client_id") if booking else None
+
+        if not client_id:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_client_data"))
+            return
+
+        client = self.db.get_client_by_id(client_id)
+        if not client:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_client_data"))
+            return
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(self.tr("bookings.edit_client_title"))
+        dialog.geometry("360x290")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        form = ctk.CTkFrame(dialog, fg_color="transparent")
+        form.pack(padx=25, pady=20, fill="x")
+
+        ctk.CTkLabel(form, text=self.tr("bookings.client_name_label"), anchor="w").pack(fill="x", pady=(0, 2))
+        name_var = tk.StringVar(value=client.get("full_name") or "")
+        ctk.CTkEntry(form, textvariable=name_var, height=36).pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(form, text=self.tr("bookings.col_phone"), anchor="w").pack(fill="x", pady=(0, 2))
+        phone_var = tk.StringVar(value=client.get("phone") or "")
+        ctk.CTkEntry(form, textvariable=phone_var, height=36).pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(form, text=self.tr("bookings.client_telegram_label"), anchor="w").pack(fill="x", pady=(0, 2))
+        telegram_var = tk.StringVar(value=client.get("tg_username") or "")
+        ctk.CTkEntry(form, textvariable=telegram_var, placeholder_text="username", height=36).pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(form, text=self.tr("bookings.client_telegram_hint"), anchor="w",
+                     font=("Segoe UI", 10), text_color="gray").pack(fill="x", pady=(0, 12))
+
+        def on_save():
+            self.db.update_client(client_id, name_var.get().strip(), phone_var.get().strip(), telegram_var.get().strip())
+            dialog.destroy()
+            messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_client_updated"))
+            self.refresh_bookings()
+
+        btn_row = ctk.CTkFrame(form, fg_color="transparent")
+        btn_row.pack(fill="x")
+        ctk.CTkButton(btn_row, text=self.tr("common.save"), command=on_save,
+                      fg_color="#4caf50", hover_color="#388e3c", width=130).pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkButton(btn_row, text=self.tr("common.cancel"), command=dialog.destroy,
+                      fg_color="gray", width=130).pack(side=tk.LEFT)
 
     def show_client_info(self):
         """Показать окно с информацией о клиенте: машины и история"""

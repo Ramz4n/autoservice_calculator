@@ -1143,7 +1143,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, telegram_user_id, full_name, phone, created_at
+            SELECT id, telegram_user_id, full_name, phone, tg_username, created_at
             FROM clients WHERE id = %s
         """, (client_id,))
         result = cursor.fetchone()
@@ -1154,9 +1154,23 @@ class Database:
                 "telegram_user_id": result[1],
                 "full_name": result[2],
                 "phone": result[3],
-                "created_at": result[4]
+                "tg_username": result[4],
+                "created_at": result[5]
             }
         return None
+
+    def update_client(self, client_id, full_name, phone, tg_username=None):
+        """Обновить имя, телефон и telegram-username клиента (исправление опечаток оператором).
+        telegram_user_id (числовой ID для отправки уведомлений) не редактируется вручную —
+        он проставляется автоматически, когда клиент сам пишет боту."""
+        tg_username = (tg_username or "").strip().lstrip("@") or None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE clients SET full_name = %s, phone = %s, tg_username = %s WHERE id = %s
+        """, (full_name, normalize_phone(phone), tg_username, client_id))
+        conn.commit()
+        conn.close()
 
     def get_client_by_phone(self, phone):
         """Получить клиента по телефону"""
