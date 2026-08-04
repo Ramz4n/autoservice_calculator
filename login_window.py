@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
 
-from i18n import SUPPORTED_LANGUAGES
+from i18n import I18n, SUPPORTED_LANGUAGES
 
 
 def _get_base_path():
@@ -29,6 +29,7 @@ def _get_base_path():
 
 
 SETTINGS_FILE = os.path.join(_get_base_path(), 'config', 'settings.json')
+LOCALES_DIR = os.path.join(_get_base_path(), 'config', 'locales')
 
 
 def _load_settings():
@@ -50,6 +51,12 @@ def _save_settings(settings):
         print(f"Ошибка сохранения настроек: {e}")
 
 
+def _get_i18n():
+    """Создать I18n на текущем сохранённом языке интерфейса."""
+    lang = _load_settings().get('language', 'ru')
+    return I18n(LOCALES_DIR, lang)
+
+
 class LoginWindow(ctk.CTk):
     """Окно входа в систему."""
 
@@ -60,6 +67,9 @@ class LoginWindow(ctk.CTk):
         super().__init__()
         self.db = db
         self.logged_user = None  # dict: {id, username, full_name, role}
+
+        self.i18n = _get_i18n()
+        self.tr = self.i18n.t
 
         # Создаём дефолтного админа если таблица пуста
         self._first_run = self.db.ensure_default_admin()
@@ -73,7 +83,7 @@ class LoginWindow(ctk.CTk):
     # ──────── Настройка окна ────────
 
     def _setup_window(self):
-        self.title("Вход в систему")
+        self.title(self.tr("login.window_title"))
         self.resizable(False, False)
         w, h = 420, 460
         sw = self.winfo_screenwidth()
@@ -98,46 +108,47 @@ class LoginWindow(ctk.CTk):
 
         # Заголовок
         ctk.CTkLabel(
-            self, text="🔧 Автосервис",
+            self, text=self.tr("login.brand"),
             font=ctk.CTkFont(size=24, weight="bold")
         ).pack(pady=(44, 4))
         ctk.CTkLabel(
-            self, text="Авторизация",
+            self, text=self.tr("login.subtitle"),
             font=ctk.CTkFont(size=14), text_color="gray"
         ).pack(pady=(0, 28))
 
         frame = ctk.CTkFrame(self, fg_color="transparent")
         frame.pack(padx=44, fill="x")
 
-        # Логин
-        ctk.CTkLabel(frame, text="Логин", anchor="w").pack(fill="x", pady=(0, 2))
-        self.username_var = tk.StringVar()
+        # Логин (подставляем логин, использованный при последнем входе)
+        ctk.CTkLabel(frame, text=self.tr("login.username_label"), anchor="w").pack(fill="x", pady=(0, 2))
+        last_username = _load_settings().get('last_username', '')
+        self.username_var = tk.StringVar(value=last_username)
         self.username_entry = ctk.CTkEntry(
             frame, textvariable=self.username_var,
-            placeholder_text="Введите логин", height=40
+            placeholder_text=self.tr("login.username_placeholder"), height=40
         )
         self.username_entry.pack(fill="x", pady=(0, 14))
 
         # Пароль
-        ctk.CTkLabel(frame, text="Пароль", anchor="w").pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(frame, text=self.tr("login.password_label"), anchor="w").pack(fill="x", pady=(0, 2))
         self.password_var = tk.StringVar()
         self.password_entry = ctk.CTkEntry(
             frame, textvariable=self.password_var,
-            show="•", placeholder_text="Введите пароль", height=40
+            show="•", placeholder_text=self.tr("login.password_placeholder"), height=40
         )
         self.password_entry.pack(fill="x", pady=(0, 6))
 
         # Показать пароль
         self.show_pass_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            frame, text="Показать пароль",
+            frame, text=self.tr("login.show_password"),
             variable=self.show_pass_var,
             command=self._toggle_password, height=22
         ).pack(anchor="w", pady=(0, 22))
 
         # Кнопка входа
         ctk.CTkButton(
-            frame, text="Войти", height=42,
+            frame, text=self.tr("login.submit"), height=42,
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self._do_login
         ).pack(fill="x")
@@ -151,7 +162,11 @@ class LoginWindow(ctk.CTk):
 
         # Enter → войти
         self.bind("<Return>", lambda _e: self._do_login())
-        self.username_entry.focus()
+        # Если логин уже подставлен из прошлого раза — сразу фокус на пароль
+        if last_username:
+            self.password_entry.focus()
+        else:
+            self.username_entry.focus()
 
     # ──────── Логика входа ────────
 
@@ -171,27 +186,28 @@ class LoginWindow(ctk.CTk):
         password = self.password_var.get()
 
         if not username or not password:
-            self.error_label.configure(text="Введите логин и пароль")
+            self.error_label.configure(text=self.tr("login.error_empty"))
             return
 
         user = self.db.verify_user(username, password)
         if user is None:
-            self.error_label.configure(text="Неверный логин или пароль")
+            self.error_label.configure(text=self.tr("login.error_invalid"))
             self.password_var.set("")
             self.password_entry.focus()
             return
+
+        settings = _load_settings()
+        settings['last_username'] = username
+        _save_settings(settings)
 
         self.logged_user = user
         self.quit()   # выходим из mainloop; destroy() вызывается в main()
 
     def _show_first_run_notice(self):
         messagebox.showinfo(
-            "Первый запуск",
-            f"Создан аккаунт администратора по умолчанию:\n\n"
-            f"  Логин:  {self.DEFAULT_ADMIN}\n"
-            f"  Пароль: {self.DEFAULT_PASS}\n\n"
-            "Смените пароль после входа\n"
-            "(Меню → Пользователи → Сменить пароль).",
+            self.tr("login.first_run_title"),
+            self.tr("login.first_run_body",
+                    username=self.DEFAULT_ADMIN, password=self.DEFAULT_PASS),
             parent=self
         )
 
@@ -216,7 +232,10 @@ class UserManagementDialog(ctk.CTkToplevel):
         self.db = db
         self.current_user = current_user
 
-        self.title("Управление пользователями")
+        self.i18n = _get_i18n()
+        self.tr = self.i18n.t
+
+        self.title(self.tr("users.window_title"))
         self.resizable(False, False)
         w, h = 620, 520
         sw = self.winfo_screenwidth()
@@ -236,12 +255,12 @@ class UserManagementDialog(ctk.CTkToplevel):
         top.pack(fill="x", padx=20, pady=(16, 8))
 
         ctk.CTkLabel(
-            top, text="Пользователи",
+            top, text=self.tr("users.title"),
             font=ctk.CTkFont(size=18, weight="bold")
         ).pack(side="left")
 
         ctk.CTkButton(
-            top, text="+ Добавить", width=110,
+            top, text=self.tr("users.add_button"), width=110,
             command=self._open_add_dialog
         ).pack(side="right")
 
@@ -250,10 +269,10 @@ class UserManagementDialog(ctk.CTkToplevel):
         self.tree = tk.ttk.Treeview(
             self, columns=cols, show="headings", height=12
         )
-        self.tree.heading("username",  text="Логин")
-        self.tree.heading("full_name", text="Имя")
-        self.tree.heading("role",      text="Роль")
-        self.tree.heading("is_active", text="Статус")
+        self.tree.heading("username",  text=self.tr("users.col_username"))
+        self.tree.heading("full_name", text=self.tr("users.col_fullname"))
+        self.tree.heading("role",      text=self.tr("users.col_role"))
+        self.tree.heading("is_active", text=self.tr("users.col_status"))
         self.tree.column("username",  width=140)
         self.tree.column("full_name", width=180)
         self.tree.column("role",      width=90, anchor="center")
@@ -265,24 +284,24 @@ class UserManagementDialog(ctk.CTkToplevel):
         btn_frame.pack(padx=20, pady=(0, 16), fill="x")
 
         ctk.CTkButton(
-            btn_frame, text="Сменить пароль", width=160,
+            btn_frame, text=self.tr("users.change_password"), width=160,
             command=self._change_password
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
-            btn_frame, text="Блок / Разблок", width=150,
+            btn_frame, text=self.tr("users.toggle_active"), width=150,
             fg_color="orange", hover_color="#e65100",
             command=self._toggle_active
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
-            btn_frame, text="Удалить", width=110,
+            btn_frame, text=self.tr("users.delete"), width=110,
             fg_color="#c62828", hover_color="#b71c1c",
             command=self._delete_user
         ).pack(side="left")
 
         ctk.CTkButton(
-            btn_frame, text="Закрыть", width=110,
+            btn_frame, text=self.tr("common.close"), width=110,
             fg_color="gray", hover_color="gray40",
             command=self.destroy
         ).pack(side="right")
@@ -293,8 +312,8 @@ class UserManagementDialog(ctk.CTkToplevel):
         for row in self.tree.get_children():
             self.tree.delete(row)
         for u in self.db.get_all_users():
-            role_label = "Администратор" if u["role"] == "admin" else "Пользователь"
-            status = "Активен" if u["is_active"] else "Заблокирован"
+            role_label = self.tr("users.role_admin") if u["role"] == "admin" else self.tr("users.role_user")
+            status = self.tr("users.status_active") if u["is_active"] else self.tr("users.status_blocked")
             self.tree.insert("", "end", iid=str(u["id"]),
                              values=(u["username"], u["full_name"] or "", role_label, status))
 
@@ -310,17 +329,17 @@ class UserManagementDialog(ctk.CTkToplevel):
     def _change_password(self):
         uid = self._selected_user_id()
         if uid is None:
-            messagebox.showwarning("Выбор", "Выберите пользователя.", parent=self)
+            messagebox.showwarning(self.tr("users.select_title"), self.tr("users.select_body"), parent=self)
             return
         ChangePasswordDialog(self, self.db, uid, on_saved=self._load_users)
 
     def _toggle_active(self):
         uid = self._selected_user_id()
         if uid is None:
-            messagebox.showwarning("Выбор", "Выберите пользователя.", parent=self)
+            messagebox.showwarning(self.tr("users.select_title"), self.tr("users.select_body"), parent=self)
             return
         if uid == self.current_user["id"]:
-            messagebox.showwarning("Ошибка", "Нельзя заблокировать себя.", parent=self)
+            messagebox.showwarning(self.tr("common.error"), self.tr("users.cant_block_self"), parent=self)
             return
         users = {u["id"]: u for u in self.db.get_all_users()}
         u = users.get(uid)
@@ -331,12 +350,12 @@ class UserManagementDialog(ctk.CTkToplevel):
     def _delete_user(self):
         uid = self._selected_user_id()
         if uid is None:
-            messagebox.showwarning("Выбор", "Выберите пользователя.", parent=self)
+            messagebox.showwarning(self.tr("users.select_title"), self.tr("users.select_body"), parent=self)
             return
         if uid == self.current_user["id"]:
-            messagebox.showwarning("Ошибка", "Нельзя удалить себя.", parent=self)
+            messagebox.showwarning(self.tr("common.error"), self.tr("users.cant_delete_self"), parent=self)
             return
-        if messagebox.askyesno("Удаление", "Удалить пользователя?", parent=self):
+        if messagebox.askyesno(self.tr("users.delete_confirm_title"), self.tr("users.delete_confirm_body"), parent=self):
             self.db.delete_user(uid)
             self._load_users()
 
@@ -348,7 +367,9 @@ class AddUserDialog(ctk.CTkToplevel):
         super().__init__(parent)
         self.db = db
         self.on_saved = on_saved
-        self.title("Добавить пользователя")
+        self.i18n = _get_i18n()
+        self.tr = self.i18n.t
+        self.title(self.tr("users.add_dialog_title"))
         self.resizable(False, False)
         self.geometry("380x460+{}+{}".format(
             self.winfo_screenwidth() // 2 - 190,
@@ -362,9 +383,9 @@ class AddUserDialog(ctk.CTkToplevel):
         f.pack(padx=30, pady=20, fill="x")
 
         fields = [
-            ("Логин *",  "username"),
-            ("Пароль *", "password"),
-            ("Имя",      "full_name"),
+            (self.tr("users.field_username"), "username"),
+            (self.tr("users.field_password"), "password"),
+            (self.tr("users.field_fullname"), "full_name"),
         ]
         self._vars = {}
         for label, key in fields:
@@ -375,19 +396,19 @@ class AddUserDialog(ctk.CTkToplevel):
             entry.pack(fill="x", pady=(0, 10))
             self._vars[key] = var
 
-        ctk.CTkLabel(f, text="Роль", anchor="w").pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(f, text=self.tr("users.field_role"), anchor="w").pack(fill="x", pady=(0, 2))
         self._role_var = tk.StringVar(value="user")
         role_frame = ctk.CTkFrame(f, fg_color="transparent")
         role_frame.pack(fill="x", pady=(0, 16))
-        ctk.CTkRadioButton(role_frame, text="Пользователь",
+        ctk.CTkRadioButton(role_frame, text=self.tr("users.role_user"),
                            variable=self._role_var, value="user").pack(side="left", padx=(0, 16))
-        ctk.CTkRadioButton(role_frame, text="Администратор",
+        ctk.CTkRadioButton(role_frame, text=self.tr("users.role_admin"),
                            variable=self._role_var, value="admin").pack(side="left")
 
         self.err = ctk.CTkLabel(f, text="", text_color="red", font=ctk.CTkFont(size=12))
         self.err.pack()
 
-        ctk.CTkButton(f, text="Сохранить", height=42, command=self._save).pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(f, text=self.tr("common.save"), height=42, command=self._save).pack(fill="x", pady=(10, 0))
 
     def _save(self):
         username  = self._vars["username"].get().strip()
@@ -396,12 +417,12 @@ class AddUserDialog(ctk.CTkToplevel):
         role      = self._role_var.get()
 
         if not username or not password:
-            self.err.configure(text="Логин и пароль обязательны")
+            self.err.configure(text=self.tr("users.error_required"))
             return
 
         ok = self.db.create_user(username, password, full_name, role)
         if not ok:
-            self.err.configure(text="Пользователь с таким логином уже существует")
+            self.err.configure(text=self.tr("users.error_exists"))
             return
 
         if self.on_saved:
@@ -415,7 +436,9 @@ class ChangePasswordDialog(ctk.CTkToplevel):
         self.db = db
         self.user_id = user_id
         self.on_saved = on_saved
-        self.title("Смена пароля")
+        self.i18n = _get_i18n()
+        self.tr = self.i18n.t
+        self.title(self.tr("users.change_password_title"))
         self.resizable(False, False)
         self.geometry("340x260+{}+{}".format(
             self.winfo_screenwidth() // 2 - 170,
@@ -428,30 +451,30 @@ class ChangePasswordDialog(ctk.CTkToplevel):
         f = ctk.CTkFrame(self, fg_color="transparent")
         f.pack(padx=30, pady=20, fill="both", expand=True)
 
-        ctk.CTkLabel(f, text="Новый пароль *", anchor="w").pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(f, text=self.tr("users.field_new_password"), anchor="w").pack(fill="x", pady=(0, 2))
         self.pwd1 = tk.StringVar()
         ctk.CTkEntry(f, textvariable=self.pwd1, show="•", height=36).pack(fill="x", pady=(0, 10))
 
-        ctk.CTkLabel(f, text="Повтор пароля *", anchor="w").pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(f, text=self.tr("users.field_repeat_password"), anchor="w").pack(fill="x", pady=(0, 2))
         self.pwd2 = tk.StringVar()
         ctk.CTkEntry(f, textvariable=self.pwd2, show="•", height=36).pack(fill="x", pady=(0, 14))
 
         self.err = ctk.CTkLabel(f, text="", text_color="red", font=ctk.CTkFont(size=12))
         self.err.pack()
 
-        ctk.CTkButton(f, text="Сохранить", height=38, command=self._save).pack(fill="x", pady=(6, 0))
+        ctk.CTkButton(f, text=self.tr("common.save"), height=38, command=self._save).pack(fill="x", pady=(6, 0))
 
     def _save(self):
         p1 = self.pwd1.get()
         p2 = self.pwd2.get()
         if not p1:
-            self.err.configure(text="Введите пароль")
+            self.err.configure(text=self.tr("users.error_enter_password"))
             return
         if p1 != p2:
-            self.err.configure(text="Пароли не совпадают")
+            self.err.configure(text=self.tr("users.error_mismatch"))
             return
         self.db.change_password(self.user_id, p1)
-        messagebox.showinfo("Готово", "Пароль успешно изменён.", parent=self)
+        messagebox.showinfo(self.tr("users.done_title"), self.tr("users.password_changed"), parent=self)
         if self.on_saved:
             self.on_saved()
         self.destroy()
