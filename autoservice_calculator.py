@@ -1897,11 +1897,14 @@ class AutoServiceApp:
         for part in parts:
             part_id, part_name, quantity, price, notes = part
             price_str = self.format_currency(float(price)) if price else "—"
+            label = f"{part_name}  |  {price_str}"
+            if notes:
+                label += f"  |  📝 {notes}"
             var = tk.BooleanVar(value=False)
             check_vars.append(var)
             row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
             row.pack(fill=tk.X, pady=3)
-            ctk.CTkCheckBox(row, text=f"{part_name}  |  {price_str}",
+            ctk.CTkCheckBox(row, text=label,
                             variable=var, font=("Segoe UI", 12)).pack(side=tk.LEFT, padx=5)
 
         def select_all():
@@ -4735,7 +4738,16 @@ class AutoServiceApp:
                 # и в информационном блоке — здесь для каждой работы оставляем
                 # только пробег, если он есть.
                 if mileage:
-                    elements.append(Paragraph(f"Пробег: {mileage} км", style_normal))
+                    mileage_table = Table(
+                        [[Paragraph("<b>Пробег:</b>", style_normal), Paragraph(f"{mileage} км", style_normal)]],
+                        colWidths=col_widths
+                    )
+                    mileage_table.setStyle(TableStyle([
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('TOPPADDING', (0, 0), (-1, -1), 4),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ]))
+                    elements.append(mileage_table)
                     elements.append(Spacer(1, 6))
 
                 # Таблица работ
@@ -5855,6 +5867,7 @@ class AutoServiceApp:
 
             # Загружаем запчасти
             self.parts_list = []
+            self.warehouse_part_ids = {}
             # Очищаем таблицу запчастей
             for item in self.parts_tree.get_children():
                 self.parts_tree.delete(item)
@@ -5866,6 +5879,9 @@ class AutoServiceApp:
                     self.parts_tree.insert("", tk.END, values=(part_name, self.format_currency(float(part_price))))
 
             self.update_total_cost()
+
+        # Проверяем склад на наличие новых запчастей для этого авто
+        self.check_warehouse_for_car(self.car_number_entry.get().strip())
 
         # Обновляем комбобокс записей
         self.refresh_bookings_combo()
