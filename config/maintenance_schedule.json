@@ -1,0 +1,103 @@
+{
+    "description": "Настройки интервалов технического обслуживания",
+    "note": "Отредактируй этот файл под свои рекомендации. interval_km_min/max - интервал в км",
+
+    "maintenance_items": [
+        {
+            "id": "oil_change",
+            "name": "Замена масла ДВС",
+            "keywords": ["замена масла", "масло двигателя", "моторное масло", "масло двс"],
+            "interval_km_min": 7000,
+            "interval_km_max": 10000,
+            "priority": 1
+        },
+        {
+            "id": "oil_filter",
+            "name": "Масляный фильтр",
+            "keywords": ["масляный фильтр", "фильтр масляный"],
+            "interval_km_min": 7000,
+            "interval_km_max": 10000,
+            "priority": 1
+        },
+        {
+            "id": "air_filter",
+            "name": "Воздушный фильтр",
+            "keywords": ["воздушный фильтр", "фильтр воздушный"],
+            "interval_km_min": 15000,
+            "interval_km_max": 20000,
+            "priority": 2
+        },
+        {
+            "id": "cabin_filter",
+            "name": "Салонный фильтр",
+            "keywords": ["салонный фильтр", "фильтр салона", "фильтр салонный"],
+            "interval_km_min": 15000,
+            "interval_km_max": 20000,
+            "priority": 3
+        },
+        {
+            "id": "spark_plugs",
+            "name": "Свечи зажигания",
+            "keywords": ["свечи", "свечи зажигания"],
+            "interval_km_min": 30000,
+            "interval_km_max": 40000,
+            "priority": 2
+        },
+        {
+            "id": "brake_fluid",
+            "name": "Тормозная жидкость",
+            "keywords": ["тормозная жидкость"],
+            "interval_km_min": 40000,
+            "interval_km_max": 60000,
+            "priority": 1
+        },
+        {
+            "id": "coolant",
+            "name": "Охлаждающая жидкость",
+            "keywords": ["антифриз", "охлаждающая жидкость", "тосол"],
+            "interval_km_min": 50000,
+            "interval_km_max": 60000,
+            "priority": 2
+        },
+        {
+            "id": "transmission_oil",
+            "name": "Масло КПП",
+            "keywords": ["масло кпп", "масло коробки", "трансмиссионное масло"],
+            "interval_km_min": 50000,
+            "interval_km_max": 60000,
+            "priority": 2
+        },
+        {
+            "id": "timing_belt",
+            "name": "Ремень ГРМ",
+            "keywords": ["ремень грм", "грм", "ролик грм"],
+            "interval_km_min": 60000,
+            "interval_km_max": 80000,
+            "priority": 1
+        },
+        {
+            "id": "brake_pads_front",
+            "name": "Тормозные колодки (перед)",
+            "keywords": ["колодки передние", "передние колодки"],
+            "interval_km_min": 30000,
+            "interval_km_max": 50000,
+            "priority": 1
+        },
+        {
+            "id": "brake_pads_rear",
+            "name": "Тормозные колодки (зад)",
+            "keywords": ["колодки задние", "задние колодки"],
+            "interval_km_min": 40000,
+            "interval_km_max": 60000,
+            "priority": 1
+        },
+        {
+            "id": "fuel_filter",
+            "name": "Топливный фильтр",
+            "keywords": ["топливный фильтр", "фильтр топливный"],
+            "interval_km_min": 30000,
+            "interval_km_max": 40000,
+            "priority": 2
+        }
+    ]
+}
