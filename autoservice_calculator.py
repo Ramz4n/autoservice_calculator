@@ -7,7 +7,7 @@
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from tkcalendar import DateEntry
 import json
 import qrcode
@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 from database import Database
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
+import backup as backup_module
 
 
 def get_base_path():
@@ -60,6 +61,11 @@ SPARE_PARTS_FILE = os.path.join(BASE_PATH, 'config', 'spare_parts.txt')
 
 # Папка с переводами интерфейса
 LOCALES_DIR = os.path.join(BASE_PATH, 'config', 'locales')
+
+# Папка для автоматических локальных бэкапов -- рядом с программой, всегда
+# работает без какой-либо настройки (в отличие от опциональной облачной
+# папки, которую пользователь указывает сам в настройках).
+LOCAL_BACKUP_DIR = os.path.join(BASE_PATH, 'Backup')
 
 # Настройка темы CustomTkinter
 ctk.set_appearance_mode("light")  # "dark" или "light"
@@ -350,7 +356,19 @@ class AutoServiceApp:
             text=self.tr("menu.title"),
             font=ctk.CTkFont(size=18, weight="bold")
         )
-        self.sidebar_title.pack(pady=(20, 20))
+        self.sidebar_title.pack(pady=(20, 2))
+
+        # Версия приложения — под заголовком меню
+        try:
+            from updater import APP_VERSION as _app_version
+        except Exception:
+            _app_version = "?"
+        ctk.CTkLabel(
+            self.sidebar,
+            text=f"v{_app_version}",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(pady=(0, 18))
 
         # Пункты меню
         _is_admin = self.current_user.get("role") == "admin"
@@ -392,6 +410,20 @@ class AutoServiceApp:
             text_color="gray",
             anchor="w",
             wraplength=140
+        ).pack(fill=tk.X, pady=(0, 6))
+        ctk.CTkButton(
+            sidebar_bottom,
+            text="🔄 " + self.tr("menu.check_update"),
+            command=self._check_update_manual,
+            height=44,
+            corner_radius=8,
+            fg_color="transparent",
+            border_width=1,
+            border_color="gray",
+            text_color=("gray10", "gray90"),
+            hover_color=("gray85", "gray25"),
+            font=ctk.CTkFont(size=11),
+            anchor="center"
         ).pack(fill=tk.X, pady=(0, 6))
         ctk.CTkButton(
             sidebar_bottom,
@@ -483,6 +515,16 @@ class AutoServiceApp:
             self.add_notebook.add(self.tr("settings.users_tab"))
             self.users_tab_frame = self.add_notebook.tab(self.tr("settings.users_tab"))
             self.setup_users_tab()
+
+        # Подвкладка резервного копирования
+        self.add_notebook.add(self.tr("settings.backup_tab"))
+        self.backup_frame = self.add_notebook.tab(self.tr("settings.backup_tab"))
+        self.setup_backup_tab()
+
+        # Подвкладка "О программе" (всегда последняя)
+        self.add_notebook.add(self.tr("settings.about_tab"))
+        self.about_frame = self.add_notebook.tab(self.tr("settings.about_tab"))
+        self.setup_about_tab()
 
         # Загрузка данных
         self.refresh_workers_list()
@@ -707,6 +749,42 @@ class AutoServiceApp:
         ):
             self.logged_out = True
             self.root.destroy()
+
+    def _check_update_manual(self):
+        """Ручная проверка обновлений по кнопке в меню — в отличие от фоновой
+        проверки, всегда показывает результат пользователю (в том числе
+        когда обновлений нет или сервер недоступен), чтобы можно было
+        разобраться, почему автообновление не сработало."""
+        try:
+            from updater import APP_VERSION, check_for_update, show_update_dialog, apply_update, _log_error
+        except Exception as e:
+            messagebox.showerror(
+                self.tr("common.error"),
+                f"Модуль обновлений недоступен:\n{e}",
+                parent=self.root
+            )
+            return
+
+        try:
+            upd = check_for_update(silent=False)
+        except Exception as e:
+            _log_error("_check_update_manual", e)
+            messagebox.showerror(
+                self.tr("common.error"),
+                f"Не удалось проверить обновления:\n{e}",
+                parent=self.root
+            )
+            return
+
+        if upd:
+            if show_update_dialog(upd, parent=self.root):
+                apply_update(upd["download_url"], parent_widget=self.root)
+        else:
+            messagebox.showinfo(
+                self.tr("common.info"),
+                f"У вас установлена последняя версия ({APP_VERSION}).",
+                parent=self.root
+            )
 
     def _open_user_management(self):
         """Открыть диалог управления пользователями (только admin)."""
@@ -4011,6 +4089,194 @@ class AutoServiceApp:
         else:
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
+    # ===== ВКЛАДКА РЕЗЕРВНОГО КОПИРОВАНИЯ =====
+
+    def setup_backup_tab(self):
+        """Настройка вкладки резервного копирования"""
+        main_frame = ctk.CTkFrame(self.backup_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        center_container = ctk.CTkFrame(main_frame)
+        center_container.pack(anchor=tk.CENTER, pady=20, padx=20, fill=tk.X)
+
+        ctk.CTkLabel(center_container, text=self.tr("backup.title"),
+                    font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(10, 4), anchor="w")
+
+        ctk.CTkLabel(center_container, text=self.tr("backup.description"),
+                    font=ctk.CTkFont(size=12), text_color="gray", justify="left",
+                    wraplength=460).pack(pady=(0, 16), anchor="w")
+
+        settings = self.load_settings()
+
+        # Папка для бэкапов
+        folder_row = ctk.CTkFrame(center_container, fg_color="transparent")
+        folder_row.pack(fill=tk.X, pady=6)
+        ctk.CTkLabel(folder_row, text=self.tr("backup.folder_label"), width=150, anchor="w").pack(side=tk.LEFT)
+        self.backup_folder_var = tk.StringVar(value=settings.get('backup_folder', ''))
+        ctk.CTkEntry(folder_row, textvariable=self.backup_folder_var, width=260,
+                    state="readonly").pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(folder_row, text=self.tr("backup.browse"), width=100,
+                     command=self._browse_backup_folder).pack(side=tk.LEFT, padx=5)
+
+        # Автоматический бэкап
+        auto_row = ctk.CTkFrame(center_container, fg_color="transparent")
+        auto_row.pack(fill=tk.X, pady=6)
+        self.backup_auto_var = tk.BooleanVar(value=settings.get('backup_auto', True))
+        ctk.CTkCheckBox(auto_row, text=self.tr("backup.auto_label"),
+                        variable=self.backup_auto_var,
+                        command=self._on_backup_auto_changed).pack(side=tk.LEFT)
+
+        # Статус последнего бэкапа
+        self._backup_status_label = ctk.CTkLabel(center_container, text="",
+                                                  font=ctk.CTkFont(size=12), text_color="gray", anchor="w")
+        self._backup_status_label.pack(fill=tk.X, pady=(10, 16), anchor="w")
+        self._refresh_backup_status_label()
+
+        # Кнопки
+        btn_row = ctk.CTkFrame(center_container, fg_color="transparent")
+        btn_row.pack(fill=tk.X, pady=(0, 10))
+        ctk.CTkButton(btn_row, text=self.tr("backup.now"), fg_color="green", hover_color="darkgreen",
+                     command=lambda: self._do_backup_now(silent=False)).pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkButton(btn_row, text=self.tr("backup.restore"), fg_color="#c62828", hover_color="#b71c1c",
+                     command=self._do_restore_backup).pack(side=tk.LEFT)
+
+    def _browse_backup_folder(self):
+        """Выбрать папку для бэкапов (обычно -- синхронизируемая папка Google
+        Диска / Яндекс.Диска, чтобы копия автоматически оказалась в облаке)."""
+        folder = filedialog.askdirectory(parent=self.root, title=self.tr("backup.folder_label"))
+        if not folder:
+            return
+        self.backup_folder_var.set(folder)
+        settings = self.load_settings()
+        settings['backup_folder'] = folder
+        self.save_settings(settings)
+        self._refresh_backup_status_label()
+
+    def _on_backup_auto_changed(self):
+        settings = self.load_settings()
+        settings['backup_auto'] = self.backup_auto_var.get()
+        self.save_settings(settings)
+
+    def _refresh_backup_status_label(self):
+        if not hasattr(self, "_backup_status_label"):
+            return
+        settings = self.load_settings()
+        last = settings.get('backup_last')
+        count = len(backup_module.list_backups(LOCAL_BACKUP_DIR))
+
+        if last:
+            try:
+                last_str = datetime.fromisoformat(last).strftime('%d.%m.%Y %H:%M')
+            except Exception:
+                last_str = last
+        else:
+            last_str = self.tr("backup.last_never")
+
+        self._backup_status_label.configure(text=self.tr("backup.status", last=last_str, count=count))
+
+    def _do_backup_now(self, silent: bool = False, include_cloud: bool = True) -> bool:
+        """
+        Создать бэкап немедленно.
+        Всегда пишет копию в LOCAL_BACKUP_DIR (папка "Backup" рядом с
+        программой) -- это работает без какой-либо настройки со стороны
+        пользователя и не зависит от галочки "автобэкап". Дополнительно,
+        если в настройках указана облачная папка (Google Диск/Яндекс.Диск)
+        и include_cloud=True, пишет копию и туда.
+
+        silent=True -- для фоновой автоматической проверки, без всплывающих
+        окон при успехе/ошибке. include_cloud=False -- используется фоновой
+        проверкой, когда галочка "копировать в облако" выключена (локальный
+        бэкап при этом всё равно продолжает делаться).
+        """
+        settings = self.load_settings()
+        cloud_folder = settings.get('backup_folder', '').strip()
+
+        targets = [LOCAL_BACKUP_DIR]
+        if include_cloud and cloud_folder and cloud_folder != LOCAL_BACKUP_DIR:
+            targets.append(cloud_folder)
+
+        made_any = False
+        errors = []
+        for folder in targets:
+            try:
+                backup_module.create_backup(self.db, folder, SETTINGS_FILE, SPARE_PARTS_FILE)
+                backup_module.rotate_backups(folder)
+                made_any = True
+            except Exception as e:
+                errors.append(f"{folder}: {e}")
+
+        if made_any:
+            settings = self.load_settings()
+            settings['backup_last'] = datetime.now().isoformat()
+            self.save_settings(settings)
+        self._refresh_backup_status_label()
+
+        if not silent:
+            if errors:
+                messagebox.showerror(self.tr("common.error"),
+                                    self.tr("backup.now_error", error="\n".join(errors)), parent=self.root)
+            elif made_any:
+                messagebox.showinfo(self.tr("common.success"), self.tr("backup.now_success"), parent=self.root)
+
+        return made_any
+
+    def _do_restore_backup(self):
+        """Восстановить БД и настройки из выбранного .zip-бэкапа."""
+        settings = self.load_settings()
+        folder = settings.get('backup_folder') or LOCAL_BACKUP_DIR
+
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title=self.tr("backup.restore"),
+            initialdir=folder,
+            filetypes=[("ZIP", "*.zip")]
+        )
+        if not path:
+            return
+
+        if not messagebox.askyesno(self.tr("common.attention"), self.tr("backup.restore_confirm_body"), parent=self.root):
+            return
+
+        try:
+            backup_module.restore_backup(self.db, path, SETTINGS_FILE, SPARE_PARTS_FILE)
+        except Exception as e:
+            messagebox.showerror(self.tr("common.error"), self.tr("backup.restore_error", error=str(e)), parent=self.root)
+            return
+
+        messagebox.showinfo(self.tr("common.success"), self.tr("backup.restore_success"), parent=self.root)
+        self.restart_application()
+
+    def setup_about_tab(self):
+        """Настройка вкладки "О программе" """
+        main_frame = ctk.CTkFrame(self.about_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        center_container = ctk.CTkFrame(main_frame)
+        center_container.pack(anchor=tk.CENTER, pady=20, padx=20)
+
+        try:
+            from updater import APP_VERSION as _app_version
+        except Exception:
+            _app_version = "?"
+
+        ctk.CTkLabel(center_container, text=self.tr("about.title"),
+                    font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(10, 4))
+
+        ctk.CTkLabel(center_container, text=self.tr("about.version", version=_app_version),
+                    font=ctk.CTkFont(size=13), text_color="gray").pack(pady=(0, 16))
+
+        ctk.CTkLabel(center_container, text=self.tr("about.description"),
+                    font=ctk.CTkFont(size=13), justify="left", wraplength=420).pack(pady=(0, 20))
+
+        ctk.CTkLabel(center_container, text=self.tr("about.contacts_title"),
+                    font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(0, 8))
+
+        ctk.CTkLabel(center_container, text=self.tr("about.telegram"),
+                    font=ctk.CTkFont(size=13)).pack(pady=(0, 2))
+
+        ctk.CTkLabel(center_container, text=self.tr("about.email"),
+                    font=ctk.CTkFont(size=13)).pack(pady=(0, 10))
+
     # ===== ВКЛАДКА РАСХОДОВ =====
 
     def setup_expenses_tab(self):
@@ -4943,7 +5209,7 @@ class AutoServiceApp:
                      width=120).pack(side=tk.LEFT, padx=5)
 
         # Поле поиска
-        ctk.CTkLabel(filter_frame, text="  🔍").pack(side=tk.LEFT, padx=(20, 0))
+        ctk.CTkLabel(filter_frame, text=self.tr("bookings.search_label")).pack(side=tk.LEFT, padx=(20, 0))
         self.bookings_search_entry = ctk.CTkEntry(filter_frame,
                                                    placeholder_text=self.tr("bookings.search_placeholder"),
                                                    placeholder_text_color="gray", width=180)
@@ -6257,7 +6523,7 @@ class AutoServiceApp:
 
         dialog = ctk.CTkToplevel(self.root)
         dialog.title(self.tr("bookings.edit_client_title"))
-        dialog.geometry("360x290")
+        dialog.geometry("360x330")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(False, False)
@@ -6276,8 +6542,8 @@ class AutoServiceApp:
         ctk.CTkLabel(form, text=self.tr("bookings.client_telegram_label"), anchor="w").pack(fill="x", pady=(0, 2))
         telegram_var = tk.StringVar(value=client.get("tg_username") or "")
         ctk.CTkEntry(form, textvariable=telegram_var, placeholder_text="username", height=36).pack(fill="x", pady=(0, 4))
-        ctk.CTkLabel(form, text=self.tr("bookings.client_telegram_hint"), anchor="w",
-                     font=("Segoe UI", 10), text_color="gray").pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(form, text=self.tr("bookings.client_telegram_hint"), anchor="w", justify="left",
+                     font=("Segoe UI", 10), text_color="gray", wraplength=300).pack(fill="x", pady=(0, 12))
 
         def on_save():
             self.db.update_client(client_id, name_var.get().strip(), phone_var.get().strip(), telegram_var.get().strip())
@@ -6666,23 +6932,70 @@ def main():
         if user is None:
             sys.exit(0)
 
-        # 3. Проверка обновлений (фоновая, не блокирует вход)
+        # 3. Проверка обновлений — периодическая, работает всё время,
+        # пока приложение открыто (не только при входе).
         try:
-            from updater import check_for_update, show_update_dialog, apply_update
-            _upd = check_for_update()
-        except Exception:
-            _upd = None
+            from updater import check_for_update, show_update_dialog, apply_update, _log_error
+            _updater_available = True
+        except Exception as _upd_import_err:
+            _updater_available = False
+            try:
+                import traceback as _tb
+                _log_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+                with open(os.path.join(_log_dir, "updater_debug.log"), "a", encoding="utf-8") as _f:
+                    _f.write("\n[main] импорт updater.py не удался:\n")
+                    _f.write("".join(_tb.format_exception(type(_upd_import_err), _upd_import_err, _upd_import_err.__traceback__)))
+            except Exception:
+                pass
 
         # 4. Основное приложение
         root = ctk.CTk()
         app = AutoServiceApp(root, current_user=user)
 
-        # Показываем диалог обновления после открытия окна
-        if _upd:
-            def _offer_update():
-                if show_update_dialog(_upd, parent=root):
-                    apply_update(_upd["download_url"], parent_widget=root)
-            root.after(800, _offer_update)
+        if _updater_available:
+            # ВРЕМЕННО: 5 минут — для проверки, что механизм работает.
+            # После теста поставить обратно 6 часов: 6 * 60 * 60 * 1000
+            UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
+
+            def _check_and_offer_update():
+                try:
+                    upd = check_for_update()
+                    if upd:
+                        if show_update_dialog(upd, parent=root):
+                            apply_update(upd["download_url"], parent_widget=root)
+                except Exception as e:
+                    _log_error("_check_and_offer_update", e)
+                finally:
+                    root.after(UPDATE_CHECK_INTERVAL_MS, _check_and_offer_update)
+
+            root.after(800, _check_and_offer_update)
+
+        # 5. Автоматический бэкап -- проверяем раз в 30 минут, реально
+        # бэкапим не чаще раза в сутки (см. backup.py и вкладку настроек
+        # "Резервные копии"). Локальная копия в папке Backup рядом с
+        # программой делается ВСЕГДА, без какой-либо настройки; облачная
+        # папка (Google Диск/Яндекс.Диск) -- дополнительно, только если
+        # включена галочка "автобэкап" и папка указана.
+        BACKUP_CHECK_INTERVAL_MS = 30 * 60 * 1000
+
+        def _auto_backup_tick():
+            try:
+                settings = app.load_settings()
+                last = settings.get('backup_last')
+                need_backup = True
+                if last:
+                    try:
+                        need_backup = (datetime.now() - datetime.fromisoformat(last)) >= timedelta(hours=24)
+                    except Exception:
+                        need_backup = True
+                if need_backup:
+                    app._do_backup_now(silent=True, include_cloud=settings.get('backup_auto', True))
+            except Exception:
+                pass
+            finally:
+                root.after(BACKUP_CHECK_INTERVAL_MS, _auto_backup_tick)
+
+        root.after(10_000, _auto_backup_tick)
 
         root.mainloop()
 

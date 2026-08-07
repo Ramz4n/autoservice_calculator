@@ -1,39 +1,130 @@
 # -*- coding: utf-8 -*-
 """
-Модуль авто-обновления приложения.
+Модуль авто-обновления приложения через GitHub Releases.
 
-Формат JSON на сервере (добавить в тот же jsonbin):
-{
-  "licenses": { ... },
-  "update": {
-    "latest_version": "1.0.1",
-    "min_version":    "1.0.0",
-    "download_url":   "https://ваш-хостинг/app.exe",
-    "changelog":      "— Исправлены ошибки\n— Новые функции"
-  }
-}
+Источник обновлений — GitHub API "latest release" публичного репозитория:
+    https://api.github.com/repos/<GITHUB_REPO>/releases/latest
+
+Репозиторий ДОЛЖЕН быть публичным — иначе API отдаёт 404 без токена.
+Если исходники должны оставаться закрытыми, заведите отдельный пустой
+публичный репозиторий только для релизов (например "autoservice-releases")
+и публикуйте .exe туда, а не в основной репозиторий с кодом.
+
+Сборка -- onedir (см. autoservice_calculator.spec + build.bat): .exe -- это
+только лаунчер, реальный рантайм и зависимости лежат рядом в _internal/,
+плюс config/ с данными и main/ (бэкенд). Поэтому в релиз заливается .zip
+ВСЕЙ папки dist\autoservice_calculator, а не один .exe -- иначе после
+подмены только exe версии разъедутся с _internal/config и приложение не
+запустится.
+
+ВАЖНО: dist\autoservice_calculator\config\.env и \main\.env содержат
+боевые секреты (пароль MySQL, токен Telegram-бота, ключи SMSC) -- их
+НЕЛЬЗЯ заливать в архив на публичный GitHub. Поэтому архив собирается
+НЕ вручную, а через package_release.bat в корне проекта -- он копирует
+сборку во временную папку, вычищает .env/license.key/license_cache.json
+и уже из этой чистой копии делает release\autoservice_calculator.zip.
+
+Версия приложения (APP_VERSION) больше НЕ прописывается руками в этом
+файле -- она читается из файла VERSION в корне проекта. package_release.bat
+сам увеличивает patch-число в VERSION при каждой упаковке релиза (чтобы
+никто не забыл поднять версию, из-за чего свежая сборка продолжала бы
+считать себя старой и зацикливала предложение обновиться) и кладёт этот
+файл рядом с exe внутри архива.
+
+Как выпустить обновление:
+  1. Запустить package_release.bat -- он сам:
+       - увеличит patch-версию в файле VERSION (например 1.0.1 → 1.0.2),
+       - соберёт актуальный dist\autoservice_calculator (запускает build.bat),
+       - упакует его в release\autoservice_calculator_v<версия>.zip
+         (уже без .env/license.key/license_cache.json),
+       - выведет в консоль версию и тег, который нужно создать на GitHub.
+  2. На GitHub → Releases → Draft a new release:
+       - тег: "v1.0.2"              → обычное необязательное обновление
+               "v1.0.2-force"       → обязательное (нельзя отказаться,
+                                       применяется ко всем версиям ниже 1.0.2)
+         (точный тег package_release.bat печатает в конце -- просто скопировать)
+       - приложить release\autoservice_calculator_v1.0.2.zip как asset
+       - в описании релиза — текст для пользователя (changelog)
+  3. Опубликовать релиз — всё, клиенты подхватят это в течение
+     UPDATE_CHECK_INTERVAL_MS (см. main() в autoservice_calculator.py).
+
+При установке update.zip разворачивается поверх текущей папки; личные
+license.key, license_cache.json, .env, settings.json (% мастера) и
+spare_parts.txt (список запчастей) клиента при этом не трогаются.
 
 Логика:
-  - версия клиента < min_version  → принудительное обновление (нельзя отказаться)
-  - версия клиента < latest_version → предлагает обновление (Да / Нет)
+  - тег без "-force"  и версия клиента < версии тега → предложение (Да / Нет)
+  - тег с "-force"    и версия клиента < версии тега → обязательное обновление
   - иначе → ничего не происходит
-
-ВАЖНО: меняй APP_VERSION при каждой новой сборке PyInstaller.
 """
 
 import os
 import sys
+import shutil
 import subprocess
 import threading
+import traceback
+import zipfile
 import tkinter as tk
+from datetime import datetime
 from tkinter import messagebox
 
 import requests
 
+
+def _read_app_version() -> str:
+    """
+    Версия приложения читается из файла VERSION -- рядом с exe в собранной
+    версии (кладёт package_release.bat) или в корне репозитория при запуске
+    из исходников. Так version не нужно руками менять в коде: забыть об
+    этом и оставить приложение считать себя старой версией уже нельзя.
+    """
+    exe_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+    for path in (
+        os.path.join(exe_dir, "VERSION"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION"),
+    ):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                v = f.read().strip()
+                if v:
+                    return v
+        except Exception:
+            continue
+    return "0.0.0"
+
+
 # ─────────────────────────────────────────
-# Текущая версия — меняй при каждом релизе
-APP_VERSION = "1.0.0"
+APP_VERSION = _read_app_version()
+
+# Публичный репозиторий с релизами: "владелец/репозиторий"
+GITHUB_REPO = "Ramz4n/auto_releases"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 # ─────────────────────────────────────────
+
+
+def _log_path() -> str:
+    return os.path.join(os.path.dirname(_current_exe()), "updater_debug.log")
+
+
+def _log(msg: str) -> None:
+    """Пишет строку в updater_debug.log рядом с exe -- обновление не должно
+    шуметь окнами при каждой фоновой проверке, но причина сбоя/пропуска
+    должна быть видна, если что-то не работает."""
+    try:
+        with open(_log_path(), "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+    except Exception:
+        pass
+
+
+def _log_error(context: str, exc: Exception) -> None:
+    try:
+        with open(_log_path(), "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] {context}\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
 
 
 def _parse_version(v: str) -> tuple:
@@ -44,55 +135,102 @@ def _parse_version(v: str) -> tuple:
         return (0,)
 
 
-def check_for_update() -> dict | None:
+def _no_proxy_session() -> requests.Session:
     """
-    Проверяет наличие обновления через jsonbin.
+    Сессия requests, полностью игнорирующая системный прокси (в т.ч. на
+    редиректах, например с api.github.com на objects.githubusercontent.com).
+    trust_env=False -- иначе requests подхватывает системный/переменные
+    окружения прокси (в т.ч. SOCKS, для которого может не быть установлен
+    PySocks) и падает с "Missing dependencies for SOCKS support"; простой
+    proxies={"https": None} на верхнем запросе на это не влияет, потому что
+    редирект пересобирает прокси заново.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    return session
+
+
+def check_for_update(silent: bool = True) -> dict | None:
+    """
+    Проверяет наличие обновления через GitHub Releases API (последний релиз
+    публичного репозитория GITHUB_REPO).
     Возвращает dict с ключами:
         latest_version, min_version, download_url, changelog, forced
-    или None если обновлений нет / сервер недоступен.
+    или None если обновлений нет (текущая версия уже последняя).
+
+    silent=True  (фоновая периодическая проверка) — любая ошибка (нет сети,
+        GitHub недоступен, битый релиз) молча логируется в
+        updater_debug.log и трактуется как «обновлений нет».
+    silent=False (ручная проверка по кнопке) — в этих же случаях бросает
+        исключение с понятной причиной, чтобы её можно было показать
+        пользователю и понять, почему автообновление не сработало.
     """
     try:
-        from license import LICENSE_URL, API_KEY
-        r = requests.get(LICENSE_URL, headers={"X-Access-Key": API_KEY}, timeout=5)
+        r = _no_proxy_session().get(
+            GITHUB_API_URL,
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=5,
+        )
         if r.status_code != 200:
+            msg = f"GitHub API вернул {r.status_code}, тело: {r.text[:300]}"
+            _log(f"check_for_update: {msg}")
+            if not silent:
+                raise RuntimeError(msg)
             return None
-        body = r.json()
-        data = body.get("record", body)
-        update = data.get("update")
-        if not update:
+        data = r.json()
+
+        tag = (data.get("tag_name") or "").strip()
+        if not tag:
+            _log("check_for_update: в latest-релизе нет tag_name")
+            if not silent:
+                raise RuntimeError("В последнем релизе на GitHub не указан тег версии")
             return None
 
-        latest  = update.get("latest_version", "")
-        minimum = update.get("min_version", "0.0.0")
-        url     = update.get("download_url", "")
+        # "v1.0.1-force" → обязательное обновление, "v1.0.1" → обычное
+        forced = tag.endswith("-force")
+        version_str = tag[:-len("-force")] if forced else tag
+        version_str = version_str.lstrip("vV")
+        if not version_str:
+            _log(f"check_for_update: не удалось распарсить версию из тега {tag!r}")
+            if not silent:
+                raise RuntimeError(f"Не удалось распознать версию из тега {tag!r}")
+            return None
 
-        if not latest or not url:
+        # Сборка --onedir (exe + _internal + config рядом) — в релизе должен
+        # лежать .zip всей папки dist\autoservice_calculator, а не голый .exe.
+        download_url = None
+        for asset in data.get("assets", []):
+            name = (asset.get("name") or "").lower()
+            if name.endswith(".zip"):
+                download_url = asset.get("browser_download_url")
+                break
+        if not download_url:
+            asset_names = [a.get("name") for a in data.get("assets", [])]
+            _log(f"check_for_update: в релизе {tag!r} нет .zip среди asset'ов: {asset_names}")
+            if not silent:
+                raise RuntimeError(f"В релизе {tag!r} на GitHub не приложен .zip с обновлением")
             return None
 
         current = _parse_version(APP_VERSION)
+        latest  = _parse_version(version_str)
 
-        # Версия ниже минимально допустимой — принудительное обновление
-        if current < _parse_version(minimum):
-            return {
-                "latest_version": latest,
-                "min_version":    minimum,
-                "download_url":   url,
-                "changelog":      update.get("changelog", ""),
-                "forced":         True,
-            }
+        if current >= latest:
+            _log(f"check_for_update: тег {version_str} <= текущей версии {APP_VERSION}, обновление не нужно")
+            return None
 
-        # Есть новая версия — обычное предложение
-        if current < _parse_version(latest):
-            return {
-                "latest_version": latest,
-                "min_version":    minimum,
-                "download_url":   url,
-                "changelog":      update.get("changelog", ""),
-                "forced":         False,
-            }
+        _log(f"check_for_update: найдено обновление {APP_VERSION} → {version_str} (forced={forced})")
+        return {
+            "latest_version": version_str,
+            "min_version":    version_str if forced else "0.0.0",
+            "download_url":   download_url,
+            "changelog":      data.get("body") or "",
+            "forced":         forced,
+        }
 
-    except Exception:
-        pass
+    except Exception as e:
+        _log_error("check_for_update: исключение", e)
+        if not silent:
+            raise
     return None
 
 
@@ -178,8 +316,12 @@ def _current_exe() -> str:
 
 def apply_update(download_url: str, parent_widget=None) -> None:
     """
-    Скачивает новый .exe и запускает bat-установщик.
-    После запуска bat — завершает текущий процесс.
+    Скачивает архив новой версии (.zip всей папки onedir-сборки),
+    распаковывает во временную папку и запускает bat-установщик, который
+    после закрытия приложения разворачивает архив поверх текущей установки
+    (не трогая license.key, license_cache.json, .env, settings.json и
+    spare_parts.txt клиента) и перезапускает программу. После запуска bat —
+    завершает текущий процесс.
     """
     import customtkinter as ctk
 
@@ -207,18 +349,26 @@ def apply_update(download_url: str, parent_widget=None) -> None:
 
     def do_download():
         try:
-            exe_path = _current_exe()
-            exe_dir  = os.path.dirname(exe_path)
-            new_exe  = os.path.join(exe_dir, "_update_new.exe")
-            bat_path = os.path.join(exe_dir, "_updater.bat")
+            exe_path    = _current_exe()
+            exe_name    = os.path.basename(exe_path)
+            install_dir = os.path.dirname(exe_path)
 
-            r = requests.get(download_url, stream=True, timeout=60)
+            tmp_dir = os.path.join(os.environ.get("TEMP", install_dir), "autoservice_update")
+            if os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            zip_path    = os.path.join(tmp_dir, "update.zip")
+            extract_dir = os.path.join(tmp_dir, "extracted")
+            bat_path    = os.path.join(install_dir, "_updater.bat")
+
+            r = _no_proxy_session().get(download_url, stream=True, timeout=60)
             r.raise_for_status()
 
             total      = int(r.headers.get("Content-Length", 0))
             downloaded = 0
 
-            with open(new_exe, "wb") as f:
+            with open(zip_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=65536):
                     if chunk:
                         f.write(chunk)
@@ -230,12 +380,35 @@ def apply_update(download_url: str, parent_widget=None) -> None:
                             text=f"{m:.1f} МБ" + (f" / {total/1024/1024:.1f} МБ" if total else "")
                         ))
 
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(extract_dir)
+
+            # В архиве может быть либо содержимое папки сразу, либо оно
+            # обёрнуто в одну вложенную папку (если архивировали руками
+            # через "Отправить -> сжатая папка") -- ищем, где реально exe.
+            new_root = extract_dir
+            if not os.path.exists(os.path.join(new_root, exe_name)):
+                for entry in os.listdir(extract_dir):
+                    candidate = os.path.join(extract_dir, entry)
+                    if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, exe_name)):
+                        new_root = candidate
+                        break
+
+            # /MIR -- зеркалирует папку (обновляет и удаляет лишнее из старой
+            # версии), /XF -- не трогает то, что принадлежит этой установке
+            # клиента, а не релизу: лицензию, кэш лицензии, .env с секретами,
+            # локальные настройки (settings.json, spare_parts.txt) и сам
+            # bat-скрипт (иначе он удалит себя раньше времени). /XD Backup --
+            # не трогает папку с локальными резервными копиями клиента
+            # (см. backup.py) -- без этого /MIR бы стёр её как "лишнее".
             bat_content = (
                 "@echo off\n"
                 "timeout /t 2 /nobreak >nul\n"
-                f'copy /y "{new_exe}" "{exe_path}"\n'
+                f'robocopy "{new_root}" "{install_dir}" /MIR '
+                f'/XD Backup '
+                f'/XF license.key license_cache.json .env settings.json spare_parts.txt _updater.bat >nul\n'
+                f'rmdir /S /Q "{tmp_dir}"\n'
                 f'start "" "{exe_path}"\n'
-                f'del "{new_exe}"\n'
                 '(goto) 2>nul & del "%~f0"\n'
             )
             with open(bat_path, "w", encoding="cp866") as f:
@@ -244,6 +417,7 @@ def apply_update(download_url: str, parent_widget=None) -> None:
             win.after(0, _launch_and_exit, bat_path)
 
         except Exception as e:
+            _log_error("apply_update: исключение", e)
             error_holder[0] = str(e)
             win.after(0, win.destroy)
 
