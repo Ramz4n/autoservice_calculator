@@ -688,6 +688,76 @@ class Database:
         conn.close()
         return income
 
+    # --- Методы для статистики ---
+
+    def get_car_brand_stats(self, date_from, date_to):
+        """Получить статистику визитов и выручки по маркам авто за период"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT cc.car_brand,
+                   COUNT(wk.id) as visit_count,
+                   COUNT(DISTINCT cc.id) as car_count,
+                   COALESCE(SUM(wk.amount), 0) as total_amount
+            FROM works wk
+            JOIN client_cars cc ON wk.car_id = cc.id
+            WHERE wk.work_date BETWEEN %s AND %s AND cc.car_brand IS NOT NULL AND cc.car_brand <> ''
+            GROUP BY cc.car_brand
+            ORDER BY visit_count DESC
+        ''', (date_from, date_to))
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def get_top_clients_by_period(self, date_from, date_to):
+        """Получить статистику по клиентам (визиты и сумма) за период"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT cl.full_name, cl.phone,
+                   COUNT(wk.id) as visit_count,
+                   COALESCE(SUM(wk.amount), 0) as total_amount
+            FROM works wk
+            JOIN client_cars cc ON wk.car_id = cc.id
+            JOIN clients cl ON cc.client_id = cl.id
+            WHERE wk.work_date BETWEEN %s AND %s
+            GROUP BY cl.id
+            ORDER BY total_amount DESC
+        ''', (date_from, date_to))
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def get_works_for_period(self, date_from, date_to):
+        """Получить все работы за период (для разбивки на позиции и статистики по видам работ)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, description, amount, items_json
+            FROM works
+            WHERE work_date BETWEEN %s AND %s
+        ''', (date_from, date_to))
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def get_monthly_stats(self, date_from, date_to):
+        """Получить динамику визитов и выручки по месяцам за период"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT DATE_FORMAT(wk.work_date, '%%Y-%%m') as ym,
+                   COUNT(wk.id) as visit_count,
+                   COALESCE(SUM(wk.amount), 0) as total_amount
+            FROM works wk
+            WHERE wk.work_date BETWEEN %s AND %s
+            GROUP BY ym
+            ORDER BY ym
+        ''', (date_from, date_to))
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
     # --- Методы для работы с запчастями ---
 
     def add_parts(self, work_id, parts_list):
