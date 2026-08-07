@@ -6,12 +6,14 @@ cd /d "%~dp0"
 set "OUT=dist\autoservice_calculator"
 set "BACKUP=%TEMP%\autoservice_build_backup"
 
-rem PyInstaller wipes %OUT% on every build, but main\ and .env only
-rem live inside %OUT% (not tracked in the project root) -- stash them first.
+rem PyInstaller wipes %OUT% on every build, but main\, .env and Backup\
+rem (local test backups, see backup.py) only live inside %OUT% (not tracked
+rem in the project root) -- stash them first.
 if exist "%BACKUP%" rmdir /S /Q "%BACKUP%"
 mkdir "%BACKUP%"
 if exist "%OUT%\main" xcopy /E /I /Y "%OUT%\main" "%BACKUP%\main" >nul
 if exist "%OUT%\.env" copy /Y "%OUT%\.env" "%BACKUP%\.env" >nul
+if exist "%OUT%\Backup" xcopy /E /I /Y "%OUT%\Backup" "%BACKUP%\Backup" >nul
 
 echo === Building autoservice_calculator (onedir, via .spec) ===
 call .venv\Scripts\activate
@@ -26,6 +28,9 @@ echo === Restoring runtime files next to the exe ===
 if exist config (
     xcopy /E /I /Y config "%OUT%\config" >nul
 )
+if exist VERSION (
+    copy /Y VERSION "%OUT%\VERSION" >nul
+)
 if exist license.key (
     copy /Y license.key "%OUT%\license.key" >nul
 )
@@ -37,6 +42,9 @@ if exist "%BACKUP%\main" (
 )
 if exist "%BACKUP%\.env" (
     copy /Y "%BACKUP%\.env" "%OUT%\.env" >nul
+)
+if exist "%BACKUP%\Backup" (
+    xcopy /E /I /Y "%BACKUP%\Backup" "%OUT%\Backup" >nul
 )
 
 echo.

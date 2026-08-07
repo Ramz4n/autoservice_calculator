@@ -9,5 +9,7 @@
     "max_bookings_per_user": 2,
     "master_percent": 40.0,
     "language": "ru",
-    "last_username": "admin"
+    "last_username": "admin",
+    "backup_folder": "C:/Users/RAMZ/PycharmProjects/Alexan/Backup",
+    "backup_last": "2026-08-07T00:35:33.790659"
 }

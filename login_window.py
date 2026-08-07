@@ -106,6 +106,16 @@ class LoginWindow(ctk.CTk):
         )
         self.lang_menu.place(relx=1.0, x=-14, y=14, anchor="ne")
 
+        # Версия приложения (левый нижний угол)
+        try:
+            from updater import APP_VERSION as _app_version
+        except Exception:
+            _app_version = "?"
+        ctk.CTkLabel(
+            self, text=f"v{_app_version}",
+            font=ctk.CTkFont(size=10), text_color="gray"
+        ).place(x=10, rely=1.0, y=-8, anchor="sw")
+
         # Заголовок
         ctk.CTkLabel(
             self, text=self.tr("login.brand"),
