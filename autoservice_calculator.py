@@ -376,7 +376,7 @@ class AutoServiceApp:
             (self.tr("menu.add_work"), "works"),
             (self.tr("menu.bookings"), "bookings"),
             (self.tr("menu.warehouse"), "warehouse"),
-            *([(self.tr("menu.reports"), "reports"), (self.tr("menu.expenses"), "expenses")] if _is_admin else []),
+            *([(self.tr("menu.reports"), "reports"), (self.tr("menu.expenses"), "expenses"), (self.tr("menu.statistics"), "statistics")] if _is_admin else []),
             #("Поиск деталей", "parts_search"),
             (self.tr("menu.settings"), "settings")
         ]
@@ -467,6 +467,11 @@ class AutoServiceApp:
         self.expenses_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.content_frames["expenses"] = self.expenses_frame
         self.setup_expenses_tab()
+
+        # Вкладка статистики
+        self.statistics_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["statistics"] = self.statistics_frame
+        self.setup_statistics_tab()
 
         # Вкладка поиска деталей
         self.parts_search_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -570,6 +575,9 @@ class AutoServiceApp:
         elif current_tab == "warehouse":
             # Автоматически обновляем список запчастей на складе
             self.refresh_warehouse()
+        elif current_tab == "statistics":
+            # Автоматически обновляем статистику при переключении на вкладку
+            self.generate_statistics(show_empty_message=False)
 
     def format_currency(self, amount):
         """Форматирование суммы в формат: 1.000.000 руб."""
@@ -4503,6 +4511,305 @@ class AutoServiceApp:
             messagebox.showinfo(self.tr("common.success"), self.tr("finances.msg_deleted", type=type_text))
             self.refresh_expenses()
 
+    # ===== ВКЛАДКА СТАТИСТИКИ =====
+
+    def _setup_tree_sorting(self, tree, rows_attr, key_funcs, redraw_func):
+        """Делает заголовки Treeview кликабельными для сортировки (по возрастанию/убыванию).
+        rows_attr — имя атрибута self со списком строк-кортежей (сырые данные).
+        key_funcs — {имя_колонки: функция ключа сортировки}.
+        redraw_func — функция(rows), которая очищает и заново рисует дерево."""
+        state = {"col": None, "reverse": False}
+
+        def handler(col):
+            rows = getattr(self, rows_attr)
+            reverse = state["col"] == col and not state["reverse"]
+            rows.sort(key=key_funcs[col], reverse=reverse)
+            state["col"], state["reverse"] = col, reverse
+            redraw_func(rows)
+
+        for col, key_func in key_funcs.items():
+            tree.heading(col, command=lambda c=col: handler(c))
+
+    def setup_statistics_tab(self):
+        """Настройка вкладки статистики: марки авто, топ клиентов, популярные работы, динамика по месяцам"""
+        main_frame = ctk.CTkScrollableFrame(self.statistics_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Выбор периода
+        period_frame = ctk.CTkFrame(main_frame)
+        period_frame.pack(fill=tk.X, padx=10, pady=10)
+        ctk.CTkLabel(
+            period_frame,
+            text=self.tr("statistics.title_period"),
+            font=("Segoe UI", 20, "bold"),
+            anchor="center"
+        ).pack(fill=tk.X, pady=(0, 10))
+
+        dates_frame = ctk.CTkFrame(period_frame)
+        dates_frame.pack()
+
+        ctk.CTkLabel(dates_frame, text=self.tr("statistics.date_from_label")).pack(side=tk.LEFT, padx=5)
+        self.stats_date_from = DateEntry(dates_frame, width=15, date_pattern='dd.mm.yyyy', locale='ru_RU')
+        self.stats_date_from.pack(side=tk.LEFT, padx=5)
+
+        ctk.CTkLabel(dates_frame, text=self.tr("statistics.date_to_label")).pack(side=tk.LEFT, padx=15)
+        self.stats_date_to = DateEntry(dates_frame, width=15, date_pattern='dd.mm.yyyy', locale='ru_RU')
+        self.stats_date_to.pack(side=tk.LEFT, padx=5)
+
+        ctk.CTkButton(dates_frame, text=self.tr("statistics.generate_btn"),
+                      command=self.generate_statistics).pack(side=tk.LEFT, padx=20)
+
+        self.stats_summary_label = ctk.CTkLabel(period_frame, text="", font=("Segoe UI", 12, "bold"),
+                                                  text_color=("gray20", "gray80"))
+        self.stats_summary_label.pack(fill=tk.X, pady=(12, 0))
+
+        # --- Секция: марки авто ---
+        brands_frame = ctk.CTkFrame(main_frame)
+        brands_frame.pack(fill=tk.X, padx=10, pady=10)
+        ctk.CTkLabel(brands_frame, text="🚗  " + self.tr("statistics.brands_title"),
+                     font=("Segoe UI", 16, "bold")).pack(fill=tk.X, padx=10, pady=(10, 8))
+
+        brand_table = ctk.CTkFrame(brands_frame, fg_color="transparent")
+        brand_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        brand_columns = ("brand", "visits", "cars", "total", "avg")
+        self.brand_stats_tree = ttk.Treeview(brand_table, columns=brand_columns, show="headings", height=10)
+        self.brand_stats_tree.heading("brand", text=self.tr("statistics.col_brand"))
+        self.brand_stats_tree.heading("visits", text=self.tr("statistics.col_visit_count"))
+        self.brand_stats_tree.heading("cars", text=self.tr("statistics.col_car_count"))
+        self.brand_stats_tree.heading("total", text=self.tr("statistics.col_total_amount"))
+        self.brand_stats_tree.heading("avg", text=self.tr("statistics.col_avg_check"))
+        self.brand_stats_tree.column("brand", width=220, anchor=tk.W)
+        self.brand_stats_tree.column("visits", width=100, anchor=tk.CENTER)
+        self.brand_stats_tree.column("cars", width=100, anchor=tk.CENTER)
+        self.brand_stats_tree.column("total", width=150, anchor=tk.CENTER)
+        self.brand_stats_tree.column("avg", width=150, anchor=tk.CENTER)
+        brand_scroll = ttk.Scrollbar(brand_table, orient=tk.VERTICAL, command=self.brand_stats_tree.yview)
+        self.brand_stats_tree.configure(yscrollcommand=brand_scroll.set)
+        self.brand_stats_tree.tag_configure('oddrow', background='#ffffff')
+        self.brand_stats_tree.tag_configure('evenrow', background='#f0f0f0')
+        self.brand_stats_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        brand_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._stats_brand_rows = []
+
+        def redraw_brands(rows):
+            for item in self.brand_stats_tree.get_children():
+                self.brand_stats_tree.delete(item)
+            for i, (brand, visits, cars, total) in enumerate(rows):
+                avg = total / visits if visits else 0
+                tag = 'oddrow' if i % 2 == 0 else 'evenrow'
+                self.brand_stats_tree.insert("", tk.END, values=(
+                    brand, visits, cars, self.format_currency(total), self.format_currency(avg)
+                ), tags=(tag,))
+
+        self._redraw_stats_brands = redraw_brands
+        self._setup_tree_sorting(self.brand_stats_tree, "_stats_brand_rows", {
+            "brand": lambda r: r[0].lower(),
+            "visits": lambda r: r[1],
+            "cars": lambda r: r[2],
+            "total": lambda r: r[3],
+            "avg": lambda r: (r[3] / r[1] if r[1] else 0),
+        }, redraw_brands)
+
+        # --- Секция: топ клиентов ---
+        clients_frame = ctk.CTkFrame(main_frame)
+        clients_frame.pack(fill=tk.X, padx=10, pady=10)
+        ctk.CTkLabel(clients_frame, text="👤  " + self.tr("statistics.clients_title"),
+                     font=("Segoe UI", 16, "bold")).pack(fill=tk.X, padx=10, pady=(10, 8))
+
+        clients_table = ctk.CTkFrame(clients_frame, fg_color="transparent")
+        clients_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        client_columns = ("client", "phone", "visits", "total", "avg")
+        self.client_stats_tree = ttk.Treeview(clients_table, columns=client_columns, show="headings", height=10)
+        self.client_stats_tree.heading("client", text=self.tr("statistics.col_client"))
+        self.client_stats_tree.heading("phone", text=self.tr("statistics.col_phone"))
+        self.client_stats_tree.heading("visits", text=self.tr("statistics.col_visit_count"))
+        self.client_stats_tree.heading("total", text=self.tr("statistics.col_total_amount"))
+        self.client_stats_tree.heading("avg", text=self.tr("statistics.col_avg_check"))
+        self.client_stats_tree.column("client", width=200, anchor=tk.W)
+        self.client_stats_tree.column("phone", width=140, anchor=tk.CENTER)
+        self.client_stats_tree.column("visits", width=100, anchor=tk.CENTER)
+        self.client_stats_tree.column("total", width=150, anchor=tk.CENTER)
+        self.client_stats_tree.column("avg", width=150, anchor=tk.CENTER)
+        client_scroll = ttk.Scrollbar(clients_table, orient=tk.VERTICAL, command=self.client_stats_tree.yview)
+        self.client_stats_tree.configure(yscrollcommand=client_scroll.set)
+        self.client_stats_tree.tag_configure('oddrow', background='#ffffff')
+        self.client_stats_tree.tag_configure('evenrow', background='#f0f0f0')
+        self.client_stats_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        client_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._stats_client_rows = []
+
+        def redraw_clients(rows):
+            for item in self.client_stats_tree.get_children():
+                self.client_stats_tree.delete(item)
+            for i, (name, phone, visits, total) in enumerate(rows):
+                avg = total / visits if visits else 0
+                tag = 'oddrow' if i % 2 == 0 else 'evenrow'
+                self.client_stats_tree.insert("", tk.END, values=(
+                    name or "-", phone or "-", visits, self.format_currency(total), self.format_currency(avg)
+                ), tags=(tag,))
+
+        self._redraw_stats_clients = redraw_clients
+        self._setup_tree_sorting(self.client_stats_tree, "_stats_client_rows", {
+            "client": lambda r: (r[0] or "").lower(),
+            "phone": lambda r: (r[1] or ""),
+            "visits": lambda r: r[2],
+            "total": lambda r: r[3],
+            "avg": lambda r: (r[3] / r[2] if r[2] else 0),
+        }, redraw_clients)
+
+        # --- Секция: популярные виды работ ---
+        works_frame = ctk.CTkFrame(main_frame)
+        works_frame.pack(fill=tk.X, padx=10, pady=10)
+        ctk.CTkLabel(works_frame, text="📋  " + self.tr("statistics.works_title"),
+                     font=("Segoe UI", 16, "bold")).pack(fill=tk.X, padx=10, pady=(10, 8))
+
+        works_table = ctk.CTkFrame(works_frame, fg_color="transparent")
+        works_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        work_columns = ("work", "count", "total", "avg")
+        self.work_stats_tree = ttk.Treeview(works_table, columns=work_columns, show="headings", height=10)
+        self.work_stats_tree.heading("work", text=self.tr("statistics.col_work_name"))
+        self.work_stats_tree.heading("count", text=self.tr("statistics.col_count"))
+        self.work_stats_tree.heading("total", text=self.tr("statistics.col_total_amount"))
+        self.work_stats_tree.heading("avg", text=self.tr("statistics.col_avg_check"))
+        self.work_stats_tree.column("work", width=300, anchor=tk.W)
+        self.work_stats_tree.column("count", width=120, anchor=tk.CENTER)
+        self.work_stats_tree.column("total", width=150, anchor=tk.CENTER)
+        self.work_stats_tree.column("avg", width=150, anchor=tk.CENTER)
+        work_scroll = ttk.Scrollbar(works_table, orient=tk.VERTICAL, command=self.work_stats_tree.yview)
+        self.work_stats_tree.configure(yscrollcommand=work_scroll.set)
+        self.work_stats_tree.tag_configure('oddrow', background='#ffffff')
+        self.work_stats_tree.tag_configure('evenrow', background='#f0f0f0')
+        self.work_stats_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        work_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._stats_work_rows = []
+
+        def redraw_works(rows):
+            for item in self.work_stats_tree.get_children():
+                self.work_stats_tree.delete(item)
+            for i, (name, count, total) in enumerate(rows):
+                avg = total / count if count else 0
+                tag = 'oddrow' if i % 2 == 0 else 'evenrow'
+                self.work_stats_tree.insert("", tk.END, values=(
+                    name, count, self.format_currency(total), self.format_currency(avg)
+                ), tags=(tag,))
+
+        self._redraw_stats_works = redraw_works
+        self._setup_tree_sorting(self.work_stats_tree, "_stats_work_rows", {
+            "work": lambda r: r[0].lower(),
+            "count": lambda r: r[1],
+            "total": lambda r: r[2],
+            "avg": lambda r: (r[2] / r[1] if r[1] else 0),
+        }, redraw_works)
+
+        # --- Секция: динамика по месяцам ---
+        monthly_frame = ctk.CTkFrame(main_frame)
+        monthly_frame.pack(fill=tk.X, padx=10, pady=10)
+        ctk.CTkLabel(monthly_frame, text="📈  " + self.tr("statistics.monthly_title"),
+                     font=("Segoe UI", 16, "bold")).pack(fill=tk.X, padx=10, pady=(10, 8))
+
+        monthly_table = ctk.CTkFrame(monthly_frame, fg_color="transparent")
+        monthly_table.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        monthly_columns = ("month", "visits", "total", "avg")
+        self.monthly_stats_tree = ttk.Treeview(monthly_table, columns=monthly_columns, show="headings", height=8)
+        self.monthly_stats_tree.heading("month", text=self.tr("statistics.col_month"))
+        self.monthly_stats_tree.heading("visits", text=self.tr("statistics.col_visit_count"))
+        self.monthly_stats_tree.heading("total", text=self.tr("statistics.col_total_amount"))
+        self.monthly_stats_tree.heading("avg", text=self.tr("statistics.col_avg_check"))
+        self.monthly_stats_tree.column("month", width=150, anchor=tk.CENTER)
+        self.monthly_stats_tree.column("visits", width=120, anchor=tk.CENTER)
+        self.monthly_stats_tree.column("total", width=150, anchor=tk.CENTER)
+        self.monthly_stats_tree.column("avg", width=150, anchor=tk.CENTER)
+        monthly_scroll = ttk.Scrollbar(monthly_table, orient=tk.VERTICAL, command=self.monthly_stats_tree.yview)
+        self.monthly_stats_tree.configure(yscrollcommand=monthly_scroll.set)
+        self.monthly_stats_tree.tag_configure('oddrow', background='#ffffff')
+        self.monthly_stats_tree.tag_configure('evenrow', background='#f0f0f0')
+        self.monthly_stats_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        monthly_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._stats_monthly_rows = []
+
+        def redraw_monthly(rows):
+            for item in self.monthly_stats_tree.get_children():
+                self.monthly_stats_tree.delete(item)
+            for i, (ym, visits, total) in enumerate(rows):
+                avg = total / visits if visits else 0
+                try:
+                    month_label = datetime.strptime(ym, '%Y-%m').strftime('%m.%Y')
+                except (TypeError, ValueError):
+                    month_label = ym
+                tag = 'oddrow' if i % 2 == 0 else 'evenrow'
+                self.monthly_stats_tree.insert("", tk.END, values=(
+                    month_label, visits, self.format_currency(total), self.format_currency(avg)
+                ), tags=(tag,))
+
+        self._redraw_stats_monthly = redraw_monthly
+        self._setup_tree_sorting(self.monthly_stats_tree, "_stats_monthly_rows", {
+            "month": lambda r: r[0],
+            "visits": lambda r: r[1],
+            "total": lambda r: r[2],
+            "avg": lambda r: (r[2] / r[1] if r[1] else 0),
+        }, redraw_monthly)
+
+    def generate_statistics(self, show_empty_message=True):
+        """Сформировать статистику за выбранный период"""
+        date_from = self.stats_date_from.get_date().strftime('%Y-%m-%d')
+        date_to = self.stats_date_to.get_date().strftime('%Y-%m-%d')
+
+        if date_from > date_to:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("statistics.msg_date_range_invalid"))
+            return
+
+        # Марки авто
+        brand_rows = self.db.get_car_brand_stats(date_from, date_to)
+        self._stats_brand_rows = [(brand, int(visits), int(cars), float(total))
+                                   for brand, visits, cars, total in brand_rows]
+        self._redraw_stats_brands(self._stats_brand_rows)
+
+        # Топ клиентов
+        client_rows = self.db.get_top_clients_by_period(date_from, date_to)
+        self._stats_client_rows = [(name, phone, int(visits), float(total))
+                                    for name, phone, visits, total in client_rows]
+        self._redraw_stats_clients(self._stats_client_rows)
+
+        # Популярные виды работ (разбиваем каждую работу на отдельные позиции)
+        work_stats = {}
+        for work_id, description, amount, items_json in self.db.get_works_for_period(date_from, date_to):
+            for name, price in self.get_work_line_items(work_id, description, amount, items_json):
+                key = name.strip()
+                if not key:
+                    continue
+                entry = work_stats.setdefault(key, {"count": 0, "total": 0.0})
+                entry["count"] += 1
+                entry["total"] += price
+        self._stats_work_rows = sorted(
+            [(name, data["count"], data["total"]) for name, data in work_stats.items()],
+            key=lambda r: r[1], reverse=True
+        )
+        self._redraw_stats_works(self._stats_work_rows)
+
+        # Динамика по месяцам
+        monthly_rows = self.db.get_monthly_stats(date_from, date_to)
+        self._stats_monthly_rows = [(ym, int(visits), float(total)) for ym, visits, total in monthly_rows]
+        self._redraw_stats_monthly(self._stats_monthly_rows)
+
+        # Сводка
+        total_visits = sum(r[1] for r in self._stats_brand_rows)
+        total_clients = len(self._stats_client_rows)
+        total_brands = len(self._stats_brand_rows)
+        self.stats_summary_label.configure(text=self.tr(
+            "statistics.summary_label", visits=total_visits, brands=total_brands, clients=total_clients
+        ))
+
+        if show_empty_message and total_visits == 0:
+            messagebox.showinfo(self.tr("common.info"), self.tr("statistics.msg_no_data"))
+
     # ===== QR-КОД С ТЕКСТОМ =====
 
     def _generate_work_order(self, tree):
@@ -4887,8 +5194,9 @@ class AutoServiceApp:
                 parent=styles['Normal'],
                 fontName=font_name_bold,
                 fontSize=18,
+                leading=22,
                 alignment=TA_CENTER,
-                spaceAfter=5
+                spaceAfter=8
             )
             style_company = ParagraphStyle(
                 'Company',
@@ -4956,6 +5264,7 @@ class AutoServiceApp:
                 parent=styles['Normal'],
                 fontName=font_name_bold,
                 fontSize=16,
+                leading=20,
                 alignment=TA_CENTER,
                 spaceAfter=15
             )
@@ -4993,6 +5302,13 @@ class AutoServiceApp:
             # ═══════════════════════════════════════════════════════
             grand_total_works = 0
             grand_total_parts = 0
+
+            # Цвета фона для наглядного разделения таблицы работ и таблицы
+            # запчастей — у каждой свой оттенок (шапка + строка суммы).
+            works_header_bg = colors.Color(0.80, 0.88, 0.98)
+            works_subtotal_bg = colors.Color(0.91, 0.95, 0.99)
+            parts_header_bg = colors.Color(0.99, 0.90, 0.78)
+            parts_subtotal_bg = colors.Color(0.99, 0.95, 0.89)
 
             for work in works:
                 work_id, _, _, description, amount, _, _, _, _, mileage, _, _, _, _, _, _ = work
@@ -5036,16 +5352,27 @@ class AutoServiceApp:
                         Paragraph("", style_normal)
                     ])
 
+                # Строка "Сумма работ" — последняя строка той же таблицы, чтобы
+                # рамка охватывала список работ и итог по ним как единый блок.
+                works_table_data.append([
+                    Paragraph("Сумма работ:", style_bold),
+                    Paragraph(self.format_currency(work_amount), style_bold)
+                ])
+
                 works_table = Table(works_table_data, colWidths=[content_width * 0.75, content_width * 0.25])
                 works_table.setStyle(TableStyle([
                     ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                     ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
                     ('TOPPADDING', (0, 0), (-1, -1), 4),
                     ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                    ('LINEBELOW', (0, 0), (-1, 0), 0.5, colors.grey),
-                    ('LINEBELOW', (0, -1), (-1, -1), 0.5, colors.grey),
+                    ('BACKGROUND', (0, 0), (-1, 0), works_header_bg),
+                    ('BACKGROUND', (0, -1), (-1, -1), works_subtotal_bg),
+                    ('LINEBELOW', (0, 0), (-1, 0), 0.75, colors.black),
+                    ('LINEABOVE', (0, -1), (-1, -1), 0.75, colors.black),
+                    ('BOX', (0, 0), (-1, -1), 0.75, colors.black),
                 ]))
                 elements.append(works_table)
+                elements.append(Spacer(1, 10))
 
                 # Запчасти
                 parts = self.db.get_parts_by_work_id(work_id)
@@ -5065,40 +5392,41 @@ class AutoServiceApp:
                             Paragraph(self.format_currency(part_price), style_normal)
                         ])
 
+                    # Строка "Сумма запчастей" — последняя строка той же таблицы,
+                    # тем же приёмом, что и в таблице работ выше.
+                    parts_table_data.append([
+                        Paragraph("Сумма запчастей:", style_bold),
+                        Paragraph(self.format_currency(parts_total), style_bold)
+                    ])
+
                     parts_table = Table(parts_table_data, colWidths=[content_width * 0.75, content_width * 0.25])
                     parts_table.setStyle(TableStyle([
                         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
                         ('TOPPADDING', (0, 0), (-1, -1), 4),
                         ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                        ('LINEBELOW', (0, 0), (-1, 0), 0.5, colors.grey),
-                        ('LINEBELOW', (0, -1), (-1, -1), 0.5, colors.grey),
+                        ('BACKGROUND', (0, 0), (-1, 0), parts_header_bg),
+                        ('BACKGROUND', (0, -1), (-1, -1), parts_subtotal_bg),
+                        ('LINEBELOW', (0, 0), (-1, 0), 0.75, colors.black),
+                        ('LINEABOVE', (0, -1), (-1, -1), 0.75, colors.black),
+                        ('BOX', (0, 0), (-1, -1), 0.75, colors.black),
                     ]))
                     elements.append(parts_table)
+                    elements.append(Spacer(1, 10))
 
                 grand_total_parts += parts_total
 
             # ═══════════════════════════════════════════════════════
             # ИТОГО
-            # Без лишнего отступа и без отдельной линии-разделителя —
-            # единственная линия уже встроена в саму таблицу итогов,
-            # прямо над строкой "ИТОГО К ОПЛАТЕ".
+            # Разбивка "Сумма работ" / "Сумма запчастей" уже показана прямо
+            # под соответствующими таблицами выше, поэтому здесь остаётся
+            # только общий итог к оплате.
             # ═══════════════════════════════════════════════════════
             grand_total = grand_total_works + grand_total_parts
 
-            # Таблица итогов
-            # Строку "Запчасти" показываем, только если запчасти реально были —
-            # незачем показывать "Запчасти: 0 руб.", если их не использовали.
             totals_data = [
-                [Paragraph("Работы:", style_normal), Paragraph(self.format_currency(grand_total_works), style_normal)],
-            ]
-            if grand_total_parts > 0:
-                totals_data.append(
-                    [Paragraph("Запчасти:", style_normal), Paragraph(self.format_currency(grand_total_parts), style_normal)]
-                )
-            totals_data.append(
                 [Paragraph("<b>ИТОГО К ОПЛАТЕ:</b>", style_bold), Paragraph(f"<b>{self.format_currency(grand_total)}</b>", style_bold)]
-            )
+            ]
 
             totals_table = Table(totals_data, colWidths=[content_width * 0.75, content_width * 0.25])
             totals_table.setStyle(TableStyle([

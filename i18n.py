@@ -12,6 +12,7 @@ SUPPORTED_LANGUAGES = {
     "en": "English",
     "ka": "ქართული",
     "hy": "Հայերեն",
+    "sr": "Srpski",
 }
 
 
