@@ -4204,12 +4204,15 @@ class AutoServiceApp:
             targets.append(cloud_folder)
 
         made_any = False
+        local_ok = False
         errors = []
         for folder in targets:
             try:
                 backup_module.create_backup(self.db, folder, SETTINGS_FILE, SPARE_PARTS_FILE)
                 backup_module.rotate_backups(folder)
                 made_any = True
+                if folder == LOCAL_BACKUP_DIR:
+                    local_ok = True
             except Exception as e:
                 errors.append(f"{folder}: {e}")
 
@@ -4220,9 +4223,16 @@ class AutoServiceApp:
         self._refresh_backup_status_label()
 
         if not silent:
-            if errors:
+            if errors and not local_ok:
                 messagebox.showerror(self.tr("common.error"),
                                     self.tr("backup.now_error", error="\n".join(errors)), parent=self.root)
+            elif errors:
+                # Локальный бэкап (папка "Backup" рядом с программой) удался,
+                # упала только облачная папка -- это не критично, показываем
+                # предупреждение, а не ошибку, чтобы не пугать пользователя
+                # ложным "не удалось" при фактически сделанной копии.
+                messagebox.showwarning(self.tr("common.attention"),
+                                      self.tr("backup.now_partial", error="\n".join(errors)), parent=self.root)
             elif made_any:
                 messagebox.showinfo(self.tr("common.success"), self.tr("backup.now_success"), parent=self.root)
 

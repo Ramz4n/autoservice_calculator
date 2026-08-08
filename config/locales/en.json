@@ -393,6 +393,7 @@
     "backup.now": "Back up now",
     "backup.now_success": "Backup created successfully.",
     "backup.now_error": "Failed to create backup:\n{error}",
+    "backup.now_partial": "Local backup created (the \"Backup\" folder next to the app), but copying to the cloud folder failed:\n{error}",
     "backup.restore": "Restore from backup...",
     "backup.restore_confirm_body": "All current data (jobs, warehouse, clients, finances) will be replaced with data from the selected backup. This cannot be undone.\n\nContinue?",
     "backup.restore_success": "Data restored. The app will now restart.",

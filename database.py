@@ -1159,9 +1159,17 @@ class Database:
                     cursor.execute("""
                         UPDATE clients SET
                             telegram_user_id = %s,
-                            tg_username = COALESCE(%s, tg_username)
+                            tg_username = COALESCE(%s, tg_username),
+                            full_name = COALESCE(%s, full_name)
                         WHERE id = %s
-                    """, (telegram_user_id, tg_username, result[0]))
+                    """, (telegram_user_id, tg_username, full_name, result[0]))
+                    conn.commit()
+                elif full_name:
+                    cursor.execute("""
+                        UPDATE clients SET
+                            full_name = %s
+                        WHERE id = %s
+                    """, (full_name, result[0]))
                     conn.commit()
                 conn.close()
                 return result[0]
