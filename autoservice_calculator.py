@@ -1936,11 +1936,18 @@ class AutoServiceApp:
 
     def _add_warehouse_part_to_list(self, part):
         """Добавить одну складскую запчасть в таблицу"""
-        part_id, part_name, quantity, price, notes = part
+        part_id, part_name, quantity, price, notes, is_paid = part
         price = float(price) if price else 0.0
 
-        self.parts_list.append((part_name, price))
-        item_id = self.parts_tree.insert("", tk.END, values=(part_name, self.format_currency(price)))
+        # Уже оплаченные позиции (например, платное хранение шин) не добавляем
+        # повторно в счёт -- клиент уже заплатил при сдаче на склад
+        if is_paid:
+            display_name = f"{part_name} ({self.tr('warehouse.already_paid_marker')})"
+            self.parts_list.append((display_name, 0.0))
+            item_id = self.parts_tree.insert("", tk.END, values=(display_name, self.format_currency(0.0)))
+        else:
+            self.parts_list.append((part_name, price))
+            item_id = self.parts_tree.insert("", tk.END, values=(part_name, self.format_currency(price)))
         self.warehouse_part_ids[item_id] = part_id
 
         # Помечаем как установленную в базе
@@ -1981,8 +1988,11 @@ class AutoServiceApp:
 
         check_vars = []
         for part in parts:
-            part_id, part_name, quantity, price, notes = part
-            price_str = self.format_currency(float(price)) if price else "—"
+            part_id, part_name, quantity, price, notes, is_paid = part
+            if is_paid:
+                price_str = self.tr("warehouse.already_paid_marker")
+            else:
+                price_str = self.format_currency(float(price)) if price else "—"
             label = f"{part_name}  |  {price_str}"
             if notes:
                 label += f"  |  📝 {notes}"
@@ -2209,6 +2219,11 @@ class AutoServiceApp:
         # Метод оставлен для совместимости, но больше ничего не отображает
         pass
 
+    def _link_warehouse_parts_to_work(self, work_id):
+        """Привязать все складские запчасти, добавленные в текущий наряд, к его work_id"""
+        for part_id in self.warehouse_part_ids.values():
+            self.db.link_warehouse_part_to_work(part_id, work_id)
+
     def add_work(self):
         """Добавить или обновить запись о работе"""
         selected_worker = self.worker_combo.get()
@@ -2290,6 +2305,8 @@ class AutoServiceApp:
             if self.parts_list:
                 self.db.add_parts(self.editing_work_id, self.parts_list)
 
+            self._link_warehouse_parts_to_work(self.editing_work_id)
+
             messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_record_updated"))
 
             # Сбрасываем режим редактирования
@@ -2314,6 +2331,8 @@ class AutoServiceApp:
                         # Добавляем запчасти к существующей работе
                         if self.parts_list:
                             self.db.add_parts(existing_work["work_id"], self.parts_list)
+
+                        self._link_warehouse_parts_to_work(existing_work["work_id"])
 
                         messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_work_merged"))
 
@@ -2352,6 +2371,8 @@ class AutoServiceApp:
                         # Добавляем запчасти к существующей работе
                         if self.parts_list:
                             self.db.add_parts(existing_work_id, self.parts_list)
+
+                        self._link_warehouse_parts_to_work(existing_work_id)
 
                         messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_work_merged_booking"))
 
@@ -2421,6 +2442,8 @@ class AutoServiceApp:
             # Если есть запчасти - сохраняем их
             if self.parts_list:
                 self.db.add_parts(work_id, self.parts_list)
+
+            self._link_warehouse_parts_to_work(work_id)
 
             # Меняем статус записи на "В работе"
             if booking_id:
@@ -2510,7 +2533,7 @@ class AutoServiceApp:
         table_frame = ctk.CTkFrame(self.warehouse_frame)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        columns = ("id", "car_info", "client", "part_name", "quantity", "price", "status", "order_date", "received_date", "notes")
+        columns = ("id", "car_info", "client", "part_name", "quantity", "price", "paid", "status", "order_date", "received_date", "notes")
         self.warehouse_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
 
         self.warehouse_tree.heading("id", text="ID")
@@ -2519,6 +2542,7 @@ class AutoServiceApp:
         self.warehouse_tree.heading("part_name", text=self.tr("warehouse.col_part_name"))
         self.warehouse_tree.heading("quantity", text=self.tr("warehouse.col_quantity"))
         self.warehouse_tree.heading("price", text=self.tr("works.col_price"))
+        self.warehouse_tree.heading("paid", text=self.tr("warehouse.col_paid"))
         self.warehouse_tree.heading("status", text=self.tr("bookings.col_status"))
         self.warehouse_tree.heading("order_date", text=self.tr("warehouse.col_order_date"))
         self.warehouse_tree.heading("received_date", text=self.tr("warehouse.col_received_date"))
@@ -2530,6 +2554,7 @@ class AutoServiceApp:
         self.warehouse_tree.column("part_name", width=200)
         self.warehouse_tree.column("quantity", width=50)
         self.warehouse_tree.column("price", width=90)
+        self.warehouse_tree.column("paid", width=80)
         self.warehouse_tree.column("status", width=90)
         self.warehouse_tree.column("order_date", width=90)
         self.warehouse_tree.column("received_date", width=90)
@@ -2570,6 +2595,23 @@ class AutoServiceApp:
             label="  ✅  " + self.tr("warehouse.status_issued"), command=lambda: self.update_part_status("выдано"),
             foreground="#ffb74d", activeforeground="#ffcc80",
             background="#1e1e1e", activebackground="#e65100"
+        )
+        self.warehouse_context_menu.add_separator()
+        self.warehouse_context_menu.add_command(
+            label="  💰  " + self.tr("warehouse.ctx_mark_paid"), command=lambda: self.set_warehouse_part_paid(True),
+            foreground="#81c784", activeforeground="#a5d6a7",
+            background="#1e1e1e", activebackground="#2e7d32"
+        )
+        self.warehouse_context_menu.add_command(
+            label="  🚫  " + self.tr("warehouse.ctx_mark_unpaid"), command=lambda: self.set_warehouse_part_paid(False),
+            foreground="#e0e0e0", activeforeground="#ffffff",
+            background="#1e1e1e", activebackground="#616161"
+        )
+        self.warehouse_context_menu.add_separator()
+        self.warehouse_context_menu.add_command(
+            label="  🔗  " + self.tr("warehouse.ctx_goto_booking"), command=self.goto_booking_from_warehouse,
+            foreground="#64b5f6", activeforeground="#90caf9",
+            background="#1e1e1e", activebackground="#1976d2"
         )
         self.warehouse_context_menu.add_separator()
         self.warehouse_context_menu.add_command(
@@ -2716,6 +2758,14 @@ class AutoServiceApp:
         ctk.CTkLabel(row4, text=self.tr("works.price_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
         self.wh_price_entry = ctk.CTkEntry(row4, width=150, fg_color="white", text_color="black")
         self.wh_price_entry.pack(side=tk.LEFT, padx=5)
+
+        # Уже оплачено (например, хранение шин -- клиент заплатил при сдаче,
+        # и при выдаче со склада эта сумма не должна повторно попасть в счёт)
+        row_paid = ctk.CTkFrame(form_container)
+        row_paid.pack(fill=tk.X, pady=5)
+        self.wh_paid_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(row_paid, text=self.tr("warehouse.paid_checkbox_label"),
+                        variable=self.wh_paid_var).pack(side=tk.LEFT, padx=5)
 
         # Примечания
         row5 = ctk.CTkFrame(form_container)
@@ -2961,7 +3011,8 @@ class AutoServiceApp:
             part_name=part_name,
             quantity=quantity,
             price=price,
-            notes=notes if notes else None
+            notes=notes if notes else None,
+            is_paid=self.wh_paid_var.get()
         )
 
         messagebox.showinfo(self.tr("common.success"), self.tr("warehouse.msg_part_added"))
@@ -2992,9 +3043,9 @@ class AutoServiceApp:
 
         for part in parts:
             # Новая структура: id, car_number, car_brand, car_model, client_name, client_phone,
-            #                  part_name, quantity, price, status, order_date, received_date, notes, car_id
+            #                  part_name, quantity, price, status, order_date, received_date, notes, car_id, is_paid
             part_id, car_number, car_brand, car_model, client_name, client_phone, \
-                part_name, quantity, price, part_status, order_date, received_date, notes, car_id = part
+                part_name, quantity, price, part_status, order_date, received_date, notes, car_id, is_paid = part
 
             # Фильтрация по госномеру
             if search_query and (not car_number or search_query not in car_number.upper()):
@@ -3020,6 +3071,8 @@ class AutoServiceApp:
                 "выдано": self.tr("warehouse.status_issued"),
             }.get(part_status, part_status)
 
+            paid_str = self.tr("common.yes") if is_paid else self.tr("common.no")
+
             self.warehouse_tree.insert("", tk.END, values=(
                 part_id,
                 car_info,
@@ -3027,6 +3080,7 @@ class AutoServiceApp:
                 part_name,
                 quantity,
                 price_str,
+                paid_str,
                 status_display,
                 order_date_str,
                 received_date_str,
@@ -3047,7 +3101,7 @@ class AutoServiceApp:
 
         values = self.warehouse_tree.item(selection[0], "values")
         part_id = int(values[0])
-        current_status = values[6]  # колонка статуса (уже переведённая для отображения)
+        current_status = values[7]  # колонка статуса (уже переведённая для отображения)
 
         # Защита от смены статуса "выдано"
         if current_status == self.tr("warehouse.status_issued"):
@@ -3062,6 +3116,72 @@ class AutoServiceApp:
 
         self.db.update_warehouse_part_status(part_id, new_status, received_date)
         self.refresh_warehouse()
+
+    def set_warehouse_part_paid(self, is_paid: bool):
+        """Быстро отметить выбранную складскую позицию как оплаченную/неоплаченную"""
+        selection = self.warehouse_tree.selection()
+        if not selection:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_select_part"))
+            return
+
+        values = self.warehouse_tree.item(selection[0], "values")
+        part_id = int(values[0])
+
+        self.db.update_warehouse_part_paid(part_id, is_paid)
+        self.refresh_warehouse()
+
+    def goto_booking_from_warehouse(self):
+        """Перейти во вкладку 'Записи' к записи, связанной с автомобилем выбранной запчасти"""
+        selection = self.warehouse_tree.selection()
+        if not selection:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_select_part"))
+            return
+
+        values = self.warehouse_tree.item(selection[0], "values")
+        part_id = int(values[0])
+
+        part = self.db.get_warehouse_part_by_id(part_id)
+        if not part:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_part_not_found"))
+            return
+
+        booking_id = None
+
+        # Сначала пытаемся найти именно тот наряд, в который была установлена деталь
+        work_id = part.get("work_id")
+        if work_id:
+            work = self.db.get_work_by_id(work_id)
+            if work:
+                booking_id = work[11]  # booking_id из наряда
+
+        # Запасной вариант (старые детали без привязки к наряду) - последняя запись по машине
+        if not booking_id:
+            car_id = part.get("car_id")
+            if not car_id:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_no_car_linked"))
+                return
+
+            bookings = self.db.get_bookings_by_car_id(car_id)
+            if not bookings:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_no_related_booking"))
+                return
+
+            booking_id = bookings[0][0]  # самая свежая запись для этого авто
+
+        # Переключаемся на вкладку записей и сбрасываем фильтры, чтобы запись точно была видна
+        self.switch_tab("bookings")
+        if hasattr(self, "bookings_status_var"):
+            self.bookings_status_var.set(self.tr("bookings.filter_all"))
+        if hasattr(self, "bookings_search_entry"):
+            self.bookings_search_entry.delete(0, tk.END)
+        self.refresh_bookings()
+
+        for item in self.bookings_tree.get_children():
+            if self.bookings_tree.item(item, "values")[0] == str(booking_id):
+                self.bookings_tree.selection_set(item)
+                self.bookings_tree.focus(item)
+                self.bookings_tree.see(item)
+                break
 
     def edit_warehouse_part(self):
         """Редактировать выбранную запчасть"""
@@ -3128,6 +3248,13 @@ class AutoServiceApp:
         if part_data.get('price'):
             price_entry.insert(0, str(part_data.get('price')))
 
+        # Уже оплачено
+        row_paid = ctk.CTkFrame(form_frame, fg_color="transparent")
+        row_paid.pack(fill=tk.X, pady=5)
+        paid_var = tk.BooleanVar(value=bool(part_data.get('is_paid')))
+        ctk.CTkCheckBox(row_paid, text=self.tr("warehouse.paid_checkbox_label"),
+                        variable=paid_var).pack(side=tk.LEFT)
+
         # Статус (в БД хранится по-русски, в интерфейсе показываем перевод)
         row4 = ctk.CTkFrame(form_frame, fg_color="transparent")
         row4.pack(fill=tk.X, pady=5)
@@ -3180,7 +3307,7 @@ class AutoServiceApp:
                         parent=edit_window):
                     return
 
-            self.db.update_warehouse_part(part_id, new_part_name, new_quantity, new_price, new_status, new_notes)
+            self.db.update_warehouse_part(part_id, new_part_name, new_quantity, new_price, new_status, new_notes, paid_var.get())
             edit_window.destroy()
             self.refresh_warehouse()
             messagebox.showinfo(self.tr("common.success"), self.tr("warehouse.msg_part_updated"))
@@ -3260,8 +3387,11 @@ class AutoServiceApp:
             anchor="center")
         title_masters.pack(fill=tk.X, pady=(0, 10))
 
+        summary_table_frame = ctk.CTkFrame(summary_frame, fg_color="transparent")
+        summary_table_frame.pack(fill=tk.X, padx=5)
+
         columns = ("name", "count", "total", "percent")
-        self.summary_tree = ttk.Treeview(summary_frame, columns=columns, show="headings", height=4)
+        self.summary_tree = ttk.Treeview(summary_table_frame, columns=columns, show="headings", height=8)
         self.summary_tree.heading("name", text=self.tr("reports.col_master_name"))
         self.summary_tree.heading("count", text=self.tr("reports.col_work_count"))
         self.summary_tree.heading("total", text=self.tr("reports.col_total_earned"))
@@ -3276,7 +3406,10 @@ class AutoServiceApp:
         self.summary_tree.tag_configure('oddrow', background='#ffffff')
         self.summary_tree.tag_configure('evenrow', background='#f0f0f0')
 
-        self.summary_tree.pack()
+        summary_scrollbar = ttk.Scrollbar(summary_table_frame, orient=tk.VERTICAL, command=self.summary_tree.yview)
+        self.summary_tree.configure(yscrollcommand=summary_scrollbar.set)
+        summary_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.summary_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # Контекстное меню для сводки по мастерам
         self.summary_context_menu = tk.Menu(
@@ -5779,6 +5912,7 @@ class AutoServiceApp:
                     wh_parts = self.db.get_warehouse_parts_by_car_number(car_number, status="установлена")
                     for wh_part in wh_parts:
                         self.db.update_warehouse_part_status(wh_part[0], "выдано")
+                        self.db.update_warehouse_part_paid(wh_part[0], True)
                     if wh_parts:
                         self.refresh_warehouse()
 

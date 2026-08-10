@@ -141,6 +141,7 @@ TABLES = {
             quantity INT DEFAULT 1,
             price DECIMAL(12,2),
             status VARCHAR(30) DEFAULT 'в пути',
+            is_paid TINYINT(1) DEFAULT 0,
             order_date DATE NOT NULL,
             received_date DATE,
             notes TEXT,
@@ -199,4 +200,11 @@ MIGRATIONS = [
     "ALTER TABLE works ADD COLUMN IF NOT EXISTS mileage INT DEFAULT NULL",
     # Хранение отдельных позиций работы (название+цена) для корректного восстановления при редактировании
     "ALTER TABLE works ADD COLUMN IF NOT EXISTS items_json TEXT DEFAULT NULL",
+    # Отметка "уже оплачено" для складских позиций (например, платное хранение шин) --
+    # чтобы при выдаче со склада в работу сумма не добавлялась в счёт повторно
+    "ALTER TABLE warehouse_parts ADD COLUMN IF NOT EXISTS is_paid TINYINT(1) DEFAULT 0",
+    # Привязка складской позиции к конкретному наряду (works.id), в который она была установлена --
+    # чтобы из "Склада" переходить именно к той работе, а не к последней записи машины
+    "ALTER TABLE warehouse_parts ADD COLUMN IF NOT EXISTS work_id INT DEFAULT NULL",
+    "ALTER TABLE warehouse_parts ADD INDEX IF NOT EXISTS idx_warehouse_work_id (work_id)",
 ]
