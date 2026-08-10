@@ -87,7 +87,8 @@ def _check_online(key: str) -> bool | None:
         r = requests.get(
             LICENSE_URL,
             headers={"X-Access-Key": API_KEY},
-            timeout=5
+            timeout=5,
+            proxies={"http": None, "https": None},
         )
         if r.status_code != 200:
             return False

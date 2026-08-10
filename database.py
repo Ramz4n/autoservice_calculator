@@ -944,6 +944,20 @@ class Database:
         conn.close()
         return bookings
 
+    def get_bookings_by_car_id(self, car_id):
+        """Получить записи по ID автомобиля (самые новые сначала)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT b.id, b.booking_date, b.booking_time, b.status
+            FROM bookings b
+            WHERE b.car_id = %s
+            ORDER BY b.booking_date DESC, b.booking_time DESC, b.id DESC
+        """, (car_id,))
+        bookings = cursor.fetchall()
+        conn.close()
+        return bookings
+
     def get_today_bookings(self):
         """Получить записи на сегодня."""
         conn = self.get_connection()
@@ -1630,7 +1644,7 @@ class Database:
 
     # --- Методы для работы со складом запчастей ---
 
-    def add_warehouse_part(self, car_id, part_name, quantity=1, price=None, order_date=None, notes=None):
+    def add_warehouse_part(self, car_id, part_name, quantity=1, price=None, order_date=None, notes=None, is_paid=False):
         """Добавить запчасть на склад (заказать)"""
         from datetime import date
         if order_date is None:
@@ -1638,9 +1652,9 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO warehouse_parts (car_id, part_name, quantity, price, order_date, notes, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'в пути')
-        """, (car_id, part_name, quantity, price, order_date, notes))
+            INSERT INTO warehouse_parts (car_id, part_name, quantity, price, order_date, notes, status, is_paid)
+            VALUES (%s, %s, %s, %s, %s, %s, 'в пути', %s)
+        """, (car_id, part_name, quantity, price, order_date, notes, is_paid))
         conn.commit()
         part_id = cursor.lastrowid
         conn.close()
@@ -1654,7 +1668,7 @@ class Database:
             SELECT wp.id, cc.car_number, cc.car_brand, cc.car_model,
                    cl.full_name as client_name, cl.phone as client_phone,
                    wp.part_name, wp.quantity, wp.price, wp.status,
-                   wp.order_date, wp.received_date, wp.notes, wp.car_id
+                   wp.order_date, wp.received_date, wp.notes, wp.car_id, wp.is_paid
             FROM warehouse_parts wp
             LEFT JOIN client_cars cc ON wp.car_id = cc.id
             LEFT JOIN clients cl ON cc.client_id = cl.id
@@ -1678,7 +1692,7 @@ class Database:
             SELECT wp.id, cc.car_number, cc.car_brand, cc.car_model,
                    cl.full_name as client_name, cl.phone as client_phone,
                    wp.part_name, wp.quantity, wp.price, wp.status,
-                   wp.order_date, wp.received_date, wp.notes, wp.car_id
+                   wp.order_date, wp.received_date, wp.notes, wp.car_id, wp.is_paid
             FROM warehouse_parts wp
             LEFT JOIN client_cars cc ON wp.car_id = cc.id
             LEFT JOIN clients cl ON cc.client_id = cl.id
@@ -1694,7 +1708,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT wp.id, wp.part_name, wp.quantity, wp.price, wp.notes
+            SELECT wp.id, wp.part_name, wp.quantity, wp.price, wp.notes, wp.is_paid
             FROM warehouse_parts wp
             JOIN client_cars cc ON wp.car_id = cc.id
             WHERE UPPER(cc.car_number) = UPPER(%s) AND wp.status = %s
@@ -1719,6 +1733,14 @@ class Database:
         conn.commit()
         conn.close()
 
+    def update_warehouse_part_paid(self, part_id, is_paid):
+        """Быстро отметить/снять отметку "оплачено" у складской позиции"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE warehouse_parts SET is_paid = %s WHERE id = %s", (is_paid, part_id))
+        conn.commit()
+        conn.close()
+
     def delete_warehouse_part(self, part_id):
         """Удалить запчасть со склада"""
         conn = self.get_connection()
@@ -1727,15 +1749,22 @@ class Database:
         conn.commit()
         conn.close()
 
-    def update_warehouse_part(self, part_id, part_name, quantity, price, status, notes):
+    def update_warehouse_part(self, part_id, part_name, quantity, price, status, notes, is_paid=None):
         """Обновить данные запчасти"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE warehouse_parts
-            SET part_name = %s, quantity = %s, price = %s, status = %s, notes = %s
-            WHERE id = %s
-        """, (part_name, quantity, price, status, notes, part_id))
+        if is_paid is None:
+            cursor.execute("""
+                UPDATE warehouse_parts
+                SET part_name = %s, quantity = %s, price = %s, status = %s, notes = %s
+                WHERE id = %s
+            """, (part_name, quantity, price, status, notes, part_id))
+        else:
+            cursor.execute("""
+                UPDATE warehouse_parts
+                SET part_name = %s, quantity = %s, price = %s, status = %s, notes = %s, is_paid = %s
+                WHERE id = %s
+            """, (part_name, quantity, price, status, notes, is_paid, part_id))
         conn.commit()
         conn.close()
 
@@ -1747,7 +1776,7 @@ class Database:
             SELECT wp.id, cc.car_number, cc.car_brand, cc.car_model,
                    cl.full_name as client_name, cl.phone as client_phone,
                    wp.part_name, wp.quantity, wp.price, wp.status,
-                   wp.order_date, wp.received_date, wp.notes, wp.car_id
+                   wp.order_date, wp.received_date, wp.notes, wp.car_id, wp.is_paid, wp.work_id
             FROM warehouse_parts wp
             LEFT JOIN client_cars cc ON wp.car_id = cc.id
             LEFT JOIN clients cl ON cc.client_id = cl.id
@@ -1770,9 +1799,19 @@ class Database:
                 "order_date": result[10],
                 "received_date": result[11],
                 "notes": result[12],
-                "car_id": result[13]
+                "car_id": result[13],
+                "is_paid": bool(result[14]),
+                "work_id": result[15]
             }
         return None
+
+    def link_warehouse_part_to_work(self, part_id, work_id):
+        """Привязать складскую позицию к наряду (works.id), в который она была установлена"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE warehouse_parts SET work_id = %s WHERE id = %s", (work_id, part_id))
+        conn.commit()
+        conn.close()
 
     # ──────────────────────────────────────────────────────
     # --- Методы авторизации и управления пользователями ---
