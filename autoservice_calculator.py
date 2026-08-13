@@ -7378,7 +7378,84 @@ class AutoServiceApp:
         ).pack()
 
 
+_SINGLE_INSTANCE_MUTEX_NAME = "AutoService_Alexan_SingleInstance_Mutex"
+
+
+def _activate_existing_window():
+    """Находит окно уже запущенного экземпляра приложения и выводит его на передний план."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+    current_pid = os.getpid()
+    exe_name = os.path.basename(
+        sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+    ).lower()
+
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_VM_READ = 0x0010
+    SW_RESTORE = 9
+
+    found_hwnd = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def enum_handler(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd) or user32.GetWindowTextLengthW(hwnd) == 0:
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == current_pid:
+            return True
+        hproc = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid.value)
+        if hproc:
+            try:
+                buf = ctypes.create_unicode_buffer(260)
+                if psapi.GetModuleBaseNameW(hproc, None, buf, 260) and buf.value.lower() == exe_name:
+                    found_hwnd.append(hwnd)
+                    return False
+            finally:
+                kernel32.CloseHandle(hproc)
+        return True
+
+    user32.EnumWindows(enum_handler, 0)
+
+    if found_hwnd:
+        hwnd = found_hwnd[0]
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(hwnd)
+
+
+def _ensure_single_instance():
+    """Не даёт запустить второй экземпляр приложения: если один уже работает,
+    активирует его окно и завершает текущий (новый) процесс."""
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ERROR_ALREADY_EXISTS = 183
+
+    handle = kernel32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX_NAME)
+    already_running = handle and ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+
+    if not already_running:
+        # Хендл держим живым до конца процесса (не закрываем) — ОС освободит его сама при выходе
+        global _single_instance_mutex_handle
+        _single_instance_mutex_handle = handle
+        return
+
+    try:
+        _activate_existing_window()
+    except Exception:
+        pass
+    sys.exit(0)
+
+
 def main():
+    _ensure_single_instance()
+
     from license import check_license
     from login_window import LoginWindow
     import tkinter.messagebox as _mb
