@@ -262,12 +262,6 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cur:
-                    # Удаляем старые неактивные записи на это время (cancelled/completed)
-                    await cur.execute(
-                        """DELETE FROM bookings
-                           WHERE booking_date = %s AND booking_time = %s AND status NOT IN ('waiting', 'in_progress')""",
-                        (booking_date, booking_time)
-                    )
                     # Создаём новую запись с client_id и car_id
                     await cur.execute(
                         """INSERT INTO bookings
