@@ -1008,10 +1008,6 @@ class Database:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                DELETE FROM bookings
-                WHERE booking_date = %s AND booking_time = %s AND status NOT IN ('waiting', 'in_progress')
-            """, (booking_date, booking_time))
-            cursor.execute("""
                 INSERT INTO bookings (client_id, car_id, booking_date, booking_time, status)
                 VALUES (%s, %s, %s, %s, %s)
             """, (client_id, car_id, booking_date, booking_time, status))

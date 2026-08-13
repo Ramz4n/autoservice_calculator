@@ -422,10 +422,6 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        """DELETE FROM bookings WHERE booking_date = %s AND booking_time = %s AND status NOT IN ('waiting', 'in_progress')""",
-                        (booking_date, booking_time)
-                    )
-                    await cur.execute(
                         """INSERT INTO bookings (client_id, car_id, booking_date, booking_time, status) VALUES (%s, %s, %s, %s, 'waiting')""",
                         (client_id, car_id, booking_date, booking_time)
                     )
