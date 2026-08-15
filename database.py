@@ -271,7 +271,6 @@ class Database:
 
     def add_work(self, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None, items_json=None):
         """Добавить запись о работе и вернуть ID."""
-        order_number = self.generate_order_number()
         conn = self.get_connection()
         cursor = conn.cursor()
         # Преобразуем пробег в число для works.mileage
@@ -281,10 +280,23 @@ class Database:
                 mileage_int = int(re.sub(r'\D', '', str(mileage)))
             except:
                 mileage_int = None
-        cursor.execute(
-            "INSERT INTO works (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage, items_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage_int, items_json)
-        )
+
+        # Номер наряда генерируется и проверяется на уникальность отдельным запросом,
+        # поэтому при одновременном добавлении с другого ПК возможна гонка - если
+        # кто-то успел занять этот номер первым, пробуем ещё раз с новым номером
+        for attempt in range(5):
+            order_number = self.generate_order_number()
+            try:
+                cursor.execute(
+                    "INSERT INTO works (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage, items_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage_int, items_json)
+                )
+                break
+            except pymysql.err.IntegrityError:
+                conn.rollback()
+                if attempt == 4:
+                    conn.close()
+                    raise
         work_id = cursor.lastrowid
         if car_id:
             if mileage:
@@ -376,7 +388,7 @@ class Database:
             SELECT wk.id, wk.worker_id, w.full_name, wk.description, wk.amount,
                    wk.work_date,
                    cc.car_brand, cc.car_model, cc.car_number,
-                   cc.mileage, cc.vin,
+                   wk.mileage, cc.vin,
                    wk.booking_id, cl.full_name as client_name, cl.phone as client_phone,
                    wk.car_id, cc.client_id
             FROM works wk
@@ -399,7 +411,7 @@ class Database:
             SELECT wk.id, wk.worker_id, w.full_name, wk.description, wk.amount,
                    wk.work_date,
                    cc.car_brand, cc.car_model, cc.car_number,
-                   cc.mileage, cc.vin,
+                   wk.mileage, cc.vin,
                    wk.booking_id, cl.full_name as client_name, cl.phone as client_phone,
                    wk.order_number, wk.car_id
             FROM works wk
@@ -424,7 +436,7 @@ class Database:
             SELECT wk.id, wk.worker_id, w.full_name, wk.description, wk.amount,
                    wk.work_date,
                    cc.car_brand, cc.car_model, cc.car_number,
-                   cc.mileage, cc.vin,
+                   wk.mileage, cc.vin,
                    wk.booking_id, cl.full_name as client_name, cl.phone as client_phone,
                    wk.order_number, wk.car_id
             FROM works wk
@@ -497,19 +509,19 @@ class Database:
         conn.close()
 
     def get_works_by_period(self, date_from, date_to):
-        """Получить работы за период."""
+        """Получить завершённые работы за период (по дате завершения записи)."""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT wk.id, w.full_name, wk.description, wk.amount, wk.work_date,
+            SELECT wk.id, w.full_name, wk.description, wk.amount, wk.completed_at,
                    cc.car_brand, cc.car_model, cc.car_number,
                    wk.order_number, cl.full_name as client_name, cl.phone as client_phone
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
             LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE wk.work_date BETWEEN %s AND %s
-            ORDER BY w.full_name, wk.work_date
+            WHERE wk.completed_at BETWEEN %s AND %s
+            ORDER BY w.full_name, wk.completed_at
         ''', (date_from, date_to))
         works = cursor.fetchall()
         conn.close()
@@ -535,14 +547,14 @@ class Database:
         return works
 
     def get_summary_by_period(self, date_from, date_to):
-        """Получить сводку по работникам за период"""
+        """Получить сводку по работникам за период (только по завершённым нарядам)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             SELECT w.id, w.full_name, SUM(wk.amount) as total, COUNT(wk.id) as work_count
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
-            WHERE wk.work_date BETWEEN %s AND %s
+            WHERE wk.completed_at BETWEEN %s AND %s
             GROUP BY w.id
             ORDER BY total DESC
         ''', (date_from, date_to))
@@ -551,22 +563,39 @@ class Database:
         return summary
 
     def get_works_by_worker_and_period(self, worker_id, date_from, date_to):
-        """Получить все работы мастера за период (с авто и клиентом) для детального отчёта"""
+        """Получить завершённые работы мастера за период (с авто и клиентом) для детального отчёта"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT wk.id, wk.description, wk.amount, wk.work_date, wk.items_json,
+            SELECT wk.id, wk.description, wk.amount, wk.completed_at, wk.items_json,
                    cc.car_brand, cc.car_model, cc.car_number,
                    cl.full_name, cl.phone
             FROM works wk
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
             LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE wk.worker_id = %s AND wk.work_date BETWEEN %s AND %s
-            ORDER BY wk.work_date DESC, wk.id DESC
+            WHERE wk.worker_id = %s AND wk.completed_at BETWEEN %s AND %s
+            ORDER BY wk.completed_at DESC, wk.id DESC
         ''', (worker_id, date_from, date_to))
         works = cursor.fetchall()
         conn.close()
         return works
+
+    def mark_work_completed(self, booking_id, completed_date=None):
+        """Отметить наряды по записи как завершённые, чтобы их сумма попала в зарплатные отчёты"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        if completed_date:
+            cursor.execute(
+                "UPDATE works SET completed_at = %s WHERE booking_id = %s AND completed_at IS NULL",
+                (completed_date, booking_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE works SET completed_at = CURDATE() WHERE booking_id = %s AND completed_at IS NULL",
+                (booking_id,)
+            )
+        conn.commit()
+        conn.close()
 
     def get_recent_works(self, limit=50):
         """Получить последние записи о работах."""
@@ -1516,7 +1545,7 @@ class Database:
 
         cursor.execute("""
             SELECT wk.id, wk.work_date, wk.order_number, w.full_name as worker,
-                   cc.car_brand, cc.car_model, cc.car_number, cc.mileage,
+                   cc.car_brand, cc.car_model, cc.car_number, wk.mileage,
                    wk.description, wk.amount, cl.full_name as client_name, cl.phone as client_phone
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id

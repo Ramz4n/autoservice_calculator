@@ -207,4 +207,7 @@ MIGRATIONS = [
     # чтобы из "Склада" переходить именно к той работе, а не к последней записи машины
     "ALTER TABLE warehouse_parts ADD COLUMN IF NOT EXISTS work_id INT DEFAULT NULL",
     "ALTER TABLE warehouse_parts ADD INDEX IF NOT EXISTS idx_warehouse_work_id (work_id)",
+    # Дата фактического завершения наряда (когда запись переведена в статус "завершён") --
+    # зарплата мастера в отчётах считается по этой дате, а не по дате создания наряда
+    "ALTER TABLE works ADD COLUMN IF NOT EXISTS completed_at DATE DEFAULT NULL",
 ]
