@@ -1584,6 +1584,15 @@ class AutoServiceApp:
             self.client_phone_entry.insert(0, booking_info['phone'])
             # Загружаем машины этого клиента (передаём car_id из записи)
             self.load_client_cars(booking_info['phone'], booking_info['name'], booking_info.get('car_id'))
+
+            # Если по записи уже есть наряд - подставляем мастера, который его ведёт
+            existing_work = self.db.get_work_by_booking_id(booking_info['id'])
+            if existing_work:
+                worker_id = existing_work[1]
+                for name, wid in self.workers_data.items():
+                    if wid == worker_id:
+                        self.worker_combo.set(name)
+                        break
         else:
             self.selected_booking_id = None
             self.client_cars_combo.configure(values=[self.tr("works.new_car")])
@@ -2039,7 +2048,7 @@ class AutoServiceApp:
 
     def add_part_to_list(self):
         """Добавить запчасть в список"""
-        part_name = self.part_name_entry.get().strip()
+        part_name = " ".join(self.part_name_entry.get().split())
         if not part_name:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_part_name"))
             return
@@ -2101,7 +2110,7 @@ class AutoServiceApp:
 
     def add_work_to_list(self):
         """Добавить работу в список"""
-        work_name = self.work_name_entry.get().strip()
+        work_name = " ".join(self.work_name_entry.get().split())
         if not work_name:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_work_name"))
             return
@@ -2320,26 +2329,20 @@ class AutoServiceApp:
             if booking_id:
                 existing_work = self.db.get_last_work_by_booking_id(booking_id)
                 if existing_work:
-                    # У записи уже есть работа - спрашиваем пользователя
-                    desc_preview = (existing_work['description'][:100] + "...") if existing_work['description'] and len(existing_work['description']) > 100 else (existing_work['description'] or "")
-                    msg = self.tr("works.dialog_existing_work_body", preview=desc_preview)
+                    # У записи уже есть работа - всегда объединяем в один наряд, без вопроса
+                    self.db.append_to_work(existing_work["work_id"], description, amount, items_json)
 
-                    if messagebox.askyesno(self.tr("works.dialog_existing_work_title"), msg):
-                        # Объединяем с существующей работой
-                        self.db.append_to_work(existing_work["work_id"], description, amount, items_json)
+                    # Добавляем запчасти к существующей работе
+                    if self.parts_list:
+                        self.db.add_parts(existing_work["work_id"], self.parts_list)
 
-                        # Добавляем запчасти к существующей работе
-                        if self.parts_list:
-                            self.db.add_parts(existing_work["work_id"], self.parts_list)
+                    self._link_warehouse_parts_to_work(existing_work["work_id"])
 
-                        self._link_warehouse_parts_to_work(existing_work["work_id"])
+                    messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_work_merged"))
 
-                        messagebox.showinfo(self.tr("common.success"), self.tr("works.msg_work_merged"))
-
-                        # Очищаем форму и выходим
-                        self.clear_work_form(restore_warehouse=False)
-                        return
-                    # Если нет - продолжаем создавать новую работу
+                    # Очищаем форму и выходим
+                    self.clear_work_form(restore_warehouse=False)
+                    return
 
             # Если нет booking_id - проверяем, есть ли уже активная работа для этой машины
             elif not booking_id:
@@ -2935,7 +2938,7 @@ class AutoServiceApp:
     def add_warehouse_part(self):
         """Добавить запчасть на склад"""
         car_number = self.wh_car_number_entry.get().strip().upper()
-        part_name = self.wh_part_name_entry.get().strip()
+        part_name = " ".join(self.wh_part_name_entry.get().split())
         quantity_str = self.wh_quantity_entry.get().strip()
         price_str = self.wh_price_entry.get().strip()
         notes = self.wh_notes_entry.get().strip()
@@ -3280,7 +3283,7 @@ class AutoServiceApp:
             notes_entry.insert(0, part_data.get('notes'))
 
         def save_changes():
-            new_part_name = part_name_entry.get().strip()
+            new_part_name = " ".join(part_name_entry.get().split())
             if not new_part_name:
                 messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_part_name"))
                 return
@@ -5898,14 +5901,20 @@ class AutoServiceApp:
         """Отметить запись как выполненную"""
         booking_id = self.get_selected_booking_id()
         if booking_id:
+            # Нельзя завершить запись, по которой ещё не добавлено ни одной работы
+            work = self.db.get_work_by_booking_id(booking_id)
+            if not work:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_completed_requires_work"))
+                return
+
             # Получаем данные записи для уведомления
             booking = self.db.get_booking_by_id(booking_id)
 
             self.db.update_booking_status(booking_id, "completed")
+            self.db.mark_work_completed(booking_id)
             self.refresh_bookings()
 
             # Помечаем использованные складские запчасти как "выдано"
-            work = self.db.get_work_by_booking_id(booking_id)
             if work:
                 car_number = work[8]
                 if car_number:
@@ -6444,6 +6453,10 @@ class AutoServiceApp:
                     self.bookings_context_menu.entryconfig(0, state="normal")
                 else:
                     self.bookings_context_menu.entryconfig(0, state="disabled")
+
+                # "Выполнено" доступно только если по записи уже есть хотя бы одна работа
+                has_work = bool(self.db.get_work_by_booking_id(int(booking_id)))
+                self.bookings_context_menu.entryconfig(7, state="normal" if has_work else "disabled")
             self.bookings_context_menu.post(event.x_root, event.y_root)
 
     def start_work_from_booking(self):
@@ -6657,9 +6670,17 @@ class AutoServiceApp:
         # Ищем ВСЕ связанные работы
         works = self.db.get_all_works_by_booking_id(int(booking_id))
 
+        # Мастер, пробег и № наряда - берём из наряда по этой записи
+        primary_work = works[0] if works else None
+        primary_worker_name = primary_work[2] if primary_work else None
+        primary_mileage = primary_work[9] if primary_work else None
+        primary_order_number = primary_work[14] if primary_work else None
+
+        window_title = self.tr("bookings.order_number_label", order_number=primary_order_number) if primary_order_number else self.tr("bookings.info_window_title")
+
         # Создаём окно информации
         info_window = ctk.CTkToplevel(self.root)
-        info_window.title(self.tr("bookings.info_window_title"))
+        info_window.title(window_title)
         info_window.geometry("600x700")
         info_window.transient(self.root)
         info_window.grab_set()
@@ -6674,7 +6695,7 @@ class AutoServiceApp:
         status_map = {
             "waiting": "⏳ " + self.tr("bookings.filter_waiting"),
             "in_progress": "🔧 " + self.tr("bookings.filter_in_progress"),
-            "completed": "✅ " + self.tr("bookings.status_completed"),
+            "completed": "✅ " + self.tr("bookings.info_status_completed"),
             "cancelled": "❌ " + self.tr("bookings.status_cancelled"),
         }
 
@@ -6698,7 +6719,7 @@ class AutoServiceApp:
 
         ctk.CTkLabel(
             header_frame,
-            text="📋  " + self.tr("bookings.info_window_title"),
+            text="📋  " + window_title,
             font=("Arial", 18, "bold")
         ).pack(side="left")
 
@@ -6741,6 +6762,10 @@ class AutoServiceApp:
             ("💬 Telegram:", f"@{tg_username}" if tg_username != '-' else '-'),
             ("🚗 " + self.tr("bookings.col_car") + ":", car_info),
         ]
+        if primary_worker_name:
+            info_data.append(("🔧 " + self.tr("bookings.info_label_master"), primary_worker_name))
+        if primary_mileage:
+            info_data.append(("📊 " + self.tr("works.mileage"), str(primary_mileage)))
 
         for i, (label, value) in enumerate(info_data):
             row = ctk.CTkFrame(content_frame, fg_color="transparent")
@@ -6784,10 +6809,9 @@ class AutoServiceApp:
         works_header = ctk.CTkFrame(works_card, fg_color="transparent")
         works_header.pack(fill="x", padx=15, pady=(15, 10))
 
-        works_count = self.tr("bookings.works_count", count=len(works)) if works else ""
         ctk.CTkLabel(
             works_header,
-            text=f"{works_icon}  {works_title}{works_count}",
+            text=f"{works_icon}  {works_title}",
             font=("Arial", 18, "bold")
         ).pack(side="left")
 
@@ -6817,49 +6841,6 @@ class AutoServiceApp:
 
                 work_inner = ctk.CTkFrame(work_frame, fg_color="transparent")
                 work_inner.pack(fill="x", padx=12, pady=12)
-
-                # Заголовок работы
-                work_header_row = ctk.CTkFrame(work_inner, fg_color="transparent")
-                work_header_row.pack(fill="x", pady=(0, 8))
-
-                ctk.CTkLabel(
-                    work_header_row,
-                    text=self.tr("bookings.work_number", index=i),
-                    font=("Arial", 15, "bold")
-                ).pack(side="left")
-
-                if order_number:
-                    ctk.CTkLabel(
-                        work_header_row,
-                        text=self.tr("bookings.order_number_label", order_number=order_number),
-                        font=("Arial", 13),
-                        text_color=("gray40", "gray60")
-                    ).pack(side="right")
-
-                # Форматируем дату работы
-                if hasattr(work_date, 'strftime'):
-                    work_date_str = work_date.strftime('%d.%m.%Y')
-                else:
-                    work_date_str = str(work_date) if work_date else "-"
-
-                # Информация о работе (компактно)
-                work_info_row = ctk.CTkFrame(work_inner, fg_color="transparent")
-                work_info_row.pack(fill="x", pady=(0, 8))
-
-                info_items = [
-                    f"📅 {work_date_str}",
-                    f"👨‍🔧 {worker_name or '-'}",
-                    f"🚗 {car_brand or '-'} {car_model or ''} ({car_number or '-'})",
-                ]
-                if mileage:
-                    info_items.append(self.tr("bookings.mileage_suffix", mileage=mileage))
-
-                ctk.CTkLabel(
-                    work_info_row,
-                    text="  •  ".join(info_items),
-                    font=("Arial", 13),
-                    text_color=("gray30", "gray70")
-                ).pack(anchor="w")
 
                 # Считаем суммы
                 work_amount = float(amount or 0)
@@ -7264,26 +7245,30 @@ class AutoServiceApp:
                         text_color=("gray40", "gray60")
                     ).pack(side="right")
 
-                # Информация о работе
-                work_info_row = ctk.CTkFrame(work_inner, fg_color="transparent")
-                work_info_row.pack(fill="x", pady=(0, 8))
+                # Информация о работе (каждый пункт на отдельной строке для читаемости)
+                work_info_col = ctk.CTkFrame(work_inner, fg_color="transparent")
+                work_info_col.pack(fill="x", pady=(0, 8))
 
                 info_items = []
                 if worker:
-                    info_items.append(f"👨‍🔧 {worker}")
-                car_info = f"{car_brand or ''} {car_model or ''} {car_number or ''}".strip()
-                if car_info:
-                    info_items.append(f"🚗 {car_info}")
+                    info_items.append(f"🔧  {worker}")
+                car_info = " ".join(filter(None, [car_brand, car_model])).strip()
+                if car_info or car_number:
+                    car_line = f"{car_info} ({car_number})" if car_number else car_info
+                    info_items.append(f"🚗  {car_line}")
                 if mileage:
                     info_items.append(self.tr("bookings.mileage_suffix", mileage=mileage))
 
-                if info_items:
+                for info_text in info_items:
                     ctk.CTkLabel(
-                        work_info_row,
-                        text="  •  ".join(info_items),
+                        work_info_col,
+                        text=info_text,
                         font=("Arial", 13),
-                        text_color=("gray30", "gray70")
-                    ).pack(anchor="w")
+                        text_color=("gray30", "gray70"),
+                        anchor="w",
+                        justify="left",
+                        wraplength=580
+                    ).pack(anchor="w", pady=(0, 3))
 
                 # Описание работ
                 if description:
