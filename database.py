@@ -281,6 +281,14 @@ class Database:
             except:
                 mileage_int = None
 
+        # Наряд без привязки к записи (клиент "с улицы") добавляется одним действием и
+        # никогда не проходит через статус записи "В работе" -> "Выполнено", поэтому для
+        # него считаем машину сделанной сразу. Наряд по записи наоборот: его создание
+        # переводит запись в статус "В работе" (см. update_booking_status ниже по коду
+        # вызывающей стороны) - машина ещё не готова, поэтому completed_at здесь не трогаем
+        # и он проставится позже, когда запись отметят "Выполнено" (mark_work_completed).
+        completed_at = work_date if not booking_id else None
+
         # Номер наряда генерируется и проверяется на уникальность отдельным запросом,
         # поэтому при одновременном добавлении с другого ПК возможна гонка - если
         # кто-то успел занять этот номер первым, пробуем ещё раз с новым номером
@@ -288,8 +296,8 @@ class Database:
             order_number = self.generate_order_number()
             try:
                 cursor.execute(
-                    "INSERT INTO works (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage, items_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (worker_id, description, amount, work_date, order_number, booking_id, car_id, mileage_int, items_json)
+                    "INSERT INTO works (worker_id, description, amount, work_date, completed_at, order_number, booking_id, car_id, mileage, items_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (worker_id, description, amount, work_date, completed_at, order_number, booking_id, car_id, mileage_int, items_json)
                 )
                 break
             except pymysql.err.IntegrityError:
@@ -509,7 +517,7 @@ class Database:
         conn.close()
 
     def get_works_by_period(self, date_from, date_to):
-        """Получить завершённые работы за период (по дате завершения записи)."""
+        """Получить завершённые работы за период (по дате завершения наряда)."""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
@@ -547,7 +555,8 @@ class Database:
         return works
 
     def get_summary_by_period(self, date_from, date_to):
-        """Получить сводку по работникам за период (только по завершённым нарядам)"""
+        """Получить сводку по работникам за период (только по завершённым нарядам -
+        completed_at IS NULL, пока наряд по записи не отмечен "Выполнено")"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''

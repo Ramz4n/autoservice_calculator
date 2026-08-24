@@ -207,7 +207,16 @@ MIGRATIONS = [
     # чтобы из "Склада" переходить именно к той работе, а не к последней записи машины
     "ALTER TABLE warehouse_parts ADD COLUMN IF NOT EXISTS work_id INT DEFAULT NULL",
     "ALTER TABLE warehouse_parts ADD INDEX IF NOT EXISTS idx_warehouse_work_id (work_id)",
-    # Дата фактического завершения наряда (когда запись переведена в статус "завершён") --
-    # зарплата мастера в отчётах считается по этой дате, а не по дате создания наряда
+    # Дата фактического завершения наряда - зарплата мастера в отчётах считается по этой
+    # дате. Проставляется автоматически при создании наряда для нарядов без записи
+    # (см. Database.add_work), а для нарядов по записи - когда её отмечают "Выполнено"
+    # (см. Database.mark_work_completed)
     "ALTER TABLE works ADD COLUMN IF NOT EXISTS completed_at DATE DEFAULT NULL",
+    # Разово подставляем дату наряда для старых записей, созданных до появления completed_at,
+    # чтобы они не выпадали из зарплатных отчётов - но только для нарядов без записи или по
+    # уже завершённым записям, не трогая те, что реально ещё не сделаны ("в работе"/"ожидание")
+    """UPDATE works wk
+       LEFT JOIN bookings b ON wk.booking_id = b.id
+       SET wk.completed_at = wk.work_date
+       WHERE wk.completed_at IS NULL AND (wk.booking_id IS NULL OR b.status = 'completed')""",
 ]
