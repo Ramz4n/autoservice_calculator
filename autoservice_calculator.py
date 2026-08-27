@@ -122,9 +122,10 @@ def send_telegram_notification(user_id, message, with_menu=False):
 class TreeviewTooltip:
     """Всплывающая подсказка для Treeview при наведении на ячейку"""
 
-    def __init__(self, treeview, columns=None):
+    def __init__(self, treeview, columns=None, text_provider=None):
         self.treeview = treeview
         self.columns = columns  # Список колонок для которых показывать tooltip (None = все)
+        self.text_provider = text_provider  # callable(item_id, col_name) -> str | None, если задан - переопределяет текст ячейки
         self.tooltip = None
         self.current_item = None
         self.current_column = None
@@ -165,6 +166,15 @@ class TreeviewTooltip:
         self.current_item = item
         self.current_column = column
 
+        if self.text_provider:
+            # Кастомный текст (может отличаться от того, что показано в ячейке)
+            text = self.text_provider(item, col_name)
+            if text:
+                self.show_tooltip(event.x_root, event.y_root, text)
+            else:
+                self.hide_tooltip()
+            return
+
         # Получаем текст ячейки
         values = self.treeview.item(item, 'values')
         if not values or col_index >= len(values):
@@ -191,26 +201,50 @@ class TreeviewTooltip:
         frame = tk.Frame(self.tooltip, bg='#ffffe0', relief='solid', borderwidth=1)
         frame.pack()
 
-        # Разбиваем длинный текст на строки
+        # Разбиваем длинный текст на строки, сохраняя явные переносы строк (\n)
         max_width = 60
         lines = []
-        words = text.split()
-        current_line = ""
-        for word in words:
-            if len(current_line + " " + word) <= max_width:
-                current_line = (current_line + " " + word).strip()
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
+        for paragraph in text.split('\n'):
+            words = paragraph.split()
+            if not words:
+                lines.append("")
+                continue
+            current_line = ""
+            for word in words:
+                if len(current_line + " " + word) <= max_width:
+                    current_line = (current_line + " " + word).strip()
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+            if current_line:
+                lines.append(current_line)
 
         wrapped_text = '\n'.join(lines) if lines else text
 
         label = tk.Label(frame, text=wrapped_text, bg='#ffffe0', fg='black',
                         font=('Segoe UI', 11), justify=tk.LEFT, padx=8, pady=5)
         label.pack()
+
+        # Не даём подсказке выйти за границы экрана
+        self.tooltip.update_idletasks()
+        tip_width = self.tooltip.winfo_width()
+        tip_height = self.tooltip.winfo_height()
+        screen_width = self.tooltip.winfo_screenwidth()
+        screen_height = self.tooltip.winfo_screenheight()
+
+        pos_x = x + 15
+        pos_y = y + 10
+        if pos_x + tip_width > screen_width:
+            pos_x = x - tip_width - 15
+            if pos_x < 0:
+                pos_x = max(0, screen_width - tip_width)
+        if pos_y + tip_height > screen_height:
+            pos_y = y - tip_height - 10
+            if pos_y < 0:
+                pos_y = max(0, screen_height - tip_height)
+
+        self.tooltip.wm_geometry(f"+{pos_x}+{pos_y}")
 
     def hide_tooltip(self, event=None):
         """Скрыть tooltip"""
@@ -3393,17 +3427,19 @@ class AutoServiceApp:
         summary_table_frame = ctk.CTkFrame(summary_frame, fg_color="transparent")
         summary_table_frame.pack(fill=tk.X, padx=5)
 
-        columns = ("name", "count", "total", "percent")
+        columns = ("name", "count", "total", "percent", "bonus")
         self.summary_tree = ttk.Treeview(summary_table_frame, columns=columns, show="headings", height=8)
         self.summary_tree.heading("name", text=self.tr("reports.col_master_name"))
         self.summary_tree.heading("count", text=self.tr("reports.col_work_count"))
         self.summary_tree.heading("total", text=self.tr("reports.col_total_earned"))
         self.summary_tree.heading("percent", text=self.tr("reports.col_master_percent"))
+        self.summary_tree.heading("bonus", text=self.tr("reports.col_bonus"))
 
         self.summary_tree.column("name", width=200)
         self.summary_tree.column("count", width=200, anchor=tk.CENTER)
         self.summary_tree.column("total", width=230, anchor=tk.CENTER)
         self.summary_tree.column("percent", width=210, anchor=tk.CENTER)
+        self.summary_tree.column("bonus", width=170, anchor=tk.CENTER)
 
         # Настройка цветов для чередующихся строк (zebra stripes)
         self.summary_tree.tag_configure('oddrow', background='#ffffff')
@@ -3413,6 +3449,33 @@ class AutoServiceApp:
         self.summary_tree.configure(yscrollcommand=summary_scrollbar.set)
         summary_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.summary_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Данные о премиях по строкам (worker_id -> список (дата, сумма, комментарий)) для tooltip колонки "Премии"
+        self.summary_bonus_data = {}
+
+        def bonus_tooltip_text(item_id, col_name):
+            if col_name != "bonus":
+                return None
+            tags = self.summary_tree.item(item_id, "tags")
+            if not tags:
+                return None
+            worker_id = tags[0]
+            bonuses = self.summary_bonus_data.get(worker_id)
+            if not bonuses:
+                return None
+            lines = [self.tr("reports.bonus_tooltip_title")]
+            for bonus_date, amount, comment in bonuses:
+                if hasattr(bonus_date, 'strftime'):
+                    date_str = bonus_date.strftime('%d.%m.%Y')
+                else:
+                    date_str = str(bonus_date)
+                line = f"{date_str} — {self.format_currency(float(amount))}"
+                if comment:
+                    line += f" ({comment})"
+                lines.append(line)
+            return '\n'.join(lines)
+
+        TreeviewTooltip(self.summary_tree, columns=["bonus"], text_provider=bonus_tooltip_text)
 
         # Контекстное меню для сводки по мастерам
         self.summary_context_menu = tk.Menu(
@@ -3425,6 +3488,11 @@ class AutoServiceApp:
             label="  📋  " + self.tr("reports.ctx_details"), command=self.show_master_report_details,
             foreground="#64b5f6", activeforeground="#90caf9",
             background="#1e1e1e", activebackground="#1976d2"
+        )
+        self.summary_context_menu.add_command(
+            label="  💰  " + self.tr("reports.ctx_add_bonus"), command=self.show_add_bonus_window,
+            foreground="#81c784", activeforeground="#a5d6a7",
+            background="#1e1e1e", activebackground="#2e7d32"
         )
         self.summary_tree.bind("<Button-3>", self.show_summary_context_menu)
 
@@ -3500,6 +3568,8 @@ class AutoServiceApp:
 
         # Сводка
         summary = self.db.get_summary_by_period(date_from, date_to)
+        bonus_sums = self.db.get_bonuses_sum_by_period(date_from, date_to)
+        self.summary_bonus_data = {}
         grand_total = 0
         total_percent_sum = 0
         summary_row_index = 0
@@ -3513,12 +3583,21 @@ class AutoServiceApp:
             # Определяем тег для чередующихся строк
             row_tag = 'oddrow' if summary_row_index % 2 == 0 else 'evenrow'
 
-            # ID мастера сохраняем в тегах вместе с цветом (для контекстного меню "Подробно")
+            # Премии мастера за выбранный период (сумма в колонке, разбивка по датам - во всплывающей подсказке)
+            bonus_total = bonus_sums.get(worker_id, 0)
+            if bonus_total:
+                self.summary_bonus_data[str(worker_id)] = self.db.get_bonuses_by_worker_and_period(worker_id, date_from, date_to)
+                bonus_text = self.format_currency(bonus_total)
+            else:
+                bonus_text = "-"
+
+            # ID мастера сохраняем в тегах вместе с цветом (для контекстного меню "Подробно"/"Выписать премию")
             self.summary_tree.insert("", tk.END, values=(
                 name,
                 count,
                 self.format_currency(total),
-                self.format_currency(worker_share)
+                self.format_currency(worker_share),
+                bonus_text
             ), tags=(str(worker_id), row_tag))
 
             summary_row_index += 1
@@ -3553,6 +3632,75 @@ class AutoServiceApp:
         if item:
             self.summary_tree.selection_set(item)
             self.summary_context_menu.post(event.x_root, event.y_root)
+
+    def show_add_bonus_window(self):
+        """Показать окно начисления премии выбранному мастеру"""
+        selection = self.summary_tree.selection()
+        if not selection:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_master"))
+            return
+
+        item = self.summary_tree.item(selection[0])
+        worker_id = item['tags'][0]
+        worker_name = item['values'][0]
+
+        bonus_window = ctk.CTkToplevel(self.root)
+        bonus_window.title(self.tr("reports.bonus_window_title", name=worker_name))
+        bonus_window.geometry("380x260")
+        bonus_window.transient(self.root)
+        bonus_window.attributes("-topmost", True)
+        bonus_window.grab_set()
+        bonus_window.focus_force()
+
+        main_frame = ctk.CTkFrame(bonus_window, fg_color="transparent")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        ctk.CTkLabel(main_frame, text=f"👤  {worker_name}", font=("Arial", 16, "bold")).pack(anchor="w", pady=(0, 15))
+
+        ctk.CTkLabel(main_frame, text=self.tr("reports.bonus_amount_label"), font=("Arial", 14)).pack(anchor="w", pady=(0, 5))
+        amount_entry = ctk.CTkEntry(main_frame, width=200, font=("Arial", 14))
+        amount_entry.pack(anchor="w", pady=(0, 10))
+        amount_entry.focus_set()
+
+        ctk.CTkLabel(main_frame, text=self.tr("reports.bonus_date_label"), font=("Arial", 14)).pack(anchor="w", pady=(0, 5))
+        bonus_date_entry = DateEntry(main_frame, width=15, date_pattern='dd.mm.yyyy', locale='ru_RU')
+        bonus_date_entry.pack(anchor="w", pady=(0, 15))
+
+        def save_bonus():
+            try:
+                amount = float(amount_entry.get().strip().replace(',', '.'))
+                if amount <= 0:
+                    raise ValueError()
+            except ValueError:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("reports.msg_invalid_bonus_amount"), parent=bonus_window)
+                return
+
+            bonus_date = bonus_date_entry.get_date()
+
+            # Премия начисляется вместе со связанным расходом в "Финансы" одной транзакцией
+            # (см. Database.add_worker_bonus) - поэтому удаление расхода на вкладке "Финансы"
+            # удалит и премию из отчётов
+            added = self.db.add_worker_bonus(
+                int(worker_id), amount, bonus_date,
+                self.tr("finances.bonus_description", name=worker_name),
+                self.tr("finances.category_bonus")
+            )
+            if added:
+                if hasattr(self, 'expenses_tree'):
+                    self.refresh_expenses()
+
+                messagebox.showinfo(self.tr("common.success"), self.tr("reports.msg_bonus_added", name=worker_name, amount=self.format_currency(amount)), parent=bonus_window)
+                bonus_window.destroy()
+                self.generate_report(show_empty_message=False)
+            else:
+                messagebox.showerror(self.tr("common.error"), self.tr("reports.msg_bonus_failed"), parent=bonus_window)
+
+        btn_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        btn_frame.pack(fill=tk.X, pady=(5, 0))
+        ctk.CTkButton(btn_frame, text=self.tr("reports.bonus_save_btn"), command=save_bonus,
+                     fg_color="#2e7d32", hover_color="#1b5e20", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text=self.tr("common.cancel"), command=bonus_window.destroy,
+                     fg_color="#757575", hover_color="#616161", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
 
     def show_master_report_details(self):
         """Показать окно с детализацией работ мастера за сформированный период"""
@@ -4445,11 +4593,19 @@ class AutoServiceApp:
         center_container = ctk.CTkFrame(main_frame)
         center_container.pack(anchor=tk.CENTER, pady=10)
 
-        # Переключатель Расход/Доход
-        switch_row = ctk.CTkFrame(center_container)
-        switch_row.pack(fill=tk.X, pady=10)
+        # Форма ввода - все строки выровнены по сетке (одинаковая ширина колонки label
+        # и одинаковый маленький размер полей), чтобы визуально быть на одном уровне
+        form_frame = ctk.CTkFrame(center_container, fg_color="transparent")
+        form_frame.pack(pady=10)
 
-        self.expense_type_label = ctk.CTkLabel(switch_row, text=self.tr("finances.expense_label"), width=80, anchor="e",
+        FIELD_WIDTH = 250
+
+        # Переключатель Расход/Доход
+        ctk.CTkLabel(form_frame, text=self.tr("finances.type_label"), width=150, anchor="e").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        switch_row = ctk.CTkFrame(form_frame, fg_color="transparent")
+        switch_row.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+        self.expense_type_label = ctk.CTkLabel(switch_row, text=self.tr("finances.expense_label"), width=60, anchor="e",
                                                 font=("Segoe UI", 14, "bold"), text_color="#d32f2f")
         self.expense_type_label.pack(side=tk.LEFT, padx=5)
 
@@ -4461,40 +4617,34 @@ class AutoServiceApp:
                                            fg_color="#d32f2f", button_hover_color="#f0f0f0")
         self.income_switch.pack(side=tk.LEFT, padx=10)
 
-        self.income_type_label = ctk.CTkLabel(switch_row, text=self.tr("finances.income_label"), width=80, anchor="w",
+        self.income_type_label = ctk.CTkLabel(switch_row, text=self.tr("finances.income_label"), width=60, anchor="w",
                                                font=("Segoe UI", 14), text_color="gray")
         self.income_type_label.pack(side=tk.LEFT, padx=5)
 
         # Категория
-        row1 = ctk.CTkFrame(center_container)
-        row1.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row1, text=self.tr("finances.category_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.expense_category_combo = ctk.CTkComboBox(row1, width=350,
+        ctk.CTkLabel(form_frame, text=self.tr("finances.category_label"), width=150, anchor="e").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        self.expense_category_combo = ctk.CTkComboBox(form_frame, width=FIELD_WIDTH,
                                                     values=[self.tr("finances.category_rent"), self.tr("finances.category_taxes"),
                                                             self.tr("finances.category_utilities"), self.tr("finances.category_parts_purchase"),
                                                             self.tr("finances.category_tools"), self.tr("finances.category_ads"),
                                                             self.tr("finances.category_other"), self.tr("finances.income_label")],
                                                     fg_color="white", text_color="black", button_color="#0078d7", button_hover_color="#005a9e")
-        self.expense_category_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.expense_category_combo.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         self.expense_category_combo.set(self.tr("finances.category_rent"))
 
         # Описание
-        row2 = ctk.CTkFrame(center_container)
-        row2.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row2, text=self.tr("finances.description_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.expense_desc_entry = ctk.CTkEntry(row2, width=400, fg_color="white", text_color="black")
-        self.expense_desc_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ctk.CTkLabel(form_frame, text=self.tr("finances.description_label"), width=150, anchor="e").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+        self.expense_desc_entry = ctk.CTkEntry(form_frame, width=FIELD_WIDTH, fg_color="white", text_color="black")
+        self.expense_desc_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
         # Сумма
-        row3 = ctk.CTkFrame(center_container)
-        row3.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row3, text=self.tr("finances.amount_label"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.expense_amount_entry = ctk.CTkEntry(row3, width=200, fg_color="white", text_color="black")
-        self.expense_amount_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ctk.CTkLabel(form_frame, text=self.tr("finances.amount_label"), width=150, anchor="e").grid(row=3, column=0, padx=5, pady=5, sticky="e")
+        self.expense_amount_entry = ctk.CTkEntry(form_frame, width=FIELD_WIDTH, fg_color="white", text_color="black")
+        self.expense_amount_entry.grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
         # Кнопка добавления
         self.add_expense_btn = ctk.CTkButton(center_container, text=self.tr("finances.add_expense_btn"),
-                   command=self.add_expense, width=550, height=50, fg_color="#d32f2f", hover_color="#b71c1c")
+                   command=self.add_expense, width=400, height=50, fg_color="#d32f2f", hover_color="#b71c1c")
         self.add_expense_btn.pack(anchor=tk.CENTER, pady=20)
 
         # История расходов и доходов
@@ -4511,14 +4661,17 @@ class AutoServiceApp:
         self.expenses_tree.heading("date", text=self.tr("bookings.col_date"))
 
         self.expenses_tree.column("id", width=50, anchor=tk.CENTER)
-        self.expenses_tree.column("type", width=80, anchor=tk.CENTER)
-        self.expenses_tree.column("category", width=150, anchor=tk.W)
-        self.expenses_tree.column("desc", width=250, anchor=tk.W)
-        self.expenses_tree.column("amount", width=100, anchor=tk.CENTER)
-        self.expenses_tree.column("date", width=100, anchor=tk.CENTER)
+        self.expenses_tree.column("type", width=90, anchor=tk.CENTER)
+        self.expenses_tree.column("category", width=200, anchor=tk.W)
+        self.expenses_tree.column("desc", width=380, anchor=tk.W)
+        self.expenses_tree.column("amount", width=130, anchor=tk.CENTER)
+        self.expenses_tree.column("date", width=110, anchor=tk.CENTER)
 
         scrollbar = ttk.Scrollbar(history_frame, orient=tk.VERTICAL, command=self.expenses_tree.yview)
         self.expenses_tree.configure(yscrollcommand=scrollbar.set)
+
+        # Tooltip с полным текстом при наведении, если описание/категория обрезаны
+        TreeviewTooltip(self.expenses_tree, columns=["desc", "category"])
 
         # Настройка цветов для строк
         self.expenses_tree.tag_configure('oddrow', background='#ffffff')
@@ -4531,7 +4684,7 @@ class AutoServiceApp:
 
         # Кнопка удаления
         self.delete_expense_btn = ctk.CTkButton(center_container, text=self.tr("finances.delete_selected_btn"),
-                   command=self.delete_expense, width=550, fg_color="red", hover_color="#555555")
+                   command=self.delete_expense, width=400, fg_color="red", hover_color="#555555")
         self.delete_expense_btn.pack(anchor=tk.CENTER, pady=10)
 
     def on_income_switch_changed(self):
@@ -5698,7 +5851,7 @@ class AutoServiceApp:
         table_frame = ctk.CTkFrame(self.bookings_frame)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        columns = ("id", "order_number", "date", "time", "name", "phone", "username", "car", "status")
+        columns = ("id", "order_number", "date", "time", "name", "phone", "username", "car", "notes", "status")
         self.bookings_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
 
         # Настройка колонок
@@ -5710,6 +5863,7 @@ class AutoServiceApp:
         self.bookings_tree.heading("phone", text=self.tr("bookings.col_phone"))
         self.bookings_tree.heading("username", text="Telegram")
         self.bookings_tree.heading("car", text=self.tr("bookings.col_car"))
+        self.bookings_tree.heading("notes", text=self.tr("bookings.col_notes"))
         self.bookings_tree.heading("status", text=self.tr("bookings.col_status"))
 
         self.bookings_tree.column("id", width=0, stretch=False, minwidth=0)
@@ -5720,12 +5874,16 @@ class AutoServiceApp:
         self.bookings_tree.column("phone", width=120)
         self.bookings_tree.column("username", width=120)
         self.bookings_tree.column("car", width=180)
+        self.bookings_tree.column("notes", width=150)
         self.bookings_tree.column("status", width=100)
 
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.bookings_tree.yview)
         self.bookings_tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.bookings_tree.pack(fill=tk.BOTH, expand=True)
+
+        # Tooltip с полным текстом примечания при наведении (если текст обрезан)
+        TreeviewTooltip(self.bookings_tree, columns=["notes"])
 
         # Настройка цветов для статусов
         self.bookings_tree.tag_configure("waiting", background="#fff3e0", foreground="#e65100")      # Оранжевый - В ожидании
@@ -5817,7 +5975,7 @@ class AutoServiceApp:
 
         # Заполнение таблицы
         for booking in bookings:
-            booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number = booking
+            booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number, notes = booking
 
             # Фильтрация по поисковому запросу (телефон или госномер)
             if search_query:
@@ -5855,7 +6013,7 @@ class AutoServiceApp:
             self.bookings_tree.insert("", tk.END, values=(
                 booking_id, order_number or "-", date_str, booking_time, full_name or "-",
                 phone or "-", f"@{username}" if username else "-",
-                car_info or "-", status_ru
+                car_info or "-", notes or "-", status_ru
             ), tags=(status,))
 
     def show_today_bookings(self):
@@ -5867,7 +6025,7 @@ class AutoServiceApp:
         bookings = self.db.get_today_bookings()
 
         for booking in bookings:
-            booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number = booking
+            booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number, notes = booking
 
             if isinstance(booking_date, date):
                 date_str = booking_date.strftime("%d.%m.%Y")
@@ -5885,7 +6043,7 @@ class AutoServiceApp:
             self.bookings_tree.insert("", tk.END, values=(
                 booking_id, order_number or "-", date_str, booking_time, full_name or "-",
                 phone or "-", f"@{username}" if username else "-",
-                car_info or "-", status_ru
+                car_info or "-", notes or "-", status_ru
             ), tags=(status,))
 
     def get_selected_booking_id(self):
@@ -6054,7 +6212,7 @@ class AutoServiceApp:
 
         # Центрируем окно
         window_width = 450
-        window_height = 620
+        window_height = 690
         screen_width = add_window.winfo_screenwidth()
         screen_height = add_window.winfo_screenheight()
         x = (screen_width - window_width) // 2
@@ -6322,6 +6480,62 @@ class AutoServiceApp:
         date_entry.bind("<<DateEntrySelected>>", update_available_times)
         update_available_times()
 
+        # === ПРИМЕЧАНИЕ (со списком ключевых слов, как в "Проделанные работы") ===
+        ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_notes"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
+        notes_row = ctk.CTkFrame(main_frame, fg_color="transparent")
+        notes_row.pack(fill=tk.X, anchor="w", pady=(0, 10))
+        notes_entry = ctk.CTkEntry(notes_row, width=220, font=("Arial", 14))
+        notes_entry.pack(side=tk.LEFT)
+        notes_keyword_listbox = tk.Listbox(notes_row, height=5, width=25, font=("Arial", 12))
+        notes_keyword_listbox_visible = [False]
+
+        def show_notes_keyword_list(keywords):
+            notes_keyword_listbox.delete(0, tk.END)
+            for kw in keywords:
+                notes_keyword_listbox.insert(tk.END, kw)
+            if not notes_keyword_listbox_visible[0]:
+                notes_keyword_listbox.pack(side=tk.LEFT, padx=5)
+                notes_keyword_listbox_visible[0] = True
+
+        def hide_notes_keyword_list():
+            if notes_keyword_listbox_visible[0]:
+                notes_keyword_listbox.pack_forget()
+                notes_keyword_listbox_visible[0] = False
+
+        def on_notes_key(event):
+            text = notes_entry.get().strip()
+            if len(text) >= 1:
+                results = self.db.search_keywords(text)
+                if results:
+                    show_notes_keyword_list(results)
+                else:
+                    hide_notes_keyword_list()
+            else:
+                hide_notes_keyword_list()
+
+        def on_notes_select(event):
+            sel = notes_keyword_listbox.curselection()
+            if sel:
+                notes_entry.delete(0, tk.END)
+                notes_entry.insert(0, notes_keyword_listbox.get(sel[0]))
+                hide_notes_keyword_list()
+                notes_entry.focus_set()
+
+        def on_notes_focus_out(event):
+            def check_and_hide():
+                try:
+                    focused = add_window.focus_get()
+                    if focused != notes_keyword_listbox:
+                        hide_notes_keyword_list()
+                except:
+                    hide_notes_keyword_list()
+            add_window.after(200, check_and_hide)
+
+        notes_entry.bind('<KeyRelease>', on_notes_key)
+        notes_entry.bind('<FocusOut>', on_notes_focus_out)
+        notes_keyword_listbox.bind('<Double-Button-1>', on_notes_select)
+        notes_keyword_listbox.bind('<Return>', on_notes_select)
+
         def save_booking():
             """Сохранить запись"""
             name = name_entry.get().strip()
@@ -6416,11 +6630,13 @@ class AutoServiceApp:
                 car_id = self.db.get_or_create_car(client_id, brand, model, number)
 
             # Сохраняем запись
+            notes = notes_entry.get().strip()
             booking_id = self.db.add_booking(
                 booking_date=booking_date,
                 booking_time=time_str,
                 client_id=client_id,
-                car_id=car_id
+                car_id=car_id,
+                notes=notes if notes else None
             )
             if booking_id:
                 messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_client_booked", date=date_str, time=time_str), parent=add_window)
@@ -6766,6 +6982,9 @@ class AutoServiceApp:
             info_data.append(("🔧 " + self.tr("bookings.info_label_master"), primary_worker_name))
         if primary_mileage:
             info_data.append(("📊 " + self.tr("works.mileage"), str(primary_mileage)))
+        booking_notes = booking.get('notes')
+        if booking_notes:
+            info_data.append(("📝 " + self.tr("bookings.info_label_notes"), booking_notes))
 
         for i, (label, value) in enumerate(info_data):
             row = ctk.CTkFrame(content_frame, fg_color="transparent")

@@ -62,6 +62,19 @@ TABLES = {
         ) ENGINE=InnoDB
     ''',
 
+    'worker_bonuses': '''
+        CREATE TABLE IF NOT EXISTS worker_bonuses (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            worker_id INT NOT NULL,
+            amount DECIMAL(12,2) NOT NULL,
+            bonus_date DATE NOT NULL,
+            comment VARCHAR(255) DEFAULT NULL,
+            expense_id INT DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB
+    ''',
+
     'parts': '''
         CREATE TABLE IF NOT EXISTS parts (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -103,6 +116,7 @@ TABLES = {
             booking_date DATE NOT NULL,
             booking_time VARCHAR(10) NOT NULL,
             status VARCHAR(20) DEFAULT 'waiting',
+            notes TEXT DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_booking_datetime (booking_date, booking_time)
         ) ENGINE=InnoDB
@@ -189,6 +203,7 @@ INDEXES = [
     "CREATE INDEX idx_bookings_status ON bookings(status)",
     "CREATE INDEX idx_bookings_client_id ON bookings(client_id)",
     "CREATE INDEX idx_client_cars_client_id ON client_cars(client_id)",
+    "CREATE INDEX idx_worker_bonuses_worker_date ON worker_bonuses(worker_id, bonus_date)",
 ]
 
 # Миграции для существующей БД
@@ -219,4 +234,9 @@ MIGRATIONS = [
        LEFT JOIN bookings b ON wk.booking_id = b.id
        SET wk.completed_at = wk.work_date
        WHERE wk.completed_at IS NULL AND (wk.booking_id IS NULL OR b.status = 'completed')""",
+    # Примечание к записи клиента (заполняется при создании записи в окне "Записать клиента")
+    "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT NULL",
+    # Связь премии с записью в expenses - чтобы при удалении расхода в "Финансы"
+    # премия тоже пропадала из отчётов (см. Database.delete_expense)
+    "ALTER TABLE worker_bonuses ADD COLUMN IF NOT EXISTS expense_id INT DEFAULT NULL",
 ]
