@@ -589,6 +589,61 @@ class Database:
         conn.close()
         return works
 
+    def add_worker_bonus(self, worker_id, amount, bonus_date, expense_description, expense_category, comment=None):
+        """Начислить премию мастеру. Премия одновременно записывается в expenses как расход
+        (одной транзакцией, со ссылкой worker_bonuses.expense_id), чтобы участвовать в
+        отчётах и на вкладке "Финансы", и чтобы при удалении этого расхода в "Финансы"
+        премия исчезала и из отчётов тоже (см. Database.delete_expense). Возвращает True/False."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO expenses (description, amount, expense_date, category, is_income) VALUES (%s, %s, %s, %s, 0)",
+                (expense_description, amount, bonus_date, expense_category)
+            )
+            expense_id = cursor.lastrowid
+
+            cursor.execute(
+                "INSERT INTO worker_bonuses (worker_id, amount, bonus_date, comment, expense_id) VALUES (%s, %s, %s, %s, %s)",
+                (worker_id, amount, bonus_date, comment, expense_id)
+            )
+            conn.commit()
+            return True
+        except MySQLError as e:
+            print(f"Ошибка начисления премии: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def get_bonuses_by_worker_and_period(self, worker_id, date_from, date_to):
+        """Получить премии мастера за период (дата, сумма, комментарий)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT bonus_date, amount, comment
+            FROM worker_bonuses
+            WHERE worker_id = %s AND bonus_date BETWEEN %s AND %s
+            ORDER BY bonus_date ASC, id ASC
+        ''', (worker_id, date_from, date_to))
+        bonuses = cursor.fetchall()
+        conn.close()
+        return bonuses
+
+    def get_bonuses_sum_by_period(self, date_from, date_to):
+        """Получить суммы премий по всем мастерам за период: {worker_id: сумма}"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT worker_id, SUM(amount)
+            FROM worker_bonuses
+            WHERE bonus_date BETWEEN %s AND %s
+            GROUP BY worker_id
+        ''', (date_from, date_to))
+        rows = cursor.fetchall()
+        conn.close()
+        return {row[0]: float(row[1]) for row in rows}
+
     def mark_work_completed(self, booking_id, completed_date=None):
         """Отметить наряды по записи как завершённые, чтобы их сумма попала в зарплатные отчёты"""
         conn = self.get_connection()
@@ -665,9 +720,10 @@ class Database:
         return expenses
 
     def delete_expense(self, expense_id):
-        """Удалить расход"""
+        """Удалить расход (и связанную премию мастера, если это была она - см. add_worker_bonus)"""
         conn = self.get_connection()
         cursor = conn.cursor()
+        cursor.execute("DELETE FROM worker_bonuses WHERE expense_id = %s", (expense_id,))
         cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
         conn.commit()
         conn.close()
@@ -963,7 +1019,7 @@ class Database:
                    b.booking_date, b.booking_time, b.status,
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
                    b.client_id, b.car_id,
-                   w.order_number
+                   w.order_number, b.notes
                    FROM bookings b
                    LEFT JOIN clients c ON b.client_id = c.id
                    LEFT JOIN client_cars cc ON b.car_id = cc.id
@@ -1009,7 +1065,7 @@ class Database:
                    b.booking_date, b.booking_time, b.status,
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
                    b.client_id, b.car_id,
-                   w.order_number
+                   w.order_number, b.notes
             FROM bookings b
             LEFT JOIN clients c ON b.client_id = c.id
             LEFT JOIN client_cars cc ON b.car_id = cc.id
@@ -1040,15 +1096,15 @@ class Database:
         conn.commit()
         conn.close()
 
-    def add_booking(self, booking_date, booking_time, client_id, car_id=None, status="waiting"):
+    def add_booking(self, booking_date, booking_time, client_id, car_id=None, status="waiting", notes=None):
         """Добавить новую запись клиента. Возвращает ID записи или None при ошибке."""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                INSERT INTO bookings (client_id, car_id, booking_date, booking_time, status)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (client_id, car_id, booking_date, booking_time, status))
+                INSERT INTO bookings (client_id, car_id, booking_date, booking_time, status, notes)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (client_id, car_id, booking_date, booking_time, status, notes))
             conn.commit()
             return cursor.lastrowid
         except Exception as e:
@@ -1123,7 +1179,7 @@ class Database:
                    c.phone,
                    b.booking_date, b.booking_time, b.status, b.created_at,
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
-                   b.client_id, b.car_id
+                   b.client_id, b.car_id, b.notes
             FROM bookings b
             LEFT JOIN clients c ON b.client_id = c.id
             LEFT JOIN client_cars cc ON b.car_id = cc.id
@@ -1144,7 +1200,8 @@ class Database:
                 "created_at": row[8],
                 "car_info": row[9],
                 "client_id": row[10],
-                "car_id": row[11]
+                "car_id": row[11],
+                "notes": row[12]
             }
         return None
 
