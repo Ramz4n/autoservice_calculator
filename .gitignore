@@ -1,0 +1,14 @@
+# Environment variables
+.env
+tgbot/.env
+config/.env
+.claude
+.venv
+dist
+build
+release
+autoservice_calculator.spec
+main.spec
+license_cache.json
+license.key
+Backup
