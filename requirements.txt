@@ -6,3 +6,5 @@ pymysql
 apscheduler
 python-dotenv
 pystray
+reportlab
+customtkinter
