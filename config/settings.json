@@ -14,5 +14,6 @@
     "backup_last": "2026-10-17T10:41:11.656750",
     "bookings_hidden_columns": [
         "username"
-    ]
+    ],
+    "warehouse_hidden_columns": []
 }
