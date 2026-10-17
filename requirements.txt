@@ -1,10 +1,12 @@
-tkcalendar
-qrcode[pil]
-pillow
-reportlab
-pymysql
-apscheduler
-python-dotenv
-pystray
-reportlab
-customtkinter
+# Desktop app (autoservice_calculator). Telegram bot deps: tgbot/requirements.txt
+customtkinter==6.0.0
+tkcalendar==1.6.1
+pillow==10.1.0
+qrcode[pil]==7.4.2
+reportlab==5.0.1
+pymysql==1.1.0
+python-dotenv==1.1.1
+requests==2.31.0
+
+# Build (build.bat)
+pyinstaller==6.15.0
