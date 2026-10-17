@@ -67,6 +67,16 @@ def _restore_database(db, dump: dict) -> None:
     conn = db.get_connection()
     try:
         with conn.cursor() as cursor:
+            # Колонки, которые реально есть в текущей схеме: в старых бэкапах могут
+            # встречаться поля, удалённые из схемы (например keywords.priority)
+            existing_columns = {}
+            for table_name in TABLES:
+                cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
+                existing_columns[table_name] = {
+                    (row["Field"] if isinstance(row, dict) else row[0])
+                    for row in cursor.fetchall()
+                }
+
             cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
             try:
                 for table_name in TABLES:
@@ -75,7 +85,9 @@ def _restore_database(db, dump: dict) -> None:
                 for table_name, rows in dump.items():
                     if table_name not in TABLES or not rows:
                         continue
-                    columns = list(rows[0].keys())
+                    columns = [c for c in rows[0].keys() if c in existing_columns[table_name]]
+                    if not columns:
+                        continue
                     col_list = ", ".join(f"`{c}`" for c in columns)
                     placeholders = ", ".join(["%s"] * len(columns))
                     sql = f"INSERT INTO `{table_name}` ({col_list}) VALUES ({placeholders})"
