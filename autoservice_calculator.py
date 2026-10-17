@@ -147,15 +147,20 @@ class TreeviewTooltip:
             self.hide_tooltip()
             return
 
-        # Преобразуем #1, #2 в индекс колонки
-        col_index = int(column.replace('#', '')) - 1
-        columns = self.treeview['columns']
+        # Преобразуем #1, #2 в имя колонки. Номер считается по видимым колонкам (displaycolumns),
+        # а индекс значения в values - по полному списку columns
+        display_index = int(column.replace('#', '')) - 1
+        columns = list(self.treeview['columns'])
+        display_columns = list(self.treeview['displaycolumns'])
+        if display_columns == ['#all']:
+            display_columns = columns
 
-        if col_index < 0 or col_index >= len(columns):
+        if display_index < 0 or display_index >= len(display_columns):
             self.hide_tooltip()
             return
 
-        col_name = columns[col_index]
+        col_name = display_columns[display_index]
+        col_index = columns.index(col_name)
 
         # Проверяем, нужно ли показывать tooltip для этой колонки
         if self.columns and col_name not in self.columns:
@@ -2621,6 +2626,7 @@ class AutoServiceApp:
     def clear_work_form(self, restore_warehouse=True):
         """Очистить форму добавления работы"""
         self.editing_work_id = None
+        self.worker_combo.set(self.tr("works.select_master"))
         self.works_list = []
         for item in self.works_tree.get_children():
             self.works_tree.delete(item)
@@ -5953,6 +5959,7 @@ class AutoServiceApp:
                                         values=[self.tr("bookings.filter_all"), self.tr("bookings.filter_waiting"),
                                                 self.tr("bookings.filter_in_progress"), self.tr("bookings.filter_completed"),
                                                 self.tr("bookings.filter_cancelled")],
+                                        command=lambda _: self.refresh_bookings(),  # фильтр применяется сразу при выборе
                                         width=140)
         status_combo.pack(side=tk.LEFT, padx=5)
 
@@ -5973,6 +5980,9 @@ class AutoServiceApp:
                      width=30, fg_color="#c62828", hover_color="#b71c1c").pack(side=tk.LEFT, padx=2)
         ctk.CTkButton(filter_frame, text=self.tr("bookings.add_client"), command=self.show_add_booking_window,
                      fg_color="#1565c0", hover_color="#0d47a1", width=140).pack(side=tk.LEFT, padx=(15, 5))
+        self.bookings_columns_btn = ctk.CTkButton(filter_frame, text="☰ " + self.tr("bookings.columns_btn"),
+                                                  command=self.show_bookings_columns_menu_from_button, width=110)
+        self.bookings_columns_btn.pack(side=tk.LEFT, padx=5)
 
         # Таблица записей
         table_frame = ctk.CTkFrame(self.bookings_frame)
@@ -6003,6 +6013,13 @@ class AutoServiceApp:
         self.bookings_tree.column("car", width=180)
         self.bookings_tree.column("notes", width=150)
         self.bookings_tree.column("status", width=100)
+
+        # Исходные ширины - по ним видимые колонки делят ширину таблицы пропорционально
+        self.bookings_base_widths = {c: self.bookings_tree.column(c, "width") for c in self.BOOKINGS_TOGGLEABLE_COLUMNS}
+
+        # Видимость колонок (сохраняется в settings.json)
+        self.apply_bookings_columns_visibility()
+        self.bookings_tree.bind("<Configure>", lambda e: self.fit_bookings_columns(), add="+")
 
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.bookings_tree.yview)
         self.bookings_tree.configure(yscrollcommand=scrollbar.set)
@@ -6781,8 +6798,78 @@ class AutoServiceApp:
         ctk.CTkButton(btn_frame, text=self.tr("common.cancel"), command=on_close,
                      fg_color="#757575", hover_color="#616161", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
 
+    # Колонки таблицы записей, которые можно скрывать (id скрыт всегда)
+    BOOKINGS_TOGGLEABLE_COLUMNS = ("order_number", "date", "time", "name", "phone", "username", "car", "notes", "status")
+
+    def apply_bookings_columns_visibility(self):
+        """Показать только колонки, не отмеченные как скрытые в настройках"""
+        hidden = set(self.load_settings().get("bookings_hidden_columns", []))
+        visible = [c for c in self.BOOKINGS_TOGGLEABLE_COLUMNS if c not in hidden]
+        if not visible:
+            visible = list(self.BOOKINGS_TOGGLEABLE_COLUMNS)
+        self.bookings_tree["displaycolumns"] = visible
+        self.fit_bookings_columns()
+
+    def fit_bookings_columns(self):
+        """Растянуть видимые колонки на всю ширину таблицы (пропорционально исходным ширинам)"""
+        tree_width = self.bookings_tree.winfo_width()
+        if tree_width <= 1:  # таблица ещё не отрисована - пересчитаем по <Configure>
+            return
+        visible = [c for c in self.bookings_tree["displaycolumns"] if c in self.bookings_base_widths]
+        base_total = sum(self.bookings_base_widths[c] for c in visible)
+        if not base_total:
+            return
+        used = 0
+        for i, column in enumerate(visible):
+            if i == len(visible) - 1:
+                width = tree_width - used  # последней колонке - остаток, чтобы не было зазора от округления
+            else:
+                width = int(tree_width * self.bookings_base_widths[column] / base_total)
+            used += width
+            self.bookings_tree.column(column, width=max(width, 40))
+
+    def toggle_bookings_column(self, column):
+        """Скрыть/показать колонку и сохранить выбор"""
+        settings = self.load_settings()
+        hidden = set(settings.get("bookings_hidden_columns", []))
+        if column in hidden:
+            hidden.discard(column)
+        else:
+            # Нельзя скрыть последнюю видимую колонку
+            if len([c for c in self.BOOKINGS_TOGGLEABLE_COLUMNS if c not in hidden]) <= 1:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.columns_last_visible"))
+                return
+            hidden.add(column)
+        settings["bookings_hidden_columns"] = [c for c in self.BOOKINGS_TOGGLEABLE_COLUMNS if c in hidden]
+        self.save_settings(settings)
+        self.apply_bookings_columns_visibility()
+
+    def show_bookings_columns_menu(self, x_root, y_root):
+        """Меню с галочками: какие колонки показывать"""
+        hidden = set(self.load_settings().get("bookings_hidden_columns", []))
+        menu = tk.Menu(self.bookings_tree, tearoff=0, font=("Segoe UI", 11))
+        menu.add_command(label=self.tr("bookings.columns_menu_title"), state="disabled")
+        menu.add_separator()
+        menu._vars = []  # держим ссылки, чтобы переменные галочек не удалил сборщик мусора
+        for column in self.BOOKINGS_TOGGLEABLE_COLUMNS:
+            var = tk.BooleanVar(master=menu, value=column not in hidden)
+            menu._vars.append(var)
+            menu.add_checkbutton(
+                label=self.bookings_tree.heading(column, "text"),
+                variable=var,
+                command=lambda c=column: self.toggle_bookings_column(c)
+            )
+        menu.tk_popup(x_root, y_root)
+
+    def show_bookings_columns_menu_from_button(self):
+        btn = self.bookings_columns_btn
+        self.show_bookings_columns_menu(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+
     def show_bookings_context_menu(self, event):
         """Показать контекстное меню для записи"""
+        if self.bookings_tree.identify_region(event.x, event.y) == "heading":
+            self.show_bookings_columns_menu(event.x_root, event.y_root)
+            return
         item = self.bookings_tree.identify_row(event.y)
         if item:
             self.bookings_tree.selection_set(item)
