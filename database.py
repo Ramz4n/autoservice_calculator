@@ -311,7 +311,7 @@ class Database:
                 # Также обновляем последний известный пробег авто
                 cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (mileage, car_id))
             if vin:
-                cursor.execute("UPDATE client_cars SET vin = COALESCE(NULLIF(vin, ''), %s) WHERE id = %s", (vin, car_id))
+                cursor.execute("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, car_id))
         if booking_id and car_id:
             cursor.execute("UPDATE bookings SET car_id = %s WHERE id = %s", (car_id, booking_id))
         conn.commit()
@@ -340,7 +340,7 @@ class Database:
                 # Также обновляем последний известный пробег авто
                 cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (mileage, car_id))
             if vin:
-                cursor.execute("UPDATE client_cars SET vin = COALESCE(NULLIF(vin, ''), %s) WHERE id = %s", (vin, car_id))
+                cursor.execute("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, car_id))
         if booking_id and car_id:
             cursor.execute("UPDATE bookings SET car_id = %s WHERE id = %s", (car_id, booking_id))
         conn.commit()
@@ -1179,7 +1179,7 @@ class Database:
                    c.phone,
                    b.booking_date, b.booking_time, b.status, b.created_at,
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
-                   b.client_id, b.car_id, b.notes
+                   b.client_id, b.car_id, b.notes, cc.vin
             FROM bookings b
             LEFT JOIN clients c ON b.client_id = c.id
             LEFT JOIN client_cars cc ON b.car_id = cc.id
@@ -1201,7 +1201,8 @@ class Database:
                 "car_info": row[9],
                 "client_id": row[10],
                 "car_id": row[11],
-                "notes": row[12]
+                "notes": row[12],
+                "car_vin": row[13] or ""
             }
         return None
 
@@ -1454,7 +1455,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, client_id, car_brand, car_model, car_number
+            SELECT id, client_id, car_brand, car_model, car_number, vin
             FROM client_cars WHERE UPPER(car_number) = UPPER(%s)
         """, (car_number,))
         result = cursor.fetchone()
@@ -1465,7 +1466,8 @@ class Database:
                 "client_id": result[1],
                 "car_brand": result[2],
                 "car_model": result[3],
-                "car_number": result[4]
+                "car_number": result[4],
+                "vin": result[5] or ""
             }
         return None
 
@@ -1481,7 +1483,7 @@ class Database:
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
             FROM client_cars cc
             JOIN clients c ON cc.client_id = c.id
             WHERE RIGHT(REGEXP_REPLACE(c.phone, '[^0-9]', ''), 10) = %s
@@ -1522,7 +1524,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
             FROM client_cars cc
             JOIN clients c ON cc.client_id = c.id
             WHERE c.telegram_user_id = %s
@@ -1560,7 +1562,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
             FROM client_cars cc
             JOIN clients c ON cc.client_id = c.id
             WHERE c.full_name = %s
@@ -1633,7 +1635,7 @@ class Database:
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
             FROM client_cars cc
             JOIN clients c ON cc.client_id = c.id
             WHERE c.telegram_user_id = %s
