@@ -12,3 +12,14 @@ main.spec
 license_cache.json
 license.key
 Backup
+
+# QA practice
+QA_*.md
+qa_*
+
+# Build / IDE / junk
+__pycache__/
+.idea/
+*.exe
+*.stackdump
+*.log
