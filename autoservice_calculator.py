@@ -6007,7 +6007,9 @@ class AutoServiceApp:
         # Настройка колонок
         self.bookings_tree.heading("id", text="ID")
         self.bookings_tree.heading("order_number", text=self.tr("bookings.col_order_number"))
-        self.bookings_tree.heading("date", text=self.tr("bookings.col_date"))
+        self.bookings_tree.heading("date", text=self.tr("bookings.col_date") + " ▼",
+                                   command=self.toggle_bookings_date_sort)
+        self.bookings_sort_desc = True  # по умолчанию новые даты сверху
         self.bookings_tree.heading("time", text=self.tr("bookings.col_time"))
         self.bookings_tree.heading("name", text=self.tr("bookings.col_name"))
         self.bookings_tree.heading("phone", text=self.tr("bookings.col_phone"))
@@ -6097,6 +6099,31 @@ class AutoServiceApp:
 
 
 
+    def toggle_bookings_date_sort(self):
+        """Клик по заголовку "Дата" - сменить направление сортировки"""
+        self.bookings_sort_desc = not self.bookings_sort_desc
+        self.sort_bookings_tree()
+
+    def sort_bookings_tree(self):
+        """Отсортировать записи по дате и времени (по умолчанию - новые сверху)"""
+        def sort_key(item):
+            values = self.bookings_tree.item(item, "values")
+            try:
+                booking_date = datetime.strptime(values[2], "%d.%m.%Y")
+            except (ValueError, IndexError):
+                booking_date = datetime.min
+            # Время "9:00" и "10:00" сравниваем как числа, а не как строки
+            time_parts = re.findall(r"\d+", str(values[3]) if len(values) > 3 else "")
+            booking_time = tuple(int(x) for x in time_parts[:2])
+            return booking_date, booking_time, int(values[0] or 0)
+
+        items = sorted(self.bookings_tree.get_children(), key=sort_key, reverse=self.bookings_sort_desc)
+        for index, item in enumerate(items):
+            self.bookings_tree.move(item, "", index)
+
+        arrow = " ▼" if self.bookings_sort_desc else " ▲"
+        self.bookings_tree.heading("date", text=self.tr("bookings.col_date") + arrow)
+
     def clear_bookings_search(self):
         """Очистить поле поиска и обновить список"""
         self.bookings_search_entry.delete(0, tk.END)
@@ -6169,6 +6196,8 @@ class AutoServiceApp:
                 car_info or "-", notes or "-", status_ru
             ), tags=(status,))
 
+        self.sort_bookings_tree()
+
     def show_today_bookings(self):
         """Показать записи на сегодня"""
         # Очистка таблицы
@@ -6198,6 +6227,8 @@ class AutoServiceApp:
                 phone or "-", f"@{username}" if username else "-",
                 car_info or "-", notes or "-", status_ru
             ), tags=(status,))
+
+        self.sort_bookings_tree()
 
     def get_selected_booking_id(self):
         """Получить ID выбранной записи"""
@@ -6880,7 +6911,7 @@ class AutoServiceApp:
             var = tk.BooleanVar(master=menu, value=column not in hidden)
             menu._vars.append(var)
             menu.add_checkbutton(
-                label=cfg["tree"].heading(column, "text"),
+                label=cfg["tree"].heading(column, "text").rstrip(" ▲▼"),
                 variable=var,
                 command=lambda c=column: self.toggle_column(settings_key, c)
             )
