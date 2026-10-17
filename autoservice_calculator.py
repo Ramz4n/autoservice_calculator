@@ -19,6 +19,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 import os
 import subprocess
 import tempfile
+import threading
 import re
 import requests
 import webbrowser
@@ -375,7 +376,6 @@ class AutoServiceApp:
         self.root.protocol("WM_DELETE_WINDOW", self._confirm_close)
         self.root.title(self.tr("app.window_title"))
         self.root.minsize(800, 600)
-        self.root.after(100, lambda: self.root.state('zoomed'))  # Открытие во весь экран
 
         self.db = Database()
         self.spare_parts_list = self.load_spare_parts()
@@ -828,7 +828,7 @@ class AutoServiceApp:
 
         if upd:
             if show_update_dialog(upd, parent=self.root):
-                apply_update(upd["download_url"], parent_widget=self.root)
+                apply_update(upd["download_url"], parent_widget=self.root, forced=upd.get("forced", False))
         else:
             messagebox.showinfo(
                 self.tr("common.info"),
@@ -7987,7 +7987,15 @@ def main():
 
         # 4. Основное приложение
         root = ctk.CTk()
+        # Собираем интерфейс в скрытом окне и показываем его один раз, сразу развёрнутым -
+        # иначе видно, как окно открывается маленьким, разворачивается и перерисовывается
+        root.withdraw()
         app = AutoServiceApp(root, current_user=user)
+        # update() обязателен до показа: при первом update()/mainloop() CustomTkinter перекрашивает
+        # заголовок окна и возвращает окну запомненное состояние. Без этого вызова mainloop()
+        # снова спрятал бы окно, и программа "не запускалась" бы
+        root.update()
+        root.state('zoomed')  # Открытие во весь экран (заодно показывает окно)
 
         if _updater_available:
             # ВРЕМЕННО: 5 минут — для проверки, что механизм работает.
@@ -7995,15 +8003,36 @@ def main():
             UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
             def _check_and_offer_update():
-                try:
-                    upd = check_for_update()
-                    if upd:
-                        if show_update_dialog(upd, parent=root):
-                            apply_update(upd["download_url"], parent_widget=root)
-                except Exception as e:
-                    _log_error("_check_and_offer_update", e)
-                finally:
-                    root.after(UPDATE_CHECK_INTERVAL_MS, _check_and_offer_update)
+                # Запрос к серверу - в фоновом потоке, чтобы интерфейс не замирал на время сети.
+                # Окна Tk трогаем только из главного потока, поэтому результат забираем опросом
+                result = {}
+
+                def _worker():
+                    try:
+                        result["upd"] = check_for_update()
+                    except Exception as e:
+                        result["error"] = e
+
+                thread = threading.Thread(target=_worker, daemon=True)
+                thread.start()
+
+                def _wait_result():
+                    if thread.is_alive():
+                        root.after(200, _wait_result)
+                        return
+                    try:
+                        if "error" in result:
+                            _log_error("_check_and_offer_update", result["error"])
+                        elif result.get("upd"):
+                            upd = result["upd"]
+                            if show_update_dialog(upd, parent=root):
+                                apply_update(upd["download_url"], parent_widget=root, forced=upd.get("forced", False))
+                    except Exception as e:
+                        _log_error("_check_and_offer_update", e)
+                    finally:
+                        root.after(UPDATE_CHECK_INTERVAL_MS, _check_and_offer_update)
+
+                _wait_result()
 
             root.after(800, _check_and_offer_update)
 
