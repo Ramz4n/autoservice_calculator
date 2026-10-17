@@ -32,6 +32,9 @@ from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
 import backup as backup_module
 
+# Стандартная длина VIN
+VIN_LENGTH = 17
+
 
 def get_base_path():
     """Получить базовый путь приложения (работает и для PyInstaller)"""
@@ -1299,8 +1302,13 @@ class AutoServiceApp:
         row_vin = ctk.CTkFrame(center_container)
         row_vin.pack(fill=tk.X, pady=5)
         ctk.CTkLabel(row_vin, text=self.tr("works.vin"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.vin_entry = ctk.CTkEntry(row_vin, width=200, fg_color="white", text_color="black")
+        self.vin_var = tk.StringVar()
+        self.vin_entry = ctk.CTkEntry(row_vin, width=200, fg_color="white", text_color="black", textvariable=self.vin_var)
         self.vin_entry.pack(side=tk.LEFT, padx=5)
+        # Счётчик символов VIN (стандарт - 17)
+        self.vin_counter_label = ctk.CTkLabel(row_vin, text=f"0/{VIN_LENGTH}", width=45, anchor="w")
+        self.vin_counter_label.pack(side=tk.LEFT)
+        self.vin_var.trace_add("write", self.on_vin_change)
 
         ctk.CTkLabel(row_vin, text=self.tr("works.mileage"), width=80, anchor="w").pack(side=tk.LEFT, padx=(20, 5))
         self.mileage_entry = ctk.CTkEntry(row_vin, width=100, fg_color="white", text_color="black")
@@ -1548,6 +1556,102 @@ class AutoServiceApp:
             self.brand_listbox.pack_forget()
             self.brand_listbox_visible = False
 
+    def on_vin_change(self, *args):
+        """Ограничить VIN 17 символами (без пробелов, заглавными) и обновить счётчик"""
+        value = self.vin_var.get()
+        cleaned = re.sub(r"\s", "", value).upper()[:VIN_LENGTH]
+        if cleaned != value:
+            # Внутри trace-обработчика Tcl не вызывает его повторно, поэтому счётчик обновляем здесь же
+            self.vin_var.set(cleaned)
+
+        length = len(cleaned)
+        if length == 0:
+            color = ("gray40", "gray60")
+        elif length < VIN_LENGTH:
+            color = "#ef4444"
+        else:
+            color = "#22c55e"
+        self.vin_counter_label.configure(text=f"{length}/{VIN_LENGTH}", text_color=color)
+
+    def ask_vin_overwrite(self, old_vin, new_vin):
+        """Спросить, перезаписать ли VIN машины. Отличающиеся символы подсвечиваются.
+        Возвращает "overwrite", "keep" или None (отмена сохранения)."""
+        import difflib
+
+        result = {"choice": None}
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(self.tr("works.vin_conflict_title"))
+        dialog.geometry("520x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        ctk.CTkLabel(
+            dialog,
+            text=self.tr("works.vin_conflict_body"),
+            font=("Arial", 14),
+            wraplength=470,
+            justify="left"
+        ).pack(padx=25, pady=(20, 15), anchor="w")
+
+        # Разметка различий. При одинаковой длине сравниваем строго по позициям;
+        # при разной (пропущен/лишний символ) ищем сдвиг, но совпадением считаем
+        # только участки от 3 символов подряд, чтобы случайные одиночные совпадения не "гасили" ошибку
+        if len(old_vin) == len(new_vin):
+            old_diff = {i for i, (a, b) in enumerate(zip(old_vin, new_vin)) if a != b}
+            new_diff = set(old_diff)
+        else:
+            old_diff, new_diff = set(range(len(old_vin))), set(range(len(new_vin)))
+            matcher = difflib.SequenceMatcher(None, old_vin, new_vin, autojunk=False)
+            for i, j, size in matcher.get_matching_blocks():
+                if size >= 3:
+                    old_diff.difference_update(range(i, i + size))
+                    new_diff.difference_update(range(j, j + size))
+
+        is_dark = ctk.get_appearance_mode() == "Dark"
+        bg = "#2b2b2b" if is_dark else "#ffffff"
+        fg = "#ffffff" if is_dark else "#000000"
+
+        def vin_row(label, value, diff, highlight_bg):
+            row = ctk.CTkFrame(dialog, fg_color="transparent")
+            row.pack(fill="x", padx=25, pady=4)
+            ctk.CTkLabel(row, text=label, width=110, anchor="w", font=("Arial", 14)).pack(side="left")
+            text = tk.Text(row, height=1, width=len(value) + 1, font=("Consolas", 16, "bold"),
+                           bg=bg, fg=fg, relief="flat", borderwidth=0, highlightthickness=0)
+            text.tag_configure("diff", background=highlight_bg, foreground="#000000")
+            for idx, ch in enumerate(value):
+                text.insert(tk.END, ch, ("diff",) if idx in diff else ())
+            text.configure(state="disabled")
+            text.pack(side="left")
+
+        vin_row(self.tr("works.vin_old_label"), old_vin, old_diff, "#fca5a5")
+        vin_row(self.tr("works.vin_new_label"), new_vin, new_diff, "#86efac")
+
+        ctk.CTkLabel(
+            dialog,
+            text=self.tr("works.vin_length_info", old=len(old_vin), new=len(new_vin)),
+            font=("Arial", 12),
+            text_color=("gray40", "gray60")
+        ).pack(padx=25, pady=(6, 0), anchor="w")
+
+        def choose(value):
+            result["choice"] = value
+            dialog.destroy()
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(pady=20)
+        ctk.CTkButton(btn_row, text=self.tr("works.vin_overwrite_btn"), command=lambda: choose("overwrite"),
+                      fg_color="#4caf50", hover_color="#388e3c", width=140).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_row, text=self.tr("works.vin_keep_btn"), command=lambda: choose("keep"),
+                      width=140).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_row, text=self.tr("common.cancel"), command=dialog.destroy,
+                      fg_color="gray", width=110).pack(side=tk.LEFT, padx=5)
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self.root.wait_window(dialog)
+        return result["choice"]
+
     def show_vin_context_menu(self, event):
         """Показать контекстное меню для поля VIN"""
         self.vin_context_menu.tk_popup(event.x_root, event.y_root)
@@ -1651,14 +1755,15 @@ class AutoServiceApp:
         selected_car_display = None
 
         for car in cars:
-            car_brand, car_model, car_number = car
+            car_brand, car_model, car_number, car_vin = car
             display_text = f"{car_brand or ''} {car_model or ''} {car_number or ''}".strip()
             if display_text:
                 values.append(display_text)
                 self.client_cars_data[display_text] = {
                     'brand': car_brand or '',
                     'model': car_model or '',
-                    'number': car_number or ''
+                    'number': car_number or '',
+                    'vin': car_vin or ''
                 }
                 # Если есть car_id из записи - ищем соответствующую машину
                 if booking_car_id:
@@ -1691,6 +1796,7 @@ class AutoServiceApp:
                 self.car_brand_entry.delete(0, tk.END)
                 self.car_model_entry.delete(0, tk.END)
                 self.car_number_entry.delete(0, tk.END)
+                self.vin_var.set("")
             else:
                 # Нет машин
                 self.client_cars_combo.set(self.tr("works.new_car"))
@@ -1864,14 +1970,15 @@ class AutoServiceApp:
         values = [self.tr("works.new_car")]
 
         for car in cars:
-            car_brand, car_model, car_number = car
+            car_brand, car_model, car_number, car_vin = car
             display_text = f"{car_brand or ''} {car_model or ''} {car_number or ''}".strip()
             if display_text:
                 values.append(display_text)
                 self.client_cars_data[display_text] = {
                     'brand': car_brand or '',
                     'model': car_model or '',
-                    'number': car_number or ''
+                    'number': car_number or '',
+                    'vin': car_vin or ''
                 }
 
         self.client_cars_combo.configure(values=values)
@@ -1891,11 +1998,13 @@ class AutoServiceApp:
             self.car_model_entry.insert(0, car_info['model'])
             self.car_number_entry.delete(0, tk.END)
             self.car_number_entry.insert(0, car_info['number'])
+            self.vin_var.set(car_info.get('vin', ''))
         elif choice == self.tr("works.new_car"):
             # Очищаем поля машины для новой
             self.car_brand_entry.delete(0, tk.END)
             self.car_model_entry.delete(0, tk.END)
             self.car_number_entry.delete(0, tk.END)
+            self.vin_var.set("")
         elif choice == self.tr("works.select_car"):
             # Не делаем ничего, ждём выбора
             self.client_cars_combo.configure(text_color="#c62828")
@@ -2303,6 +2412,24 @@ class AutoServiceApp:
         if not car_number:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"))
             return
+
+        # VIN короче стандартных 17 символов - предупреждаем
+        if vin and len(vin) < VIN_LENGTH:
+            if not messagebox.askyesno(self.tr("common.attention"),
+                                       self.tr("works.vin_too_short", count=len(vin), required=VIN_LENGTH)):
+                self.vin_entry.focus_set()
+                return
+
+        # Если у машины уже записан другой VIN - спрашиваем, перезаписывать ли
+        if vin:
+            existing_car = self.db.get_car_by_number(car_number)
+            old_vin = (existing_car or {}).get("vin", "").strip().upper()
+            if old_vin and old_vin != vin:
+                choice = self.ask_vin_overwrite(old_vin, vin)
+                if choice is None:
+                    return
+                if choice == "keep":
+                    vin = old_vin
 
         # Данные клиента
         booking_id = getattr(self, 'selected_booking_id', None)
@@ -6847,6 +6974,10 @@ class AutoServiceApp:
 
             self.update_total_cost()
 
+        # Заполняем VIN: из машины наряда, а если наряда ещё нет - из машины записи
+        vin = (work[10] if work else None) or booking.get("car_vin") or ""
+        self.vin_var.set(vin)
+
         # Проверяем склад на наличие новых запчастей для этого авто
         self.check_warehouse_for_car(self.car_number_entry.get().strip())
 
@@ -6891,6 +7022,7 @@ class AutoServiceApp:
         primary_worker_name = primary_work[2] if primary_work else None
         primary_mileage = primary_work[9] if primary_work else None
         primary_order_number = primary_work[14] if primary_work else None
+        primary_vin = (primary_work[10] if primary_work else None) or booking.get("car_vin")
 
         window_title = self.tr("bookings.order_number_label", order_number=primary_order_number) if primary_order_number else self.tr("bookings.info_window_title")
 
@@ -6977,6 +7109,7 @@ class AutoServiceApp:
             ("📞 " + self.tr("bookings.col_phone") + ":", booking.get('phone') or self.tr("bookings.phone_not_specified")),
             ("💬 Telegram:", f"@{tg_username}" if tg_username != '-' else '-'),
             ("🚗 " + self.tr("bookings.col_car") + ":", car_info),
+            ("🔑 " + self.tr("works.vin"), primary_vin or "-"),
         ]
         if primary_worker_name:
             info_data.append(("🔧 " + self.tr("bookings.info_label_master"), primary_worker_name))
@@ -7366,7 +7499,7 @@ class AutoServiceApp:
                 font=("Arial", 14)
             ).pack(anchor="w")
         else:
-            for i, (car_brand, car_model, car_number) in enumerate(cars):
+            for i, (car_brand, car_model, car_number, car_vin) in enumerate(cars):
                 car_frame = ctk.CTkFrame(cars_content, corner_radius=8, fg_color=("gray90", "gray20"))
                 car_frame.pack(fill="x", pady=(0, 8) if i < len(cars) - 1 else 0)
 
@@ -7389,6 +7522,14 @@ class AutoServiceApp:
                         text_color=("gray30", "gray70"),
                         anchor="e"
                     ).pack(side="right")
+
+                ctk.CTkLabel(
+                    car_frame,
+                    text=f"{self.tr('works.vin')} {car_vin or '-'}",
+                    font=("Arial", 12),
+                    text_color=("gray30", "gray70"),
+                    anchor="w"
+                ).pack(fill="x", padx=12, pady=(0, 10))
 
         # ═══════════════════════════════════════════════════════
         # КАРТОЧКА: История работ
