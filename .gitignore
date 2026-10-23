@@ -22,3 +22,8 @@ __pycache__/
 *.exe
 *.stackdump
 *.log
+
+# db_setup: пароли клиентов, логи, установщик MariaDB
+db_setup/clients/
+db_setup/logs/
+db_setup/*.msi

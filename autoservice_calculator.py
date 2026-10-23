@@ -1679,6 +1679,31 @@ class AutoServiceApp:
         except tk.TclError:
             pass  # Буфер обмена пуст
 
+    def add_copy_button(self, parent, text):
+        """Кнопка-значок рядом с текстом: по клику копирует text в буфер обмена"""
+        btn = ctk.CTkButton(
+            parent,
+            text="📋",
+            width=26,
+            height=24,
+            font=("Arial", 14),
+            fg_color="transparent",
+            hover_color=("gray80", "gray30"),
+            text_color=("gray30", "gray70"),
+            cursor="hand2",
+        )
+
+        def copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()  # чтобы текст остался в буфере и после закрытия окна
+            btn.configure(text="✓", text_color=("green", "#4ade80"))
+            btn.after(1200, lambda: btn.winfo_exists() and btn.configure(
+                text="📋", text_color=("gray30", "gray70")))
+
+        btn.configure(command=copy)
+        return btn
+
     def on_brand_select(self, event):
         """Обработчик выбора марки из списка"""
         selection = self.brand_listbox.curselection()
@@ -7383,12 +7408,18 @@ class AutoServiceApp:
                 anchor="w"
             ).pack(side="left")
 
-            ctk.CTkLabel(
+            value_label = ctk.CTkLabel(
                 row,
                 text=value,
                 font=("Arial", 14),
                 anchor="w"
-            ).pack(side="left", fill="x", expand=True)
+            )
+            if label.startswith("🔑") and primary_vin:
+                # VIN: значок копирования сразу после номера
+                value_label.pack(side="left")
+                self.add_copy_button(row, primary_vin).pack(side="left", padx=(6, 0))
+            else:
+                value_label.pack(side="left", fill="x", expand=True)
 
         # ═══════════════════════════════════════════════════════
         # КАРТОЧКА: Работы
@@ -7774,13 +7805,17 @@ class AutoServiceApp:
                         anchor="e"
                     ).pack(side="right")
 
+                vin_row = ctk.CTkFrame(car_frame, fg_color="transparent")
+                vin_row.pack(fill="x", padx=12, pady=(0, 10))
                 ctk.CTkLabel(
-                    car_frame,
+                    vin_row,
                     text=f"{self.tr('works.vin')} {car_vin or '-'}",
                     font=("Arial", 12),
                     text_color=("gray30", "gray70"),
                     anchor="w"
-                ).pack(fill="x", padx=12, pady=(0, 10))
+                ).pack(side="left")
+                if car_vin:
+                    self.add_copy_button(vin_row, car_vin).pack(side="left", padx=(6, 0))
 
         # ═══════════════════════════════════════════════════════
         # КАРТОЧКА: История работ
