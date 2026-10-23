@@ -491,5 +491,10 @@
     "users.error_enter_password": "Введите пароль",
     "users.error_mismatch": "Пароли не совпадают",
     "users.done_title": "Готово",
-    "users.password_changed": "Пароль успешно изменён."
+    "users.password_changed": "Пароль успешно изменён.",
+
+    "web_sync.title": "Записи с сайта",
+    "web_sync.header": "🌐 Новые записи с сайта: {count}",
+    "web_sync.line": "{date} {time} — {service}\n{name}, {phone}\n{car}",
+    "web_sync.open": "Открыть записи"
 }

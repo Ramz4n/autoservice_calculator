@@ -491,5 +491,10 @@
     "users.error_enter_password": "Մուտքագրեք գաղտնաբառը",
     "users.error_mismatch": "Գաղտնաբառերը չեն համընկնում",
     "users.done_title": "Պատրաստ է",
-    "users.password_changed": "Գաղտնաբառը հաջողությամբ փոխվել է."
+    "users.password_changed": "Գաղտնաբառը հաջողությամբ փոխվել է.",
+
+    "web_sync.title": "Գրանցումներ կայքից",
+    "web_sync.header": "🌐 Նոր գրանցումներ կայքից՝ {count}",
+    "web_sync.line": "{date} {time} — {service}\n{name}, {phone}\n{car}",
+    "web_sync.open": "Բացել գրանցումները"
 }

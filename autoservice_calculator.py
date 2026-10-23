@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 # Импорт класса для работы с базой данных
 from database import Database
+import web_sync
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
 import backup as backup_module
@@ -83,6 +84,15 @@ def load_app_settings():
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {'master_percent': 50}
+
+
+def booking_time_slots():
+    """Время записи: от начала до конца рабочего дня включительно, каждые slot_duration_minutes
+    (те же настройки использует Telegram-бот и сайт онлайн-записи)"""
+    s = load_app_settings()
+    start, end = int(s.get('working_hours_start', 10)) * 60, int(s.get('working_hours_end', 20)) * 60
+    step = max(15, int(s.get('slot_duration_minutes', 120)))
+    return [f"{m // 60:02d}:{m % 60:02d}" for m in range(start, end + 1, step)]
 
 
 def save_app_settings(settings):
@@ -2555,7 +2565,7 @@ class AutoServiceApp:
                 else:
                     # Машина не в работе - создаём новую запись
                     current_hour = now.hour
-                    TIME_SLOTS = ["10:00", "12:00", "14:00", "16:00", "18:00", "20:00"]
+                    TIME_SLOTS = booking_time_slots()
                     booking_time = None
 
                     # Ищем ближайший слот к текущему времени
@@ -6374,10 +6384,108 @@ class AutoServiceApp:
                 self.refresh_bookings()
                 messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_deleted"))
 
+    # ===== Синхронизация с сайтом онлайн-записи (web_sync.py) =====
+    # Обмен идёт в фоновом потоке, окна Tk трогаем только из главного потока (результат забираем опросом)
+
+    WEB_SYNC_INTERVAL_MS = 60 * 1000
+
+    def start_web_sync(self):
+        """Запустить периодическую синхронизацию, если сайт настроен в config/.env"""
+        if web_sync.enabled():
+            self.root.after(3000, self._web_sync_tick)
+
+    def _web_sync_tick(self):
+        self.web_sync_now()
+        self.root.after(self.WEB_SYNC_INTERVAL_MS, self._web_sync_tick)
+
+    def web_sync_now(self):
+        """Один обмен с сайтом сейчас (не ждёт - результат появится сам)"""
+        if not web_sync.enabled() or getattr(self, "_web_sync_running", False):
+            return
+        self._web_sync_running = True
+        result = {}
+
+        def _worker():
+            try:
+                result.update(web_sync.sync_once(self.db))
+            except Exception as e:
+                result["error"] = e
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+
+        def _wait_result():
+            if thread.is_alive():
+                self.root.after(300, _wait_result)
+                return
+            self._web_sync_running = False
+            error = result.get("error")
+            # в журнал пишем только смену состояния, а не каждую минуту без интернета
+            if str(error or "") != getattr(self, "_web_sync_last_error", ""):
+                self._web_sync_last_error = str(error or "")
+                self._log_web_sync(f"ошибка: {error}" if error else "связь с сайтом есть")
+            # новые записи с сайта/из панели или отмена с телефона - обновляем список
+            if result.get("new") or result.get("cancelled"):
+                try:
+                    self.refresh_bookings()
+                except Exception:
+                    pass
+            if result.get("new"):
+                self.show_web_bookings_notice(result["new"])
+
+        _wait_result()
+
+    def _log_web_sync(self, text):
+        try:
+            log_dir = os.path.join(BASE_PATH, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, "web_sync.log"), "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {text}\n")
+        except Exception:
+            pass
+
+    def show_web_bookings_notice(self, bookings):
+        """Окошко в правом нижнем углу: новые записи с сайта (новые добавляются в уже открытое)"""
+        lines = [self.tr("web_sync.line", date=datetime.strptime(b["date"], "%Y-%m-%d").strftime("%d.%m.%Y"),
+                         time=b["time"], name=b["name"], phone=b["phone"], car=b["car"], service=b["service"])
+                 for b in bookings]
+        win = getattr(self, "_web_notice", None)
+        if win is not None and win.winfo_exists():
+            win._lines.extend(lines)
+        else:
+            win = ctk.CTkToplevel(self.root)
+            win.title(self.tr("web_sync.title"))
+            win.attributes("-topmost", True)
+            win.resizable(False, False)
+            win._lines = list(lines)
+            win._label = ctk.CTkLabel(win, text="", font=("Arial", 14), justify="left", anchor="w", wraplength=420)
+            win._label.pack(padx=18, pady=(16, 10), fill=tk.X)
+            buttons = ctk.CTkFrame(win, fg_color="transparent")
+            buttons.pack(pady=(0, 14))
+
+            def _open_bookings():
+                win.destroy()
+                self.switch_tab("bookings")
+
+            ctk.CTkButton(buttons, text=self.tr("web_sync.open"), command=_open_bookings,
+                          fg_color="#2e7d32", hover_color="#1b5e20", width=150).pack(side=tk.LEFT, padx=5)
+            ctk.CTkButton(buttons, text="OK", command=win.destroy,
+                          fg_color="#757575", hover_color="#616161", width=90).pack(side=tk.LEFT, padx=5)
+            self._web_notice = win
+        win._label.configure(text=self.tr("web_sync.header", count=len(win._lines)) + "\n\n" + "\n\n".join(win._lines[-8:]))
+        win.update_idletasks()
+        x = win.winfo_screenwidth() - win.winfo_reqwidth() - 30
+        y = win.winfo_screenheight() - win.winfo_reqheight() - 80
+        win.geometry(f"+{x}+{y}")
+        win.lift()
+        win.bell()
+
     def show_add_booking_window(self):
         """Показать окно для записи клиента"""
-        # Слоты времени: каждые 2 часа с 10:00 до 20:00
-        TIME_SLOTS = ["10:00", "12:00", "14:00", "16:00", "18:00", "20:00"]
+        # Слоты времени из настроек (по умолчанию каждые 2 часа с 10:00 до 20:00)
+        TIME_SLOTS = booking_time_slots()
+        # Подтягиваем свежие записи с сайта, чтобы проверка занятости учла и их
+        self.web_sync_now()
 
         # Создаём затемняющий оверлей поверх главного окна
         self.root.update_idletasks()
@@ -8062,6 +8170,9 @@ def main():
                 root.after(BACKUP_CHECK_INTERVAL_MS, _auto_backup_tick)
 
         root.after(10_000, _auto_backup_tick)
+
+        # 6. Синхронизация с сайтом онлайн-записи (если настроена в config/.env)
+        app.start_web_sync()
 
         root.mainloop()
 

@@ -14,8 +14,7 @@ license.key
 Backup
 
 # QA practice
-QA_*.md
-qa_*
+QA
 
 # Build / IDE / junk
 __pycache__/

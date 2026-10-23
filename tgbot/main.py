@@ -12,6 +12,7 @@ import threading
 import sys
 import subprocess
 import ipaddress
+import html
 from uuid import uuid4
 from datetime import datetime, timedelta, date as dt_date
 
@@ -104,6 +105,8 @@ WORKING_HOURS_START = _settings.get("working_hours_start", WORKING_HOURS_START)
 WORKING_HOURS_END = _settings.get("working_hours_end", WORKING_HOURS_END)
 SLOT_DURATION_MINUTES = _settings.get("slot_duration_minutes", 120)
 MAX_BOOKINGS_PER_USER = _settings.get("max_bookings_per_user", 2)
+# Сколько машин можно записать на одно время (столько постов/подъёмников)
+MAX_CARS_PER_SLOT = max(1, int(_settings.get("max_cars_per_slot", 1)))
 
 # Генерация слотов времени (поддержка любого интервала в минутах)
 def _generate_time_slots():
@@ -261,6 +264,9 @@ class Database:
                     await cur.execute("ALTER TABLE bookings DROP INDEX unique_booking")
                 except:
                     pass
+                # Telegram-аккаунт подтвердил номер клиента кнопкой «Поделиться номером» (link_verified_phone) -
+                # только такому аккаунту бот показывает историю авто, машины и записи
+                await cur.execute("ALTER TABLE clients ADD COLUMN IF NOT EXISTS tg_verified TINYINT(1) NOT NULL DEFAULT 0")
                 await cur.execute("""
                     CREATE TABLE IF NOT EXISTS client_cars (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -313,71 +319,66 @@ class Database:
             return '+7' + digits
         return '+' + digits if digits else None
 
-    async def get_or_create_client(self, telegram_user_id: int, full_name: str = None, phone: str = None, tg_username: str = None, car_number: str = None) -> int:
-        normalized_phone = self._normalize_phone(phone)
+    async def link_verified_phone(self, telegram_user_id: int, phone: str, full_name: str = None, tg_username: str = None) -> int:
+        """Привязать Telegram-аккаунт к клиенту по номеру, который подтвердил сам Telegram (кнопка «Поделиться номером»).
+
+        Только так аккаунт получает доступ к истории авто, машинам и записям клиента: номер, набранный текстом,
+        или госномер может указать кто угодно - и получить чужую историю.
+        Имя и телефон, записанные в программе, не перезаписываются."""
+        suffix = phone[-10:]
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                # 1. Ищем по telegram_user_id
-                if telegram_user_id:
-                    await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
-                    result = await cur.fetchone()
-                    if result:
-                        if full_name or normalized_phone or tg_username:
-                            await cur.execute("""
-                                UPDATE clients SET
-                                    tg_username = COALESCE(%s, tg_username),
-                                    full_name = COALESCE(%s, full_name),
-                                    phone = COALESCE(%s, phone)
-                                WHERE id = %s
-                            """, (tg_username, full_name, normalized_phone, result[0]))
-                        return result[0]
-                # 2. Ищем по телефону
-                if normalized_phone and len(normalized_phone) >= 10:
-                    phone_suffix = normalized_phone[-10:]
-                    await cur.execute(
-                        "SELECT id FROM clients WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s",
-                        (phone_suffix,)
-                    )
-                    result = await cur.fetchone()
-                    if result:
-                        await cur.execute("""
-                            UPDATE clients SET
-                                telegram_user_id = COALESCE(%s, telegram_user_id),
-                                tg_username = COALESCE(%s, tg_username),
-                                full_name = COALESCE(%s, full_name),
-                                phone = COALESCE(%s, phone)
-                            WHERE id = %s
-                        """, (telegram_user_id, tg_username, full_name, normalized_phone, result[0]))
-                        return result[0]
-                # 3. Ищем по госномеру машины
-                if car_number:
-                    await cur.execute("""
-                        SELECT client_id FROM client_cars
-                        WHERE UPPER(car_number) = UPPER(%s) AND client_id IS NOT NULL
-                    """, (car_number,))
-                    result = await cur.fetchone()
-                    if result:
-                        client_id = result[0]
-                        await cur.execute("""
-                            UPDATE clients SET
-                                telegram_user_id = COALESCE(%s, telegram_user_id),
-                                tg_username = COALESCE(%s, tg_username),
-                                full_name = COALESCE(%s, full_name),
-                                phone = COALESCE(%s, phone)
-                            WHERE id = %s
-                        """, (telegram_user_id, tg_username, full_name, normalized_phone, client_id))
-                        return client_id
-                # 4. Создаём нового
+                await cur.execute("SELECT id, phone FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
+                bound = await cur.fetchone()
+                await cur.execute(
+                    """SELECT id FROM clients WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s
+                       ORDER BY telegram_user_id <=> %s DESC, id LIMIT 1""",
+                    (suffix, telegram_user_id)
+                )
+                owner = await cur.fetchone()
+                owner_id = owner[0] if owner else None
+
+                if bound and (bound[0] == owner_id or (not bound[1] and not owner_id)):
+                    client_id = bound[0]  # уже привязан к этому номеру, или клиент создан ботом без номера
+                else:
+                    if bound:
+                        # Аккаунт был привязан к клиенту с другим номером - такая привязка могла появиться,
+                        # когда номер вводили текстом. Снимаем её. Клиент без номера (создан ботом при покупке
+                        # подписки) - это тот же человек: его подписки переносим владельцу номера.
+                        if not bound[1] and owner_id:
+                            await cur.execute("UPDATE subscriptions SET client_id = %s WHERE client_id = %s", (owner_id, bound[0]))
+                        await cur.execute("UPDATE clients SET telegram_user_id = NULL, tg_verified = 0 WHERE id = %s", (bound[0],))
+                        logger.warning(f"Telegram {telegram_user_id}: снята привязка к клиенту id={bound[0]} "
+                                       f"(номер клиента не совпал с подтверждённым)")
+                    if owner_id:
+                        client_id = owner_id
+                    else:
+                        await cur.execute("INSERT INTO clients (full_name, phone) VALUES (%s, %s)", (full_name, phone))
+                        client_id = cur.lastrowid
+                # если номер раньше подтверждал другой Telegram-аккаунт - теперь он принадлежит этому
                 await cur.execute("""
-                    INSERT INTO clients (telegram_user_id, tg_username, full_name, phone)
-                    VALUES (%s, %s, %s, %s)
-                """, (telegram_user_id, tg_username, full_name, normalized_phone))
-                return cur.lastrowid
+                    UPDATE clients SET
+                        telegram_user_id = %s,
+                        tg_verified = 1,
+                        tg_username = COALESCE(%s, tg_username),
+                        full_name = COALESCE(NULLIF(full_name, ''), %s),
+                        phone = COALESCE(NULLIF(phone, ''), %s)
+                    WHERE id = %s
+                """, (telegram_user_id, tg_username or None, full_name, phone, client_id))
+                return client_id
+
+    async def get_verified_client_id(self, telegram_user_id: int) -> int | None:
+        """Клиент, номер которого этот Telegram-аккаунт подтвердил; иначе None"""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s AND tg_verified = 1", (telegram_user_id,))
+                row = await cur.fetchone()
+                return row[0] if row else None
 
     async def get_client_by_telegram_id(self, telegram_user_id: int) -> dict | None:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute("SELECT * FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
+                await cur.execute("SELECT * FROM clients WHERE telegram_user_id = %s AND tg_verified = 1", (telegram_user_id,))
                 return await cur.fetchone()
 
     async def get_or_create_car(self, client_id: int, car_brand: str, car_model: str, car_number: str) -> int | None:
@@ -405,14 +406,16 @@ class Database:
                     (booking_date, booking_time)
                 )
                 result = await cur.fetchone()
-                return result[0] == 0
+                return result[0] < MAX_CARS_PER_SLOT
 
     async def get_booked_slots(self, booking_date: dt_date) -> list:
+        """Время, на которое мест уже нет (записано MAX_CARS_PER_SLOT машин)"""
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT booking_time FROM bookings WHERE booking_date = %s AND status IN ('waiting', 'in_progress')",
-                    (booking_date,)
+                    """SELECT booking_time FROM bookings WHERE booking_date = %s AND status IN ('waiting', 'in_progress')
+                       GROUP BY booking_time HAVING COUNT(*) >= %s""",
+                    (booking_date, MAX_CARS_PER_SLOT)
                 )
                 result = await cur.fetchall()
                 return [row[0] for row in result]
@@ -433,7 +436,7 @@ class Database:
     async def get_user_bookings(self, user_id: int) -> list:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s AND tg_verified = 1", (user_id,))
                 client_row = await cur.fetchone()
                 if not client_row:
                     return []
@@ -454,7 +457,7 @@ class Database:
     async def cancel_booking(self, booking_id: int, user_id: int) -> bool:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s AND tg_verified = 1", (user_id,))
                 client_row = await cur.fetchone()
                 if not client_row:
                     return False
@@ -465,7 +468,7 @@ class Database:
         """Подсчёт активных записей пользователя"""
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s AND tg_verified = 1", (user_id,))
                 client_row = await cur.fetchone()
                 if not client_row:
                     return 0
@@ -480,14 +483,14 @@ class Database:
     async def get_user_phone(self, user_id: int) -> str | None:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT phone FROM clients WHERE telegram_user_id = %s AND phone IS NOT NULL", (user_id,))
+                await cur.execute("SELECT phone FROM clients WHERE telegram_user_id = %s AND tg_verified = 1 AND phone IS NOT NULL", (user_id,))
                 result = await cur.fetchone()
                 return result[0] if result and result[0] else None
 
     async def get_client_cars(self, user_id: int) -> list[tuple]:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s AND tg_verified = 1", (user_id,))
                 client_row = await cur.fetchone()
                 if not client_row:
                     return []
@@ -502,7 +505,7 @@ class Database:
     async def get_user_phones(self, user_id: int) -> list[str]:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT phone FROM clients WHERE telegram_user_id = %s AND phone IS NOT NULL", (user_id,))
+                await cur.execute("SELECT phone FROM clients WHERE telegram_user_id = %s AND tg_verified = 1 AND phone IS NOT NULL", (user_id,))
                 result = await cur.fetchone()
                 if result and result[0]:
                     return [result[0]]
@@ -511,7 +514,7 @@ class Database:
     async def get_car_history_by_user_id(self, telegram_user_id: int) -> list:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (telegram_user_id,))
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s AND tg_verified = 1", (telegram_user_id,))
                 client_row = await cur.fetchone()
                 if not client_row:
                     return []
@@ -580,7 +583,7 @@ class Database:
         """Получить машины клиента с ID"""
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s", (user_id,))
+                await cur.execute("SELECT id FROM clients WHERE telegram_user_id = %s AND tg_verified = 1", (user_id,))
                 client_row = await cur.fetchone()
                 if not client_row:
                     return []
@@ -592,21 +595,17 @@ class Database:
                 """, (client_id,))
                 return await cur.fetchall()
 
-    async def get_telegraph_page(self, user_id: int) -> dict | None:
+    async def get_telegraph_pages(self) -> list:
+        """Страницы истории, опубликованные раньше на telegra.ph (см. wipe_telegraph_pages)"""
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute("SELECT page_path, access_token FROM telegraph_pages WHERE user_id = %s", (user_id,))
-                return await cur.fetchone()
+                await cur.execute("SELECT id, page_path, access_token FROM telegraph_pages")
+                return await cur.fetchall()
 
-    async def save_telegraph_page(self, user_id: int, page_path: str, access_token: str):
+    async def delete_telegraph_page(self, page_id: int):
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    """INSERT INTO telegraph_pages (user_id, page_path, access_token)
-                       VALUES (%s, %s, %s)
-                       ON DUPLICATE KEY UPDATE page_path = %s, access_token = %s""",
-                    (user_id, page_path, access_token, page_path, access_token)
-                )
+                await cur.execute("DELETE FROM telegraph_pages WHERE id = %s", (page_id,))
 
     async def get_tomorrow_bookings_for_reminder(self) -> list:
         async with self.pool.acquire() as conn:
@@ -735,34 +734,10 @@ class Database:
 db = Database()
 
 # ==================== TELEGRAPH ====================
+# Раньше история авто публиковалась на telegra.ph. Такая страница открывается у любого, у кого есть ссылка,
+# а ссылку можно подобрать (она складывается из заголовка и даты). Теперь история показывается прямо в чате,
+# а старые страницы затираются при запуске бота (wipe_telegraph_pages) - удалить страницу Telegraph нельзя.
 TELEGRAPH_API = "https://api.telegra.ph"
-
-async def telegraph_create_account(short_name: str) -> dict | None:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{TELEGRAPH_API}/createAccount", data={"short_name": short_name}) as resp:
-                result = await resp.json()
-                if result.get("ok"):
-                    return result["result"]
-    except:
-        pass
-    return None
-
-async def telegraph_create_page(access_token: str, title: str, content: list) -> dict | None:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{TELEGRAPH_API}/createPage", data={
-                "access_token": access_token,
-                "title": title,
-                "content": json.dumps(content),
-                "return_content": "false"
-            }) as resp:
-                result = await resp.json()
-                if result.get("ok"):
-                    return result["result"]
-    except:
-        pass
-    return None
 
 async def telegraph_edit_page(access_token: str, path: str, title: str, content: list) -> dict | None:
     try:
@@ -836,6 +811,48 @@ def get_book_again_menu():
     ])
 
 
+def get_contact_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)], [KeyboardButton(text="📋 Меню")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+
+CONTACT_PROMPT = ("🔒 История авто и записи видны только владельцу номера.\n\n"
+                  "Подтвердите номер телефона — нажмите кнопку «📱 Поделиться номером» внизу экрана. "
+                  "Telegram передаст номер, к которому привязан ваш аккаунт.")
+
+
+async def ask_contact(message: Message, text: str = CONTACT_PROMPT):
+    await message.answer(text, reply_markup=get_contact_keyboard())
+
+
+async def require_verified(event: Message | CallbackQuery) -> int | None:
+    """id клиента, если этот Telegram-аккаунт подтвердил номер; иначе просит подтвердить и возвращает None.
+    На callback не отвечает - это делает обработчик."""
+    client_id = await db.get_verified_client_id(event.from_user.id)
+    if not client_id:
+        await ask_contact(event.message if isinstance(event, CallbackQuery) else event)
+    return client_id
+
+
+async def verified_contact_phone(message: Message) -> str | None:
+    """Номер из кнопки «Поделиться номером». Принимается только свой контакт: карточку чужого контакта
+    (или набранную вручную) Telegram не подтверждает."""
+    contact = message.contact
+    if not contact or contact.user_id != message.from_user.id:
+        await message.answer("❌ Нужен ваш собственный номер — нажмите кнопку «📱 Поделиться номером» внизу экрана.",
+                             reply_markup=get_contact_keyboard())
+        return None
+    phone = validate_phone(contact.phone_number)
+    if not phone:
+        await message.answer(f"❌ Через бота можно записаться только с российским номером (+7).\n\n{COMPANY_INFO}",
+                             reply_markup=get_persistent_menu())
+        return None
+    return phone
+
+
 def get_date_keyboard():
     buttons = []
     today = datetime.now().date()
@@ -892,7 +909,7 @@ def validate_phone(phone: str) -> str | None:
 async def show_car_selection_or_create_booking(message_or_callback, state: FSMContext, user_id: int, username: str,
                                                 full_name: str, phone: str, booking_date, booking_time: str,
                                                 is_callback: bool = False):
-    client_id = await db.get_or_create_client(user_id, full_name, phone, tg_username=username)
+    client_id = await db.get_verified_client_id(user_id)  # номер подтверждён до этого шага
     cars = await db.get_client_cars(user_id)
 
     if len(cars) >= 1:
@@ -938,62 +955,69 @@ async def show_car_selection_or_create_booking(message_or_callback, state: FSMCo
             await message_or_callback.answer("❌ Произошла ошибка при записи.\nПопробуйте ещё раз.", reply_markup=get_main_menu())
 
 
-async def format_telegraph_content(history: list) -> list:
-    content = []
-    if not history:
-        content.append({"tag": "p", "children": ["История пуста. Вы ещё не обслуживались у нас."]})
-        return content
-
-    # Определяем количество уникальных авто
-    unique_cars = set()
-    for work in history:
-        car_key = f"{work['car_brand'] or ''} {work['car_model'] or ''} {work['car_number'] or ''}".strip()
-        if car_key:
-            unique_cars.add(car_key)
-    multiple_cars = len(unique_cars) > 1
-
+async def history_messages(history: list) -> list[str]:
+    """История обслуживания для чата (HTML), разбитая на сообщения не длиннее лимита Telegram"""
+    e = html.escape
+    car_title = lambda w: f"{w['car_brand'] or ''} {w['car_model'] or ''} {w['car_number'] or ''}".strip() or "Автомобиль не указан"
     cars = {}
     for work in history:
-        car_key = f"{work['car_brand'] or ''} {work['car_model'] or ''} {work['car_number'] or ''}".strip()
-        if not car_key:
-            car_key = "Автомобиль не указан"
-        if car_key not in cars:
-            cars[car_key] = []
-        cars[car_key].append(work)
+        cars.setdefault(car_title(work), []).append(work)
 
+    blocks = ["🚗 <b>История обслуживания</b>"]
     for car, works in cars.items():
-        # Заголовок автомобиля (только если одно авто)
-        if not multiple_cars:
-            content.append({"tag": "h3", "children": [f"🚙 {car}"]})
+        blocks.append(f"🚙 <b>{e(car)}</b>")
         for work in works:
-            date_str = work['work_date'].strftime("%d.%m.%Y") if work['work_date'] else "—"
             work_amount = float(work['amount'] or 0)
             parts_total = float(work['parts_total'] or 0)
-            total = work_amount + parts_total
-            # Авто (если несколько машин - показываем в каждой записи)
-            if multiple_cars:
-                content.append({"tag": "p", "children": [{"tag": "strong", "children": [f"🚙 {car}"]}]})
-            header = f"📅 {date_str}"
+            header = f"📅 {work['work_date'].strftime('%d.%m.%Y') if work['work_date'] else '—'}"
             if work['order_number']:
-                header += f" • №{work['order_number']}"
-            content.append({"tag": "p", "children": [{"tag": "strong", "children": [header]}]})
+                header += f" • №{e(str(work['order_number']))}"
+            lines = [f"<b>{header}</b>"]
             if work['mileage']:
-                content.append({"tag": "p", "children": [f"🔢 Пробег: {work['mileage']} км"]})
+                lines.append(f"🔢 Пробег: {e(str(work['mileage']))} км")
             if work['description']:
-                content.append({"tag": "p", "children": [f"📝 Работы: {work_amount:,.0f} ₽"]})
-                work_items = [item.strip() for item in work['description'].split(',') if item.strip()]
-                list_items = [{"tag": "li", "children": [item]} for item in work_items]
-                content.append({"tag": "ul", "children": list_items})
-            if work.get('work_id'):
-                parts = await db.get_parts_by_work_id(work['work_id'])
-                if parts:
-                    content.append({"tag": "p", "children": [f"🔧 Запчасти: {parts_total:,.0f} ₽"]})
-                    parts_items = [{"tag": "li", "children": [f"{p[0]} — {float(p[1]):,.0f} ₽"]} for p in parts]
-                    content.append({"tag": "ul", "children": parts_items})
-            content.append({"tag": "p", "children": [f"💰 Итого: {total:,.0f} ₽"]})
-            content.append({"tag": "p", "children": ["\n━━━━━━━━━━━━━━━━━━━━━\n"]})
-    content.append({"tag": "p", "children": [{"tag": "em", "children": [f"Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"]}]})
-    return content
+                lines.append(f"📝 Работы: {work_amount:,.0f} ₽".replace(',', ' '))
+                lines += [f"  • {e(item.strip())}" for item in work['description'].split(',') if item.strip()]
+            parts = await db.get_parts_by_work_id(work['work_id']) if work.get('work_id') else []
+            if parts:
+                lines.append(f"🔧 Запчасти: {parts_total:,.0f} ₽".replace(',', ' '))
+                lines += [f"  • {e(str(name))} — {float(price or 0):,.0f} ₽".replace(',', ' ') for name, price in parts]
+            lines.append(f"💰 Итого: {work_amount + parts_total:,.0f} ₽".replace(',', ' '))
+            blocks.append("\n".join(lines))
+
+    messages, current = [], ""
+    for block in blocks:
+        if current and len(current) + len(block) > 3500:
+            messages.append(current)
+            current = ""
+        current = f"{current}\n\n{block}" if current else block
+    messages.append(current)
+    return messages
+
+
+async def send_car_history(message: Message, telegram_user_id: int):
+    history = await db.get_car_history_by_user_id(telegram_user_id)
+    if not history:
+        await message.answer("🔍 История не найдена.\n\nИстория появится после того, как вы пройдёте обслуживание.", reply_markup=get_main_menu())
+        return
+    texts = await history_messages(history)
+    refresh = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Обновить", callback_data="car_history")]])
+    for i, text in enumerate(texts):
+        await message.answer(text, parse_mode="HTML", reply_markup=refresh if i == len(texts) - 1 else None)
+
+
+async def wipe_telegraph_pages():
+    """Стереть страницы истории, опубликованные раньше на telegra.ph (см. TELEGRAPH выше)"""
+    try:
+        for page in await db.get_telegraph_pages():
+            if await telegraph_edit_page(page['access_token'], page['page_path'], "Страница удалена",
+                                         [{"tag": "p", "children": ["Страница удалена."]}]):
+                await db.delete_telegraph_page(page['id'])
+                logger.info(f"Стёрта страница Telegraph: {page['page_path']}")
+            else:
+                logger.warning(f"Не удалось стереть страницу Telegraph {page['page_path']}, попробую при следующем запуске")
+    except Exception as ex:
+        logger.error(f"Ошибка при стирании страниц Telegraph: {ex}")
 
 
 async def analyze_car_maintenance(car_id: int, current_mileage: int) -> list:
@@ -1156,24 +1180,6 @@ def format_maintenance_report(car_info: dict, current_mileage: int, results: lis
     return text
 
 
-async def get_or_create_telegraph_page(user_id: int, user_name: str, history: list) -> str | None:
-    title = f"История обслуживания - {user_name}"
-    content = await format_telegraph_content(history)
-    page_data = await db.get_telegraph_page(user_id)
-    if page_data:
-        result = await telegraph_edit_page(page_data['access_token'], page_data['page_path'], title, content)
-        if result:
-            return f"https://telegra.ph/{page_data['page_path']}"
-    account = await telegraph_create_account(f"user_{user_id}")
-    if not account:
-        return None
-    page = await telegraph_create_page(account['access_token'], title, content)
-    if not page:
-        return None
-    await db.save_telegraph_page(user_id, page['path'], account['access_token'])
-    return page['url']
-
-
 # ==================== HANDLERS ====================
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -1196,6 +1202,8 @@ async def btn_menu(message: Message):
 
 @router.message(F.text == "📝 Мои записи")
 async def btn_my_bookings(message: Message):
+    if not await require_verified(message):
+        return
     bookings = await db.get_user_bookings(message.from_user.id)
     if not bookings:
         await message.answer("У вас нет активных записей.", reply_markup=get_main_menu())
@@ -1250,12 +1258,25 @@ async def slot_busy(callback: CallbackQuery):
     await callback.answer("Это время уже занято!", show_alert=True)
 
 
+async def ask_contact_for_booking(callback: CallbackQuery, state: FSMContext, date_str: str, time_str: str):
+    await state.update_data(booking_date=date_str, booking_time=time_str, bot_message_id=callback.message.message_id)
+    await state.set_state(BookingStates.waiting_for_phone)
+    date_display = datetime.fromisoformat(date_str).strftime("%d.%m.%Y")
+    await callback.message.edit_text(f"📅 Дата: {date_display}\n🕐 Время: {time_str}")
+    await ask_contact(callback.message, "📱 Для записи подтвердите номер телефона — нажмите кнопку «📱 Поделиться номером» внизу экрана.")
+
+
 @router.callback_query(F.data.startswith("usephone_"))
 async def use_saved_phone(callback: CallbackQuery, state: FSMContext):
+    # usephone_<дата>_<время>; в старых кнопках ещё и номер: usephone_<номер>_<дата>_<время> - номер из кнопки
+    # не берём (данные кнопки можно подделать), только подтверждённый номер из базы
     parts = callback.data.split("_")
-    phone = parts[1]
-    date_str = parts[2]
-    time_str = parts[3]
+    date_str, time_str = parts[-2], parts[-1]
+    phone = await db.get_user_phone(callback.from_user.id)
+    if not phone:
+        await ask_contact_for_booking(callback, state, date_str, time_str)
+        await callback.answer()
+        return
     booking_date = dt_date.fromisoformat(date_str)
     booking_time = time_str
     if not await db.is_slot_available(booking_date, booking_time):
@@ -1270,13 +1291,9 @@ async def use_saved_phone(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("enter_new_phone_"))
 async def enter_new_phone(callback: CallbackQuery, state: FSMContext):
+    """Кнопка «Ввести другой номер» из старых сообщений: номер теперь только подтверждённый"""
     parts = callback.data.split("_")
-    date_str = parts[3]
-    time_str = parts[4]
-    await state.update_data(booking_date=date_str, booking_time=time_str)
-    await state.set_state(BookingStates.waiting_for_phone)
-    date_display = datetime.fromisoformat(date_str).strftime("%d.%m.%Y")
-    await callback.message.edit_text(f"Дата: {date_display}\nВремя: {time_str}\n\nВведите ваш номер телефона:")
+    await ask_contact_for_booking(callback, state, parts[3], parts[4])
     await callback.answer()
 
 
@@ -1287,39 +1304,35 @@ async def select_time(callback: CallbackQuery, state: FSMContext):
     time_str = parts[2]
     await state.update_data(booking_time=time_str)
     date_display = datetime.fromisoformat(date_str).strftime("%d.%m.%Y")
-    await state.update_data(bot_message_id=callback.message.message_id)
-    saved_phones = await db.get_user_phones(callback.from_user.id)
-    if saved_phones:
-        buttons = []
-        for phone in saved_phones:
-            formatted = f"+7 ({phone[2:5]}) {phone[5:8]}-{phone[8:10]}-{phone[10:12]}"
-            buttons.append([InlineKeyboardButton(text=f"📱 {formatted}", callback_data=f"usephone_{phone}_{date_str}_{time_str}")])
-        buttons.append([InlineKeyboardButton(text="✏️ Ввести другой номер", callback_data=f"enter_new_phone_{date_str}_{time_str}")])
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await callback.message.edit_text(f"📅 Дата: {date_display}\n🕐 Время: {time_str}\n\n📱 Выберите номер или введите новый:", reply_markup=keyboard)
+    phone = await db.get_user_phone(callback.from_user.id)
+    if phone:
+        formatted = f"+7 ({phone[2:5]}) {phone[5:8]}-{phone[8:10]}-{phone[10:12]}" if re.fullmatch(r'\+7\d{10}', phone) else phone
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"📱 {formatted}", callback_data=f"usephone_{date_str}_{time_str}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"date_{date_str}")]
+        ])
+        await callback.message.edit_text(f"📅 Дата: {date_display}\n🕐 Время: {time_str}\n\n📱 Записать на этот номер?", reply_markup=keyboard)
     else:
-        await state.set_state(BookingStates.waiting_for_phone)
-        await callback.message.edit_text(f"📅 Дата: {date_display}\n🕐 Время: {time_str}\n\nДля продолжения записи\n📱 Введите ваш номер телефона:")
+        await ask_contact_for_booking(callback, state, date_str, time_str)
     await callback.answer()
 
 
-@router.message(BookingStates.waiting_for_phone)
+@router.message(BookingStates.waiting_for_phone, F.contact)
 async def process_phone(message: Message, state: FSMContext):
-    raw_phone = message.text
-    data = await state.get_data()
-    phone = validate_phone(raw_phone)
+    phone = await verified_contact_phone(message)
     if not phone:
-        await message.answer("❌ Неверный формат номера!\n\nВведите номер из 11 цифр, например:\n• 79056789012\n• +7-905-678-90-12\n• 8(905)678-90-12")
         return
+    await db.link_verified_phone(message.from_user.id, phone, message.from_user.full_name, message.from_user.username)
+    data = await state.get_data()
     booking_date = dt_date.fromisoformat(data["booking_date"])
     booking_time = data["booking_time"]
     bot_message_id = data.get("bot_message_id")
     try:
         if bot_message_id:
             await message.bot.delete_message(message.chat.id, bot_message_id)
-        await message.delete()
     except:
         pass
+    await message.answer("✅ Номер подтверждён", reply_markup=get_persistent_menu())
     if not await db.is_slot_available(booking_date, booking_time):
         await message.answer("❌ К сожалению, это время уже занято.\nПожалуйста, выберите другое время.", reply_markup=get_main_menu())
         await state.clear()
@@ -1329,8 +1342,26 @@ async def process_phone(message: Message, state: FSMContext):
                                                 booking_time=booking_time, is_callback=False)
 
 
+@router.message(BookingStates.waiting_for_phone)
+async def process_phone_text(message: Message):
+    await message.answer("Номер не нужно вводить — нажмите кнопку «📱 Поделиться номером» внизу экрана.", reply_markup=get_contact_keyboard())
+
+
+@router.message(F.contact)
+async def process_contact(message: Message):
+    """Номер подтверждают не только при записи - например, перед просмотром истории авто"""
+    phone = await verified_contact_phone(message)
+    if not phone:
+        return
+    await db.link_verified_phone(message.from_user.id, phone, message.from_user.full_name, message.from_user.username)
+    await message.answer("✅ Номер подтверждён. Теперь вам доступны история авто и ваши записи.", reply_markup=get_persistent_menu())
+    await message.answer("Выберите действие:", reply_markup=get_main_menu())
+
+
 @router.callback_query(F.data == "my_bookings")
 async def show_my_bookings(callback: CallbackQuery):
+    if not await require_verified(callback):
+        return await callback.answer()
     bookings = await db.get_user_bookings(callback.from_user.id)
     if not bookings:
         await callback.message.edit_text("У вас нет активных записей.", reply_markup=get_main_menu())
@@ -1345,6 +1376,8 @@ async def show_my_bookings(callback: CallbackQuery):
 
 @router.callback_query(F.data == "cancel_booking")
 async def show_cancel_options(callback: CallbackQuery):
+    if not await require_verified(callback):
+        return await callback.answer()
     bookings = await db.get_user_bookings(callback.from_user.id)
     if not bookings:
         await callback.message.edit_text("У вас нет записей для отмены.", reply_markup=get_main_menu())
@@ -1377,10 +1410,13 @@ async def select_car(callback: CallbackQuery, state: FSMContext):
     booking_date_str = data.get("booking_date")
     booking_time = data.get("booking_time")
     cars_list = data.get("cars_list", [])
-    client_id = data.get("client_id")
+    client_id = data.get("client_id") or await db.get_verified_client_id(callback.from_user.id)
+    if not client_id or not booking_date_str:
+        await state.clear()
+        await callback.message.edit_text("Запись прервалась — начните, пожалуйста, заново.", reply_markup=get_main_menu())
+        await callback.answer()
+        return
     booking_date = dt_date.fromisoformat(booking_date_str)
-    if not client_id:
-        client_id = await db.get_or_create_client(callback.from_user.id, callback.from_user.full_name, phone, tg_username=callback.from_user.username)
     car_info = None
     car_id = None
     choice = callback.data.replace("selectcar_", "")
@@ -1415,56 +1451,15 @@ async def select_car(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "car_history")
 async def show_car_history(callback: CallbackQuery):
-    history = await db.get_car_history_by_user_id(callback.from_user.id)
-    if not history:
-        try:
-            await callback.message.edit_text("🔍 История не найдена.\n\nИстория появится после того, как вы пройдёте обслуживание.", reply_markup=get_main_menu())
-        except TelegramBadRequest:
-            pass
-        await callback.answer()
-        return
-    await callback.answer("⏳ Формирую историю...")
-    user_name = callback.from_user.full_name or f"Клиент #{callback.from_user.id}"
-    page_url = await get_or_create_telegraph_page(callback.from_user.id, user_name, history)
-    if page_url:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📖 Открыть историю", url=page_url)],
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="car_history")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
-        ])
-        update_time = datetime.now().strftime("%H:%M:%S")
-        try:
-            await callback.message.edit_text(f"🚗 <b>История вашего авто</b>\n\nНажмите кнопку ниже, чтобы открыть полную историю обслуживания.\n\n<i>Обновлено: {update_time}</i>",
-                                             reply_markup=keyboard, parse_mode="HTML")
-        except TelegramBadRequest:
-            await callback.answer("✅ История уже актуальна", show_alert=False)
-    else:
-        try:
-            await callback.message.edit_text("❌ Не удалось сформировать историю.\nПопробуйте позже.", reply_markup=get_main_menu())
-        except TelegramBadRequest:
-            pass
+    await callback.answer()
+    if await require_verified(callback):
+        await send_car_history(callback.message, callback.from_user.id)
 
 
 @router.message(F.text == "🚗 История авто")
 async def btn_car_history(message: Message):
-    history = await db.get_car_history_by_user_id(message.from_user.id)
-    if not history:
-        await message.answer("🔍 История не найдена.\n\nИстория появится после того, как вы пройдёте обслуживание.", reply_markup=get_main_menu())
-        return
-    loading_msg = await message.answer("⏳ Формирую историю...")
-    user_name = message.from_user.full_name or f"Клиент #{message.from_user.id}"
-    page_url = await get_or_create_telegraph_page(message.from_user.id, user_name, history)
-    await loading_msg.delete()
-    if page_url:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📖 Открыть историю", url=page_url)],
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="car_history")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
-        ])
-        await message.answer(f"🚗 <b>История вашего авто</b>\n\nНажмите кнопку ниже, чтобы открыть полную историю обслуживания.",
-                             reply_markup=keyboard, parse_mode="HTML")
-    else:
-        await message.answer("❌ Не удалось сформировать историю.\nПопробуйте позже.", reply_markup=get_main_menu())
+    if await require_verified(message):
+        await send_car_history(message, message.from_user.id)
 
 
 # ==================== ПРОВЕРКА СОСТОЯНИЯ АВТО ====================
@@ -1472,6 +1467,8 @@ async def btn_car_history(message: Message):
 @router.callback_query(F.data == "check_car")
 async def start_car_check(callback: CallbackQuery, state: FSMContext):
     """Начало проверки состояния авто"""
+    if not await require_verified(callback):
+        return await callback.answer()
     cars = await db.get_client_cars_with_id(callback.from_user.id)
 
     if not cars:
@@ -1518,8 +1515,10 @@ async def select_car_for_check(callback: CallbackQuery, state: FSMContext):
     """Выбор авто для проверки"""
     car_id = int(callback.data.replace("checkcar_", ""))
     car = await db.get_car_by_id_full(car_id)
+    client_id = await db.get_verified_client_id(callback.from_user.id)
 
-    if not car:
+    # номер машины приходит из данных кнопки, а их можно подделать - проверяем, что машина этого клиента
+    if not car or not client_id or car['client_id'] != client_id:
         await callback.message.edit_text("❌ Автомобиль не найден.", reply_markup=get_main_menu())
         await state.clear()
         await callback.answer()
@@ -1681,11 +1680,10 @@ async def buy_subscription(callback: CallbackQuery):
         await callback.answer("Тариф не найден", show_alert=True)
         return
 
-    client_id = await db.get_or_create_client(
-        callback.from_user.id,
-        callback.from_user.full_name,
-        tg_username=callback.from_user.username
-    )
+    client_id = await require_verified(callback)
+    if not client_id:
+        await callback.answer()
+        return
 
     # Проверяем: нет ли уже активной подписки
     sub = await db.get_active_subscription(client_id)
@@ -1909,6 +1907,7 @@ async def on_startup():
     await db.connect()
     await db.init_tables()
     logger.info("База данных подключена и таблицы созданы")
+    asyncio.create_task(wipe_telegraph_pages())
     scheduler.add_job(send_evening_reminders, 'cron', hour=20, minute=0)
     scheduler.add_job(send_1h_reminders, 'cron', hour='9-20', minute='0,30')
     scheduler.start()

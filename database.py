@@ -4,12 +4,13 @@
 """
 
 import json
+import os
 import re
 import pymysql
 from pymysql import Error as MySQLError
 from tkinter import messagebox
 
-from db_config import DB_CONFIG
+from db_config import DB_CONFIG, get_base_path
 from db_schema import TABLES, INDEXES, MIGRATIONS
 
 
@@ -25,6 +26,15 @@ def normalize_phone(phone):
     if len(digits) == 10:
         return '+7' + digits
     return '+' + digits if digits else None
+
+
+def max_cars_per_slot():
+    """Сколько машин можно записать на одно время (config/settings.json, max_cars_per_slot)"""
+    try:
+        with open(os.path.join(get_base_path(), 'config', 'settings.json'), 'r', encoding='utf-8') as f:
+            return max(1, int(json.load(f).get('max_cars_per_slot', 1)))
+    except (OSError, ValueError, TypeError):
+        return 1
 
 
 class Database:
@@ -1114,7 +1124,7 @@ class Database:
             conn.close()
 
     def is_time_slot_available(self, booking_date, booking_time):
-        """Проверить свободен ли слот времени"""
+        """Проверить, есть ли на это время место (не больше max_cars_per_slot машин)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
@@ -1123,7 +1133,7 @@ class Database:
         """, (booking_date, booking_time))
         count = cursor.fetchone()[0]
         conn.close()
-        return count == 0
+        return count < max_cars_per_slot()
 
     def get_bookings_at_time(self, booking_date, booking_time):
         """Получить список записей на конкретное время с информацией о машинах."""

@@ -491,5 +491,10 @@
     "users.error_enter_password": "Enter password",
     "users.error_mismatch": "Passwords do not match",
     "users.done_title": "Done",
-    "users.password_changed": "Password changed successfully."
+    "users.password_changed": "Password changed successfully.",
+
+    "web_sync.title": "Website bookings",
+    "web_sync.header": "🌐 New bookings from the website: {count}",
+    "web_sync.line": "{date} {time} — {service}\n{name}, {phone}\n{car}",
+    "web_sync.open": "Open bookings"
 }

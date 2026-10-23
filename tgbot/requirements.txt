@@ -4,3 +4,5 @@ python-dotenv
 apscheduler
 yookassa>=3.0.0
 aiohttp
+pystray
+Pillow
