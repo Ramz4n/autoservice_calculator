@@ -2,6 +2,7 @@
     "app.window_title": "Ավտոսերվիսի հաշվիչ",
 
     "common.attention": "Ուշադրություն",
+    "common.more_items": "ևս {count}",
     "common.success": "Հաջողություն",
     "common.confirm": "Հաստատում",
     "common.info": "Տեղեկություն",

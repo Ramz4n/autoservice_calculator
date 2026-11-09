@@ -2,6 +2,7 @@
     "app.window_title": "Autoservis Kalkulator",
 
     "common.attention": "Pažnja",
+    "common.more_items": "još {count}",
     "common.success": "Uspeh",
     "common.confirm": "Potvrda",
     "common.info": "Informacija",

@@ -64,6 +64,9 @@ SETTINGS_FILE = os.path.join(BASE_PATH, 'config', 'settings.json')
 # Путь к файлу со списком запчастей для автодополнения
 SPARE_PARTS_FILE = os.path.join(BASE_PATH, 'config', 'spare_parts.txt')
 
+# Имена (страны СНГ) для подсказки в поле "Имя" окна "Записать клиента"
+FIRST_NAMES_FILE = os.path.join(BASE_PATH, 'config', 'first_names.txt')
+
 # Папка с переводами интерфейса
 LOCALES_DIR = os.path.join(BASE_PATH, 'config', 'locales')
 
@@ -701,6 +704,128 @@ class AutoServiceApp:
                 return [line.strip() for line in f if line.strip()]
         except FileNotFoundError:
             return []
+
+    def load_first_names(self):
+        """Загрузить список имён для подсказки (по одному на строку, # - комментарий)"""
+        if not hasattr(self, "_first_names"):
+            names = []
+            try:
+                with open(FIRST_NAMES_FILE, 'r', encoding='utf-8') as f:
+                    names = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            except FileNotFoundError:
+                pass
+            # Порядок как в файле - вверху самые частые (русские), повторы убираем
+            self._first_names = list(dict.fromkeys(names))
+        return self._first_names
+
+    def attach_name_autocomplete(self, entry, listbox_parent, position="right"):
+        """Подсказка имён из config/first_names.txt для поля ввода имени.
+        listbox_parent - контейнер, в котором лежит поле (список рисуется поверх соседних полей),
+        position - "right" (справа от поля) или "below" (под полем)"""
+        first_names = self.load_first_names()
+        window = entry.winfo_toplevel()
+        # Список с полосой прокрутки - чтобы было видно, что имён больше, чем помещается
+        popup = tk.Frame(listbox_parent, bd=1, relief="solid")
+        listbox = tk.Listbox(popup, height=6, width=18, font=("Arial", 12), activestyle="none",
+                             bd=0, highlightthickness=0)
+        scrollbar = tk.Scrollbar(popup, orient=tk.VERTICAL, command=listbox.yview)
+        # Подпись внизу "▼ ещё N" - сколько имён ниже видимой части
+        more_label = tk.Label(popup, text="", font=("Arial", 9), fg="#555", bg="#f0f0f0", anchor="w", padx=4)
+        visible = [False]
+        max_rows = 6
+
+        def on_list_scroll(first, last):
+            scrollbar.set(first, last)
+            below = listbox.size() - round(float(last) * listbox.size())
+            more_label.configure(text=f"▼ {self.tr('common.more_items', count=below)}" if below > 0 else "▲")
+
+        listbox.configure(yscrollcommand=on_list_scroll)
+        more_label.pack(side=tk.BOTTOM, fill=tk.X)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH)
+
+        def hide_list(event=None):
+            if visible[0]:
+                popup.place_forget()
+                visible[0] = False
+
+        def on_wheel(event):
+            # Колесо прокручивает список, даже если курсор в поле ввода
+            if visible[0]:
+                listbox.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                return "break"
+
+        def on_key(event):
+            if event.keysym in ("Down", "Escape", "Return", "Tab"):
+                return
+            # Подсказываем по слову, которое сейчас вводится (имя может идти после фамилии)
+            word = entry.get().split(" ")[-1].strip().lower()
+            matches = [n for n in first_names if n.lower().startswith(word)][:50] if word else []
+            # Имя уже введено полностью - список не нужен
+            if not matches or (len(matches) == 1 and matches[0].lower() == word):
+                hide_list()
+                return
+            listbox.delete(0, tk.END)
+            for n in matches:
+                listbox.insert(tk.END, n)
+            listbox.configure(height=min(max_rows, len(matches)))
+            listbox.yview_moveto(0)
+            if len(matches) > max_rows:
+                more_label.pack(side=tk.BOTTOM, fill=tk.X, before=listbox)
+                scrollbar.pack(side=tk.RIGHT, fill=tk.Y, before=listbox)
+            else:
+                more_label.pack_forget()
+                scrollbar.pack_forget()
+            if not visible[0]:
+                if position == "below":
+                    popup.place(in_=entry, relx=0.0, rely=1.0, y=2)
+                else:
+                    popup.place(in_=entry, relx=1.0, x=10, rely=0.0)
+                popup.lift()
+                visible[0] = True
+
+        def on_select(event=None):
+            sel = listbox.curselection()
+            if not sel:
+                return
+            parts = entry.get().split(" ")
+            parts[-1] = listbox.get(sel[0])
+            entry.delete(0, tk.END)
+            entry.insert(0, " ".join(parts))
+            hide_list()
+            entry.focus_set()
+            entry.icursor(tk.END)
+
+        def on_down(event):
+            # Стрелка вниз - переход в список подсказок
+            if visible[0]:
+                listbox.focus_set()
+                listbox.selection_clear(0, tk.END)
+                listbox.selection_set(0)
+                listbox.activate(0)
+                return "break"
+
+        def on_focus_out(event):
+            def check_and_hide():
+                try:
+                    if window.focus_get() != listbox:
+                        hide_list()
+                except (KeyError, tk.TclError):
+                    hide_list()
+            window.after(200, check_and_hide)
+
+        entry.bind("<KeyRelease>", on_key)
+        entry.bind("<Down>", on_down)
+        entry.bind("<Escape>", hide_list)
+        entry.bind("<FocusOut>", on_focus_out)
+        listbox.bind("<Button-1>", lambda e: listbox.focus_set())
+        listbox.bind("<ButtonRelease-1>", on_select)
+        listbox.bind("<Return>", on_select)
+        listbox.bind("<Escape>", lambda e: (hide_list(), entry.focus_set()))
+        listbox.bind("<FocusOut>", on_focus_out)
+        entry.bind("<MouseWheel>", on_wheel)
+        listbox.bind("<MouseWheel>", on_wheel)
+        scrollbar.bind("<MouseWheel>", on_wheel)
+        more_label.bind("<MouseWheel>", on_wheel)
 
     def save_settings(self, settings):
         """Сохранить настройки в JSON файл"""
@@ -1371,6 +1496,8 @@ class AutoServiceApp:
         ctk.CTkLabel(row_client_name, text=self.tr("works.client_name"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.client_name_entry = ctk.CTkEntry(row_client_name, width=350, fg_color="white", text_color="black")
         self.client_name_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        # Подсказка имён - список под полем, поверх строк ниже
+        self.attach_name_autocomplete(self.client_name_entry, center_container, position="below")
 
         # Телефон клиента
         row_client_phone = ctk.CTkFrame(center_container)
@@ -6790,6 +6917,9 @@ class AutoServiceApp:
         ctk.CTkLabel(main_frame, text=self.tr("works.client_name"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
         name_entry = ctk.CTkEntry(main_frame, width=220, font=("Arial", 14))
         name_entry.pack(anchor="w", pady=(0, 10))
+
+        # Подсказка имён из config/first_names.txt - список справа от поля
+        self.attach_name_autocomplete(name_entry, main_frame, position="right")
 
         def check_car_number(*args):
             """Проверка госномера - ищем существующее авто и владельца"""

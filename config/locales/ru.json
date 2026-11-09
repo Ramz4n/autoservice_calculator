@@ -2,6 +2,7 @@
     "app.window_title": "Калькулятор автосервиса",
 
     "common.attention": "Внимание",
+    "common.more_items": "ещё {count}",
     "common.success": "Успех",
     "common.confirm": "Подтверждение",
     "common.info": "Информация",

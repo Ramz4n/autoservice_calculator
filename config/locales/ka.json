@@ -2,6 +2,7 @@
     "app.window_title": "ავტოსერვისის კალკულატორი",
 
     "common.attention": "ყურადღება",
+    "common.more_items": "კიდევ {count}",
     "common.success": "წარმატება",
     "common.confirm": "დადასტურება",
     "common.info": "ინფორმაცია",

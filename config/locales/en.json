@@ -2,6 +2,7 @@
     "app.window_title": "AutoService Calculator",
 
     "common.attention": "Attention",
+    "common.more_items": "{count} more",
     "common.success": "Success",
     "common.confirm": "Confirm",
     "common.info": "Information",
