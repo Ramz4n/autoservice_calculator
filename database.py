@@ -1159,6 +1159,31 @@ class Database:
             })
         return bookings_list
 
+    def get_bookings_by_date(self, booking_date):
+        """Активные записи на дату, сгруппированные по времени: {"10:00": [{...}, ...]}"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT b.booking_time, c.full_name, car.car_number, car.car_brand, car.car_model
+            FROM bookings b
+            LEFT JOIN clients c ON b.client_id = c.id
+            LEFT JOIN client_cars car ON b.car_id = car.id
+            WHERE b.booking_date = %s AND b.status IN ('waiting', 'in_progress')
+            ORDER BY b.booking_time, b.id
+        """, (booking_date,))
+        results = cursor.fetchall()
+        conn.close()
+
+        by_time = {}
+        for booking_time, full_name, car_number, brand, model in results:
+            by_time.setdefault(str(booking_time).strip(), []).append({
+                'client_name': full_name or '',
+                'car_number': car_number or '',
+                'brand': brand or '',
+                'model': model or ''
+            })
+        return by_time
+
     def get_active_bookings_for_select(self):
         """Получить активные записи для выпадающего списка."""
         conn = self.get_connection()

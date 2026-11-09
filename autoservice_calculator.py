@@ -95,6 +95,19 @@ def booking_time_slots():
     return [f"{m // 60:02d}:{m % 60:02d}" for m in range(start, end + 1, step)]
 
 
+# Маска телефона: скобки и тире стоят всегда, "_" - позиции цифр
+PHONE_MASK = "+7(___)-___-__-__"
+PHONE_SLOTS = [i for i, c in enumerate(PHONE_MASK) if c == "_"]
+
+
+def format_phone_ru(digits):
+    """Подставить до 10 цифр после +7 в маску: "909581" -> +7(909)-581-__-__"""
+    chars = list(PHONE_MASK)
+    for pos, d in zip(PHONE_SLOTS, digits[:10]):
+        chars[pos] = d
+    return "".join(chars)
+
+
 def save_app_settings(settings):
     """Сохранить настройки приложения в JSON файл"""
     try:
@@ -6529,7 +6542,10 @@ class AutoServiceApp:
 
         # Центрируем окно
         window_width = 450
-        window_height = 690
+        # Время выбирается сеткой кнопок - окно растёт на каждый дополнительный ряд
+        time_cols = 6
+        time_rows = (len(TIME_SLOTS) + time_cols - 1) // time_cols
+        window_height = 696 + max(0, time_rows - 1) * 38
         screen_width = add_window.winfo_screenwidth()
         screen_height = add_window.winfo_screenheight()
         x = (screen_width - window_width) // 2
@@ -6659,24 +6675,116 @@ class AutoServiceApp:
         # === ТЕЛЕФОН ===
         ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_phone"), font=("Arial", 15)).pack(anchor="w", pady=(10, 5))
 
-        def validate_phone(new_value):
-            if len(new_value) < 2:
-                return False
-            if not new_value.startswith("+7"):
-                return False
-            if new_value == "+7":
-                return True
-            after_prefix = new_value[2:]
-            if not after_prefix.isdigit():
-                return False
-            if len(after_prefix) > 10:
-                return False
-            return True
+        phone_row = ctk.CTkFrame(main_frame, fg_color="transparent")
+        phone_row.pack(anchor="w", fill=tk.X, pady=(0, 10))
+        phone_entry = ctk.CTkEntry(phone_row, width=220, font=("Arial", 14))
+        phone_entry.pack(side=tk.LEFT)
+        phone_entry.insert(0, PHONE_MASK)
 
-        vcmd = (add_window.register(validate_phone), '%P')
-        phone_entry = ctk.CTkEntry(main_frame, width=220, font=("Arial", 14), validate="key", validatecommand=vcmd)
-        phone_entry.pack(anchor="w", pady=(0, 10))
-        phone_entry.insert(0, "+7")
+        # Ввод номера по маске +7(___)-___-__-__: цифры стоят на своих позициях,
+        # удалённая цифра заменяется на "_", остальные не сдвигаются
+        def set_phone_text(text):
+            phone_entry.delete(0, tk.END)
+            phone_entry.insert(0, text)
+
+        def phone_slots_in(start, end):
+            """Номера позиций цифр (0..9), попадающих в диапазон символов [start, end)"""
+            return [i for i, pos in enumerate(PHONE_SLOTS) if start <= pos < end]
+
+        def put_phone_digits(slot, digits):
+            """Записать цифры подряд начиная с позиции slot, курсор - за последней"""
+            chars = list(phone_entry.get())
+            for d in digits:
+                if slot >= len(PHONE_SLOTS):
+                    break
+                chars[PHONE_SLOTS[slot]] = d
+                slot += 1
+            set_phone_text("".join(chars))
+            phone_entry.icursor(PHONE_SLOTS[slot] if slot < len(PHONE_SLOTS) else len(PHONE_MASK))
+
+        def clear_phone_selection():
+            """Стереть выделенные цифры, вернуть позицию начала выделения (или None)"""
+            if not phone_entry.select_present():
+                return None
+            start, end = phone_entry.index("sel.first"), phone_entry.index("sel.last")
+            chars = list(phone_entry.get())
+            for i in phone_slots_in(start, end):
+                chars[PHONE_SLOTS[i]] = "_"
+            set_phone_text("".join(chars))
+            phone_entry.icursor(start)
+            return start
+
+        def on_phone_key(event):
+            if event.state & 0x4:  # Ctrl+C / Ctrl+V / Ctrl+A - стандартное поведение
+                return None
+            cursor = phone_entry.index(tk.INSERT)
+            if event.keysym == "BackSpace":
+                if clear_phone_selection() is None:
+                    before = phone_slots_in(0, cursor)
+                    if before:
+                        slot = before[-1]
+                        chars = list(phone_entry.get())
+                        chars[PHONE_SLOTS[slot]] = "_"
+                        set_phone_text("".join(chars))
+                        phone_entry.icursor(PHONE_SLOTS[slot])
+                return "break"
+            if event.keysym == "Delete":
+                if clear_phone_selection() is None:
+                    after = phone_slots_in(cursor, len(PHONE_MASK))
+                    if after:
+                        chars = list(phone_entry.get())
+                        chars[PHONE_SLOTS[after[0]]] = "_"
+                        set_phone_text("".join(chars))
+                        phone_entry.icursor(PHONE_SLOTS[after[0]])
+                return "break"
+            if event.char.isdigit():
+                start = clear_phone_selection()
+                if start is not None:
+                    cursor = start
+                after = phone_slots_in(cursor, len(PHONE_MASK))
+                if after:
+                    put_phone_digits(after[0], event.char)
+                return "break"
+            # Буквы и прочие символы не пропускаем; стрелки, Tab, Enter и т.п. (без символа) - как обычно
+            return "break" if event.char.isprintable() and event.char else None
+
+        def on_phone_paste(event):
+            try:
+                digits = ''.join(c for c in phone_entry.clipboard_get() if c.isdigit())
+            except tk.TclError:
+                return "break"
+            if not digits:
+                return "break"
+            if len(digits) >= 10:
+                # Номер целиком: 89095813910 / 79095813910 / 9095813910
+                if len(digits) == 11 and digits[0] in "78":
+                    digits = digits[1:]
+                set_phone_text(PHONE_MASK)
+                put_phone_digits(0, digits[:10])
+            else:
+                start = clear_phone_selection()
+                cursor = start if start is not None else phone_entry.index(tk.INSERT)
+                after = phone_slots_in(cursor, len(PHONE_MASK))
+                if after:
+                    put_phone_digits(after[0], digits)
+            return "break"
+
+        def on_phone_click(event):
+            # В пустое поле курсор ставим на первую цифру, а не туда, куда попал клик
+            if not any(c.isdigit() for c in phone_entry.get()[2:]):
+                phone_entry.after_idle(lambda: phone_entry.icursor(PHONE_SLOTS[0]))
+
+        phone_entry.bind("<KeyPress>", on_phone_key)
+        phone_entry.bind("<<Paste>>", on_phone_paste)
+        phone_entry.bind("<<Cut>>", lambda e: "break")
+        phone_entry.bind("<ButtonRelease-1>", on_phone_click)
+        phone_entry.bind("<FocusIn>", on_phone_click)
+
+        # Выбор машины клиента, найденного по телефону (показывается, если машин несколько)
+        phone_cars_combo = ctk.CTkComboBox(phone_row, width=180, font=("Arial", 13), values=[], state="readonly")
+        phone_cars_visible = [False]
+        phone_cars_numbers = {}
+        last_checked_phone = [""]
 
         # === ИМЯ КЛИЕНТА ===
         ctk.CTkLabel(main_frame, text=self.tr("works.client_name"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
@@ -6722,10 +6830,7 @@ class AutoServiceApp:
                         phone_digits = ''.join(c for c in owner_phone if c.isdigit())
                         if len(phone_digits) >= 10:
                             # Временно отключаем валидацию для вставки
-                            phone_entry.configure(validate="none")
-                            phone_entry.delete(0, tk.END)
-                            phone_entry.insert(0, f"+7{phone_digits[-10:]}")
-                            phone_entry.configure(validate="key", validatecommand=vcmd)
+                            set_phone_text(format_phone_ru(phone_digits[-10:]))
                 else:
                     # Авто не найдено - показываем поля марки/модели, сбрасываем данные
                     car_found_by_number[0] = False
@@ -6753,6 +6858,66 @@ class AutoServiceApp:
         car_number_entry.bind("<KeyRelease>", check_car_number)
         car_number_entry.bind("<FocusOut>", check_car_number)
 
+        def hide_phone_cars():
+            if phone_cars_visible[0]:
+                phone_cars_combo.pack_forget()
+                phone_cars_visible[0] = False
+
+        def fill_car_number(number):
+            car_number_entry.delete(0, tk.END)
+            car_number_entry.insert(0, number)
+            check_car_number()
+
+        def on_phone_car_select(choice):
+            number = phone_cars_numbers.get(choice)
+            if number:
+                fill_car_number(number)
+
+        phone_cars_combo.configure(command=on_phone_car_select)
+
+        def check_phone(*args):
+            """Проверка телефона - подставляем имя клиента и его машины"""
+            phone_digits = ''.join(c for c in phone_entry.get() if c.isdigit())
+            if len(phone_digits) != 11:
+                last_checked_phone[0] = ""
+                hide_phone_cars()
+                return
+            if phone_digits == last_checked_phone[0]:
+                return
+            last_checked_phone[0] = phone_digits
+
+            client_name = self.db.get_client_name_by_phone(phone_digits)
+            if client_name and not name_entry.get().strip():
+                name_entry.insert(0, client_name)
+
+            cars = self.db.get_client_cars_by_phone(phone_digits)
+            phone_cars_numbers.clear()
+            for car_brand, car_model, car_number, _vin in cars:
+                if car_number:
+                    display = f"{car_brand or ''} {car_model or ''} {car_number}".strip()
+                    phone_cars_numbers[display] = car_number
+
+            if not phone_cars_numbers:
+                hide_phone_cars()
+                return
+
+            # Госномер уже введён вручную - не перезаписываем
+            if car_number_entry.get().strip():
+                return
+
+            if len(phone_cars_numbers) == 1:
+                hide_phone_cars()
+                fill_car_number(next(iter(phone_cars_numbers.values())))
+            else:
+                phone_cars_combo.configure(values=list(phone_cars_numbers))
+                phone_cars_combo.set(self.tr("bookings.add_window_client_cars"))
+                if not phone_cars_visible[0]:
+                    phone_cars_combo.pack(side=tk.LEFT, padx=(10, 0))
+                    phone_cars_visible[0] = True
+
+        phone_entry.bind("<KeyRelease>", check_phone, add="+")
+        phone_entry.bind("<FocusOut>", check_phone)
+
         # Дата
         ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_date"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
         date_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -6774,8 +6939,83 @@ class AutoServiceApp:
 
         # Время
         ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_time"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
-        time_combo = ctk.CTkComboBox(main_frame, values=TIME_SLOTS, width=150, font=("Arial", 14))
-        time_combo.pack(anchor="w", pady=(0, 5))
+        time_grid = ctk.CTkFrame(main_frame, fg_color="transparent")
+        time_grid.pack(anchor="w", pady=(0, 5))
+        selected_time = [TIME_SLOTS[0]]
+        time_buttons = {}
+        time_badges = {}
+        slot_bookings = {}  # время -> список записей на выбранную дату
+        slot_tooltip = [None]
+
+        def select_time(slot):
+            selected_time[0] = slot
+            for s, btn in time_buttons.items():
+                if s == slot:
+                    btn.configure(fg_color="#1f538d", text_color="white", hover_color="#1f538d")
+                else:
+                    btn.configure(fg_color="white", text_color="black", hover_color="#dbe6f3")
+
+        def hide_slot_tooltip(event=None):
+            if slot_tooltip[0]:
+                slot_tooltip[0].destroy()
+                slot_tooltip[0] = None
+
+        def show_slot_tooltip(slot):
+            hide_slot_tooltip()
+            bookings = slot_bookings.get(slot)
+            if not bookings:
+                return
+            btn = time_buttons[slot]
+            tip = tk.Toplevel(add_window)
+            tip.wm_overrideredirect(True)
+            tip.attributes("-topmost", True)  # окно записи topmost - иначе подсказка уйдёт под него
+            tip.wm_geometry(f"+{btn.winfo_rootx()}+{btn.winfo_rooty() + btn.winfo_height() + 4}")
+            frame = tk.Frame(tip, bg='#ffffe0', relief='solid', borderwidth=1)
+            frame.pack()
+            tk.Label(frame, text=self.tr("bookings.add_window_slot_bookings", time=slot), bg='#ffffe0',
+                     font=('Segoe UI', 10, 'bold'), padx=8, pady=4).pack(anchor=tk.W)
+            for b in bookings:
+                car = " ".join(x for x in (b['brand'], b['model'], b['car_number']) if x)
+                line = f"• {b['client_name'] or '—'}" + (f" — {car}" if car else "")
+                tk.Label(frame, text=line, bg='#ffffe0', font=('Segoe UI', 10),
+                         padx=8, pady=1, justify=tk.LEFT).pack(anchor=tk.W)
+            tk.Frame(frame, bg='#ffffe0', height=4).pack()
+            slot_tooltip[0] = tip
+
+        for i, slot in enumerate(TIME_SLOTS):
+            # Ячейка с отступом сверху/справа - в угол ложится красный кружок с числом записей
+            cell = ctk.CTkFrame(time_grid, fg_color="transparent")
+            cell.grid(row=i // time_cols, column=i % time_cols, padx=1, pady=1)
+            btn = ctk.CTkButton(cell, text=slot, width=56, height=28, font=("Arial", 13),
+                                corner_radius=6, border_width=1, border_color="#b0b0b0",
+                                command=lambda s=slot: select_time(s))
+            btn.pack(padx=(0, 6), pady=(6, 0))
+            badge = ctk.CTkLabel(cell, text="", width=16, height=16, corner_radius=8,
+                                 fg_color="#e53935", text_color="white", font=("Arial", 10, "bold"))
+            badge.bind("<Button-1>", lambda e, s=slot: select_time(s))
+            for w in (btn, badge):
+                w.bind("<Enter>", lambda e, s=slot: show_slot_tooltip(s), add="+")
+                w.bind("<Leave>", hide_slot_tooltip, add="+")
+            time_buttons[slot] = btn
+            time_badges[slot] = badge
+
+        def refresh_slot_counts():
+            """Подсчитать записи на выбранную дату и обновить кружки"""
+            slot_bookings.clear()
+            try:
+                slot_bookings.update(self.db.get_bookings_by_date(date_entry.get_date()))
+            except Exception as e:
+                print(f"Не удалось загрузить записи на дату: {e}")
+            for slot, badge in time_badges.items():
+                count = len(slot_bookings.get(slot, []))
+                if count:
+                    badge.configure(text=str(count) if count < 10 else "9+")
+                    badge.place(relx=1.0, rely=0.0, anchor="ne")
+                    badge.lift()
+                else:
+                    badge.place_forget()
+
+        add_window.bind("<Destroy>", lambda e: hide_slot_tooltip() if e.widget is add_window else None, add="+")
 
         # Статус (показывает если нет свободных слотов)
         slot_status_label = ctk.CTkLabel(main_frame, text="", font=("Arial", 13))
@@ -6786,13 +7026,12 @@ class AutoServiceApp:
             try:
                 booking_date = date_entry.get_date()
 
-                # Показываем все слоты времени (не фильтруем занятые)
-                time_combo.configure(values=TIME_SLOTS)
-                time_combo.set(TIME_SLOTS[0])
+                # Показываем все слоты времени (не фильтруем занятые), занятость - кружками
+                select_time(TIME_SLOTS[0])
+                refresh_slot_counts()
                 slot_status_label.configure(text="", text_color="#2e7d32")
             except:
-                time_combo.configure(values=TIME_SLOTS)
-                time_combo.set(TIME_SLOTS[0])
+                select_time(TIME_SLOTS[0])
 
         date_entry.bind("<<DateEntrySelected>>", update_available_times)
         update_available_times()
@@ -6858,7 +7097,7 @@ class AutoServiceApp:
             name = name_entry.get().strip()
             phone_raw = phone_entry.get().strip()
             date_str = date_entry.get_date().strftime("%d.%m.%Y")
-            time_str = time_combo.get()
+            time_str = selected_time[0]
 
             # Получаем информацию об авто
             number = car_number_entry.get().strip().upper()
@@ -6890,8 +7129,8 @@ class AutoServiceApp:
                 messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_enter_phone_after_plus7"), parent=add_window)
                 return
 
-            # Телефон уже в нужном формате
-            phone = phone_raw
+            # В базу - без форматирования, +7XXXXXXXXXX
+            phone = "+" + phone_digits
 
             # Парсим дату
             try:
@@ -6900,6 +7139,16 @@ class AutoServiceApp:
             except:
                 messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_invalid_date"), parent=add_window)
                 return
+
+            # Эта же машина уже записана на это время - второй раз не записываем
+            for booking in self.db.get_bookings_at_time(booking_date, time_str):
+                if booking['car_number'].strip().upper() == number:
+                    messagebox.showwarning(
+                        self.tr("common.attention"),
+                        self.tr("bookings.msg_car_already_booked", car_number=number,
+                                date=date_str, time=time_str, client_name=booking['client_name']),
+                        parent=add_window)
+                    return
 
             # Проверяем доступность
             if not self.db.is_time_slot_available(booking_date, time_str):
