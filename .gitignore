@@ -12,3 +12,18 @@ main.spec
 license_cache.json
 license.key
 Backup
+
+# QA practice
+QA
+
+# Build / IDE / junk
+__pycache__/
+.idea/
+*.exe
+*.stackdump
+*.log
+
+# db_setup: пароли клиентов, логи, установщик MariaDB
+db_setup/clients/
+db_setup/logs/
+db_setup/*.msi

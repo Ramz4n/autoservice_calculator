@@ -35,6 +35,14 @@
     "works.car_model": "Модель машины:",
     "works.vin": "VIN:",
     "works.mileage": "Пробег:",
+    "works.vin_conflict_title": "VIN отличается",
+    "works.vin_conflict_body": "Новый VIN отличается от уже сохранённого у этой машины. Перезаписать его?\nОтличающиеся символы подсвечены.",
+    "works.vin_old_label": "Старый VIN:",
+    "works.vin_new_label": "Новый VIN:",
+    "works.vin_length_info": "Длина: старый — {old}, новый — {new} (стандарт — 17)",
+    "works.vin_overwrite_btn": "Перезаписать",
+    "works.vin_keep_btn": "Оставить старый",
+    "works.vin_too_short": "VIN содержит {count} из {required} символов. Похоже, он введён не полностью.\n\nСохранить всё равно?",
     "works.context_paste": "Вставить",
     "works.client_section": "Данные клиента",
     "works.booking": "Запись:",
@@ -112,6 +120,9 @@
     "bookings.col_car": "Автомобиль",
     "bookings.col_notes": "Примечание",
     "bookings.col_status": "Статус",
+    "bookings.columns_btn": "Столбцы",
+    "bookings.columns_menu_title": "Показывать столбцы:",
+    "bookings.columns_last_visible": "Нельзя скрыть все столбцы — хотя бы один должен остаться.",
     "bookings.ctx_start_work": "Начать работу",
     "bookings.ctx_edit": "Редактировать",
     "bookings.ctx_info": "Информация",
@@ -480,5 +491,10 @@
     "users.error_enter_password": "Введите пароль",
     "users.error_mismatch": "Пароли не совпадают",
     "users.done_title": "Готово",
-    "users.password_changed": "Пароль успешно изменён."
+    "users.password_changed": "Пароль успешно изменён.",
+
+    "web_sync.title": "Записи с сайта",
+    "web_sync.header": "🌐 Новые записи с сайта: {count}",
+    "web_sync.line": "{date} {time} — {service}\n{name}, {phone}\n{car}",
+    "web_sync.open": "Открыть записи"
 }

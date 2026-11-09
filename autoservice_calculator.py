@@ -19,6 +19,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 import os
 import subprocess
 import tempfile
+import threading
 import re
 import requests
 import webbrowser
@@ -28,9 +29,13 @@ from dotenv import load_dotenv
 
 # Импорт класса для работы с базой данных
 from database import Database
+import web_sync
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
 import backup as backup_module
+
+# Стандартная длина VIN
+VIN_LENGTH = 17
 
 
 def get_base_path():
@@ -79,6 +84,15 @@ def load_app_settings():
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {'master_percent': 50}
+
+
+def booking_time_slots():
+    """Время записи: от начала до конца рабочего дня включительно, каждые slot_duration_minutes
+    (те же настройки использует Telegram-бот и сайт онлайн-записи)"""
+    s = load_app_settings()
+    start, end = int(s.get('working_hours_start', 10)) * 60, int(s.get('working_hours_end', 20)) * 60
+    step = max(15, int(s.get('slot_duration_minutes', 120)))
+    return [f"{m // 60:02d}:{m % 60:02d}" for m in range(start, end + 1, step)]
 
 
 def save_app_settings(settings):
@@ -144,15 +158,20 @@ class TreeviewTooltip:
             self.hide_tooltip()
             return
 
-        # Преобразуем #1, #2 в индекс колонки
-        col_index = int(column.replace('#', '')) - 1
-        columns = self.treeview['columns']
+        # Преобразуем #1, #2 в имя колонки. Номер считается по видимым колонкам (displaycolumns),
+        # а индекс значения в values - по полному списку columns
+        display_index = int(column.replace('#', '')) - 1
+        columns = list(self.treeview['columns'])
+        display_columns = list(self.treeview['displaycolumns'])
+        if display_columns == ['#all']:
+            display_columns = columns
 
-        if col_index < 0 or col_index >= len(columns):
+        if display_index < 0 or display_index >= len(display_columns):
             self.hide_tooltip()
             return
 
-        col_name = columns[col_index]
+        col_name = display_columns[display_index]
+        col_index = columns.index(col_name)
 
         # Проверяем, нужно ли показывать tooltip для этой колонки
         if self.columns and col_name not in self.columns:
@@ -367,7 +386,6 @@ class AutoServiceApp:
         self.root.protocol("WM_DELETE_WINDOW", self._confirm_close)
         self.root.title(self.tr("app.window_title"))
         self.root.minsize(800, 600)
-        self.root.after(100, lambda: self.root.state('zoomed'))  # Открытие во весь экран
 
         self.db = Database()
         self.spare_parts_list = self.load_spare_parts()
@@ -820,7 +838,7 @@ class AutoServiceApp:
 
         if upd:
             if show_update_dialog(upd, parent=self.root):
-                apply_update(upd["download_url"], parent_widget=self.root)
+                apply_update(upd["download_url"], parent_widget=self.root, forced=upd.get("forced", False))
         else:
             messagebox.showinfo(
                 self.tr("common.info"),
@@ -1299,8 +1317,13 @@ class AutoServiceApp:
         row_vin = ctk.CTkFrame(center_container)
         row_vin.pack(fill=tk.X, pady=5)
         ctk.CTkLabel(row_vin, text=self.tr("works.vin"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.vin_entry = ctk.CTkEntry(row_vin, width=200, fg_color="white", text_color="black")
+        self.vin_var = tk.StringVar()
+        self.vin_entry = ctk.CTkEntry(row_vin, width=200, fg_color="white", text_color="black", textvariable=self.vin_var)
         self.vin_entry.pack(side=tk.LEFT, padx=5)
+        # Счётчик символов VIN (стандарт - 17)
+        self.vin_counter_label = ctk.CTkLabel(row_vin, text=f"0/{VIN_LENGTH}", width=45, anchor="w")
+        self.vin_counter_label.pack(side=tk.LEFT)
+        self.vin_var.trace_add("write", self.on_vin_change)
 
         ctk.CTkLabel(row_vin, text=self.tr("works.mileage"), width=80, anchor="w").pack(side=tk.LEFT, padx=(20, 5))
         self.mileage_entry = ctk.CTkEntry(row_vin, width=100, fg_color="white", text_color="black")
@@ -1548,6 +1571,102 @@ class AutoServiceApp:
             self.brand_listbox.pack_forget()
             self.brand_listbox_visible = False
 
+    def on_vin_change(self, *args):
+        """Ограничить VIN 17 символами (без пробелов, заглавными) и обновить счётчик"""
+        value = self.vin_var.get()
+        cleaned = re.sub(r"\s", "", value).upper()[:VIN_LENGTH]
+        if cleaned != value:
+            # Внутри trace-обработчика Tcl не вызывает его повторно, поэтому счётчик обновляем здесь же
+            self.vin_var.set(cleaned)
+
+        length = len(cleaned)
+        if length == 0:
+            color = ("gray40", "gray60")
+        elif length < VIN_LENGTH:
+            color = "#ef4444"
+        else:
+            color = "#22c55e"
+        self.vin_counter_label.configure(text=f"{length}/{VIN_LENGTH}", text_color=color)
+
+    def ask_vin_overwrite(self, old_vin, new_vin):
+        """Спросить, перезаписать ли VIN машины. Отличающиеся символы подсвечиваются.
+        Возвращает "overwrite", "keep" или None (отмена сохранения)."""
+        import difflib
+
+        result = {"choice": None}
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(self.tr("works.vin_conflict_title"))
+        dialog.geometry("520x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        ctk.CTkLabel(
+            dialog,
+            text=self.tr("works.vin_conflict_body"),
+            font=("Arial", 14),
+            wraplength=470,
+            justify="left"
+        ).pack(padx=25, pady=(20, 15), anchor="w")
+
+        # Разметка различий. При одинаковой длине сравниваем строго по позициям;
+        # при разной (пропущен/лишний символ) ищем сдвиг, но совпадением считаем
+        # только участки от 3 символов подряд, чтобы случайные одиночные совпадения не "гасили" ошибку
+        if len(old_vin) == len(new_vin):
+            old_diff = {i for i, (a, b) in enumerate(zip(old_vin, new_vin)) if a != b}
+            new_diff = set(old_diff)
+        else:
+            old_diff, new_diff = set(range(len(old_vin))), set(range(len(new_vin)))
+            matcher = difflib.SequenceMatcher(None, old_vin, new_vin, autojunk=False)
+            for i, j, size in matcher.get_matching_blocks():
+                if size >= 3:
+                    old_diff.difference_update(range(i, i + size))
+                    new_diff.difference_update(range(j, j + size))
+
+        is_dark = ctk.get_appearance_mode() == "Dark"
+        bg = "#2b2b2b" if is_dark else "#ffffff"
+        fg = "#ffffff" if is_dark else "#000000"
+
+        def vin_row(label, value, diff, highlight_bg):
+            row = ctk.CTkFrame(dialog, fg_color="transparent")
+            row.pack(fill="x", padx=25, pady=4)
+            ctk.CTkLabel(row, text=label, width=110, anchor="w", font=("Arial", 14)).pack(side="left")
+            text = tk.Text(row, height=1, width=len(value) + 1, font=("Consolas", 16, "bold"),
+                           bg=bg, fg=fg, relief="flat", borderwidth=0, highlightthickness=0)
+            text.tag_configure("diff", background=highlight_bg, foreground="#000000")
+            for idx, ch in enumerate(value):
+                text.insert(tk.END, ch, ("diff",) if idx in diff else ())
+            text.configure(state="disabled")
+            text.pack(side="left")
+
+        vin_row(self.tr("works.vin_old_label"), old_vin, old_diff, "#fca5a5")
+        vin_row(self.tr("works.vin_new_label"), new_vin, new_diff, "#86efac")
+
+        ctk.CTkLabel(
+            dialog,
+            text=self.tr("works.vin_length_info", old=len(old_vin), new=len(new_vin)),
+            font=("Arial", 12),
+            text_color=("gray40", "gray60")
+        ).pack(padx=25, pady=(6, 0), anchor="w")
+
+        def choose(value):
+            result["choice"] = value
+            dialog.destroy()
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(pady=20)
+        ctk.CTkButton(btn_row, text=self.tr("works.vin_overwrite_btn"), command=lambda: choose("overwrite"),
+                      fg_color="#4caf50", hover_color="#388e3c", width=140).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_row, text=self.tr("works.vin_keep_btn"), command=lambda: choose("keep"),
+                      width=140).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_row, text=self.tr("common.cancel"), command=dialog.destroy,
+                      fg_color="gray", width=110).pack(side=tk.LEFT, padx=5)
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self.root.wait_window(dialog)
+        return result["choice"]
+
     def show_vin_context_menu(self, event):
         """Показать контекстное меню для поля VIN"""
         self.vin_context_menu.tk_popup(event.x_root, event.y_root)
@@ -1559,6 +1678,31 @@ class AutoServiceApp:
             self.vin_entry.insert(tk.END, clipboard_text)
         except tk.TclError:
             pass  # Буфер обмена пуст
+
+    def add_copy_button(self, parent, text):
+        """Кнопка-значок рядом с текстом: по клику копирует text в буфер обмена"""
+        btn = ctk.CTkButton(
+            parent,
+            text="📋",
+            width=26,
+            height=24,
+            font=("Arial", 14),
+            fg_color="transparent",
+            hover_color=("gray80", "gray30"),
+            text_color=("gray30", "gray70"),
+            cursor="hand2",
+        )
+
+        def copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()  # чтобы текст остался в буфере и после закрытия окна
+            btn.configure(text="✓", text_color=("green", "#4ade80"))
+            btn.after(1200, lambda: btn.winfo_exists() and btn.configure(
+                text="📋", text_color=("gray30", "gray70")))
+
+        btn.configure(command=copy)
+        return btn
 
     def on_brand_select(self, event):
         """Обработчик выбора марки из списка"""
@@ -1651,14 +1795,15 @@ class AutoServiceApp:
         selected_car_display = None
 
         for car in cars:
-            car_brand, car_model, car_number = car
+            car_brand, car_model, car_number, car_vin = car
             display_text = f"{car_brand or ''} {car_model or ''} {car_number or ''}".strip()
             if display_text:
                 values.append(display_text)
                 self.client_cars_data[display_text] = {
                     'brand': car_brand or '',
                     'model': car_model or '',
-                    'number': car_number or ''
+                    'number': car_number or '',
+                    'vin': car_vin or ''
                 }
                 # Если есть car_id из записи - ищем соответствующую машину
                 if booking_car_id:
@@ -1691,6 +1836,7 @@ class AutoServiceApp:
                 self.car_brand_entry.delete(0, tk.END)
                 self.car_model_entry.delete(0, tk.END)
                 self.car_number_entry.delete(0, tk.END)
+                self.vin_var.set("")
             else:
                 # Нет машин
                 self.client_cars_combo.set(self.tr("works.new_car"))
@@ -1864,14 +2010,15 @@ class AutoServiceApp:
         values = [self.tr("works.new_car")]
 
         for car in cars:
-            car_brand, car_model, car_number = car
+            car_brand, car_model, car_number, car_vin = car
             display_text = f"{car_brand or ''} {car_model or ''} {car_number or ''}".strip()
             if display_text:
                 values.append(display_text)
                 self.client_cars_data[display_text] = {
                     'brand': car_brand or '',
                     'model': car_model or '',
-                    'number': car_number or ''
+                    'number': car_number or '',
+                    'vin': car_vin or ''
                 }
 
         self.client_cars_combo.configure(values=values)
@@ -1891,11 +2038,13 @@ class AutoServiceApp:
             self.car_model_entry.insert(0, car_info['model'])
             self.car_number_entry.delete(0, tk.END)
             self.car_number_entry.insert(0, car_info['number'])
+            self.vin_var.set(car_info.get('vin', ''))
         elif choice == self.tr("works.new_car"):
             # Очищаем поля машины для новой
             self.car_brand_entry.delete(0, tk.END)
             self.car_model_entry.delete(0, tk.END)
             self.car_number_entry.delete(0, tk.END)
+            self.vin_var.set("")
         elif choice == self.tr("works.select_car"):
             # Не делаем ничего, ждём выбора
             self.client_cars_combo.configure(text_color="#c62828")
@@ -2304,6 +2453,24 @@ class AutoServiceApp:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"))
             return
 
+        # VIN короче стандартных 17 символов - предупреждаем
+        if vin and len(vin) < VIN_LENGTH:
+            if not messagebox.askyesno(self.tr("common.attention"),
+                                       self.tr("works.vin_too_short", count=len(vin), required=VIN_LENGTH)):
+                self.vin_entry.focus_set()
+                return
+
+        # Если у машины уже записан другой VIN - спрашиваем, перезаписывать ли
+        if vin:
+            existing_car = self.db.get_car_by_number(car_number)
+            old_vin = (existing_car or {}).get("vin", "").strip().upper()
+            if old_vin and old_vin != vin:
+                choice = self.ask_vin_overwrite(old_vin, vin)
+                if choice is None:
+                    return
+                if choice == "keep":
+                    vin = old_vin
+
         # Данные клиента
         booking_id = getattr(self, 'selected_booking_id', None)
         client_name = self.client_name_entry.get().strip()
@@ -2423,7 +2590,7 @@ class AutoServiceApp:
                 else:
                     # Машина не в работе - создаём новую запись
                     current_hour = now.hour
-                    TIME_SLOTS = ["10:00", "12:00", "14:00", "16:00", "18:00", "20:00"]
+                    TIME_SLOTS = booking_time_slots()
                     booking_time = None
 
                     # Ищем ближайший слот к текущему времени
@@ -2494,6 +2661,7 @@ class AutoServiceApp:
     def clear_work_form(self, restore_warehouse=True):
         """Очистить форму добавления работы"""
         self.editing_work_id = None
+        self.worker_combo.set(self.tr("works.select_master"))
         self.works_list = []
         for item in self.works_tree.get_children():
             self.works_tree.delete(item)
@@ -2545,6 +2713,12 @@ class AutoServiceApp:
         # Кнопка обновить
         ctk.CTkButton(top_frame, text=self.tr("works.refresh"), command=self.refresh_warehouse,
                      width=100).pack(side=tk.RIGHT, padx=5)
+
+        # Кнопка выбора колонок
+        self.warehouse_columns_btn = ctk.CTkButton(top_frame, text="☰ " + self.tr("bookings.columns_btn"),
+                                                   command=lambda: self.show_columns_menu_under("warehouse_hidden_columns", self.warehouse_columns_btn),
+                                                   width=110)
+        self.warehouse_columns_btn.pack(side=tk.RIGHT, padx=5)
 
         # Фильтр по статусу
         filter_frame = ctk.CTkFrame(self.warehouse_frame)
@@ -2602,6 +2776,9 @@ class AutoServiceApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.warehouse_tree.pack(fill=tk.BOTH, expand=True)
 
+        # Видимость колонок (сохраняется в settings.json); id скрыт всегда
+        self.setup_toggleable_columns(self.warehouse_tree, "warehouse_hidden_columns", columns[1:])
+
         # Настройка цветов для статусов
         self.warehouse_tree.tag_configure("в пути", background="#e3f2fd", foreground="#1565c0")
         self.warehouse_tree.tag_configure("на складе", background="#e8f5e9", foreground="#2e7d32")
@@ -2658,6 +2835,10 @@ class AutoServiceApp:
         )
 
         def show_warehouse_context_menu(event):
+            # ПКМ по заголовку - меню колонок
+            if self.warehouse_tree.identify_region(event.x, event.y) == "heading":
+                self.show_columns_menu("warehouse_hidden_columns", event.x_root, event.y_root)
+                return
             # Выбираем строку под курсором
             item = self.warehouse_tree.identify_row(event.y)
             if item:
@@ -5826,6 +6007,7 @@ class AutoServiceApp:
                                         values=[self.tr("bookings.filter_all"), self.tr("bookings.filter_waiting"),
                                                 self.tr("bookings.filter_in_progress"), self.tr("bookings.filter_completed"),
                                                 self.tr("bookings.filter_cancelled")],
+                                        command=lambda _: self.refresh_bookings(),  # фильтр применяется сразу при выборе
                                         width=140)
         status_combo.pack(side=tk.LEFT, padx=5)
 
@@ -5846,6 +6028,9 @@ class AutoServiceApp:
                      width=30, fg_color="#c62828", hover_color="#b71c1c").pack(side=tk.LEFT, padx=2)
         ctk.CTkButton(filter_frame, text=self.tr("bookings.add_client"), command=self.show_add_booking_window,
                      fg_color="#1565c0", hover_color="#0d47a1", width=140).pack(side=tk.LEFT, padx=(15, 5))
+        self.bookings_columns_btn = ctk.CTkButton(filter_frame, text="☰ " + self.tr("bookings.columns_btn"),
+                                                  command=lambda: self.show_columns_menu_under("bookings_hidden_columns", self.bookings_columns_btn), width=110)
+        self.bookings_columns_btn.pack(side=tk.LEFT, padx=5)
 
         # Таблица записей
         table_frame = ctk.CTkFrame(self.bookings_frame)
@@ -5857,7 +6042,9 @@ class AutoServiceApp:
         # Настройка колонок
         self.bookings_tree.heading("id", text="ID")
         self.bookings_tree.heading("order_number", text=self.tr("bookings.col_order_number"))
-        self.bookings_tree.heading("date", text=self.tr("bookings.col_date"))
+        self.bookings_tree.heading("date", text=self.tr("bookings.col_date") + " ▼",
+                                   command=self.toggle_bookings_date_sort)
+        self.bookings_sort_desc = True  # по умолчанию новые даты сверху
         self.bookings_tree.heading("time", text=self.tr("bookings.col_time"))
         self.bookings_tree.heading("name", text=self.tr("bookings.col_name"))
         self.bookings_tree.heading("phone", text=self.tr("bookings.col_phone"))
@@ -5876,6 +6063,9 @@ class AutoServiceApp:
         self.bookings_tree.column("car", width=180)
         self.bookings_tree.column("notes", width=150)
         self.bookings_tree.column("status", width=100)
+
+        # Видимость колонок (сохраняется в settings.json); id скрыт всегда
+        self.setup_toggleable_columns(self.bookings_tree, "bookings_hidden_columns", columns[1:])
 
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.bookings_tree.yview)
         self.bookings_tree.configure(yscrollcommand=scrollbar.set)
@@ -5943,6 +6133,31 @@ class AutoServiceApp:
         self.bookings_tree.bind("<Button-3>", self.show_bookings_context_menu)
 
 
+
+    def toggle_bookings_date_sort(self):
+        """Клик по заголовку "Дата" - сменить направление сортировки"""
+        self.bookings_sort_desc = not self.bookings_sort_desc
+        self.sort_bookings_tree()
+
+    def sort_bookings_tree(self):
+        """Отсортировать записи по дате и времени (по умолчанию - новые сверху)"""
+        def sort_key(item):
+            values = self.bookings_tree.item(item, "values")
+            try:
+                booking_date = datetime.strptime(values[2], "%d.%m.%Y")
+            except (ValueError, IndexError):
+                booking_date = datetime.min
+            # Время "9:00" и "10:00" сравниваем как числа, а не как строки
+            time_parts = re.findall(r"\d+", str(values[3]) if len(values) > 3 else "")
+            booking_time = tuple(int(x) for x in time_parts[:2])
+            return booking_date, booking_time, int(values[0] or 0)
+
+        items = sorted(self.bookings_tree.get_children(), key=sort_key, reverse=self.bookings_sort_desc)
+        for index, item in enumerate(items):
+            self.bookings_tree.move(item, "", index)
+
+        arrow = " ▼" if self.bookings_sort_desc else " ▲"
+        self.bookings_tree.heading("date", text=self.tr("bookings.col_date") + arrow)
 
     def clear_bookings_search(self):
         """Очистить поле поиска и обновить список"""
@@ -6016,6 +6231,8 @@ class AutoServiceApp:
                 car_info or "-", notes or "-", status_ru
             ), tags=(status,))
 
+        self.sort_bookings_tree()
+
     def show_today_bookings(self):
         """Показать записи на сегодня"""
         # Очистка таблицы
@@ -6045,6 +6262,8 @@ class AutoServiceApp:
                 phone or "-", f"@{username}" if username else "-",
                 car_info or "-", notes or "-", status_ru
             ), tags=(status,))
+
+        self.sort_bookings_tree()
 
     def get_selected_booking_id(self):
         """Получить ID выбранной записи"""
@@ -6190,10 +6409,108 @@ class AutoServiceApp:
                 self.refresh_bookings()
                 messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_deleted"))
 
+    # ===== Синхронизация с сайтом онлайн-записи (web_sync.py) =====
+    # Обмен идёт в фоновом потоке, окна Tk трогаем только из главного потока (результат забираем опросом)
+
+    WEB_SYNC_INTERVAL_MS = 60 * 1000
+
+    def start_web_sync(self):
+        """Запустить периодическую синхронизацию, если сайт настроен в config/.env"""
+        if web_sync.enabled():
+            self.root.after(3000, self._web_sync_tick)
+
+    def _web_sync_tick(self):
+        self.web_sync_now()
+        self.root.after(self.WEB_SYNC_INTERVAL_MS, self._web_sync_tick)
+
+    def web_sync_now(self):
+        """Один обмен с сайтом сейчас (не ждёт - результат появится сам)"""
+        if not web_sync.enabled() or getattr(self, "_web_sync_running", False):
+            return
+        self._web_sync_running = True
+        result = {}
+
+        def _worker():
+            try:
+                result.update(web_sync.sync_once(self.db))
+            except Exception as e:
+                result["error"] = e
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+
+        def _wait_result():
+            if thread.is_alive():
+                self.root.after(300, _wait_result)
+                return
+            self._web_sync_running = False
+            error = result.get("error")
+            # в журнал пишем только смену состояния, а не каждую минуту без интернета
+            if str(error or "") != getattr(self, "_web_sync_last_error", ""):
+                self._web_sync_last_error = str(error or "")
+                self._log_web_sync(f"ошибка: {error}" if error else "связь с сайтом есть")
+            # новые записи с сайта/из панели или отмена с телефона - обновляем список
+            if result.get("new") or result.get("cancelled"):
+                try:
+                    self.refresh_bookings()
+                except Exception:
+                    pass
+            if result.get("new"):
+                self.show_web_bookings_notice(result["new"])
+
+        _wait_result()
+
+    def _log_web_sync(self, text):
+        try:
+            log_dir = os.path.join(BASE_PATH, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, "web_sync.log"), "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {text}\n")
+        except Exception:
+            pass
+
+    def show_web_bookings_notice(self, bookings):
+        """Окошко в правом нижнем углу: новые записи с сайта (новые добавляются в уже открытое)"""
+        lines = [self.tr("web_sync.line", date=datetime.strptime(b["date"], "%Y-%m-%d").strftime("%d.%m.%Y"),
+                         time=b["time"], name=b["name"], phone=b["phone"], car=b["car"], service=b["service"])
+                 for b in bookings]
+        win = getattr(self, "_web_notice", None)
+        if win is not None and win.winfo_exists():
+            win._lines.extend(lines)
+        else:
+            win = ctk.CTkToplevel(self.root)
+            win.title(self.tr("web_sync.title"))
+            win.attributes("-topmost", True)
+            win.resizable(False, False)
+            win._lines = list(lines)
+            win._label = ctk.CTkLabel(win, text="", font=("Arial", 14), justify="left", anchor="w", wraplength=420)
+            win._label.pack(padx=18, pady=(16, 10), fill=tk.X)
+            buttons = ctk.CTkFrame(win, fg_color="transparent")
+            buttons.pack(pady=(0, 14))
+
+            def _open_bookings():
+                win.destroy()
+                self.switch_tab("bookings")
+
+            ctk.CTkButton(buttons, text=self.tr("web_sync.open"), command=_open_bookings,
+                          fg_color="#2e7d32", hover_color="#1b5e20", width=150).pack(side=tk.LEFT, padx=5)
+            ctk.CTkButton(buttons, text="OK", command=win.destroy,
+                          fg_color="#757575", hover_color="#616161", width=90).pack(side=tk.LEFT, padx=5)
+            self._web_notice = win
+        win._label.configure(text=self.tr("web_sync.header", count=len(win._lines)) + "\n\n" + "\n\n".join(win._lines[-8:]))
+        win.update_idletasks()
+        x = win.winfo_screenwidth() - win.winfo_reqwidth() - 30
+        y = win.winfo_screenheight() - win.winfo_reqheight() - 80
+        win.geometry(f"+{x}+{y}")
+        win.lift()
+        win.bell()
+
     def show_add_booking_window(self):
         """Показать окно для записи клиента"""
-        # Слоты времени: каждые 2 часа с 10:00 до 20:00
-        TIME_SLOTS = ["10:00", "12:00", "14:00", "16:00", "18:00", "20:00"]
+        # Слоты времени из настроек (по умолчанию каждые 2 часа с 10:00 до 20:00)
+        TIME_SLOTS = booking_time_slots()
+        # Подтягиваем свежие записи с сайта, чтобы проверка занятости учла и их
+        self.web_sync_now()
 
         # Создаём затемняющий оверлей поверх главного окна
         self.root.update_idletasks()
@@ -6654,8 +6971,94 @@ class AutoServiceApp:
         ctk.CTkButton(btn_frame, text=self.tr("common.cancel"), command=on_close,
                      fg_color="#757575", hover_color="#616161", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
 
+    # ===== Скрытие/показ колонок таблиц (общее для "Записей" и "Склада") =====
+    # Настройки хранятся в settings.json под ключом settings_key: список скрытых колонок
+
+    def setup_toggleable_columns(self, tree, settings_key, columns):
+        """Подключить к таблице скрытие колонок и растягивание видимых на всю ширину"""
+        if not hasattr(self, "_column_toggles"):
+            self._column_toggles = {}
+        self._column_toggles[settings_key] = {
+            "tree": tree,
+            "columns": tuple(columns),
+            # Исходные ширины - по ним видимые колонки делят ширину таблицы пропорционально
+            "base_widths": {c: tree.column(c, "width") for c in columns},
+        }
+        self.apply_columns_visibility(settings_key)
+        tree.bind("<Configure>", lambda e: self.fit_columns(settings_key), add="+")
+
+    def apply_columns_visibility(self, settings_key):
+        """Показать только колонки, не отмеченные как скрытые в настройках"""
+        cfg = self._column_toggles[settings_key]
+        hidden = set(self.load_settings().get(settings_key, []))
+        visible = [c for c in cfg["columns"] if c not in hidden] or list(cfg["columns"])
+        cfg["tree"]["displaycolumns"] = visible
+        self.fit_columns(settings_key)
+
+    def fit_columns(self, settings_key):
+        """Растянуть видимые колонки на всю ширину таблицы (пропорционально исходным ширинам)"""
+        cfg = self._column_toggles[settings_key]
+        tree, base_widths = cfg["tree"], cfg["base_widths"]
+        tree_width = tree.winfo_width()
+        if tree_width <= 1:  # таблица ещё не отрисована - пересчитаем по <Configure>
+            return
+        visible = [c for c in tree["displaycolumns"] if c in base_widths]
+        base_total = sum(base_widths[c] for c in visible)
+        if not base_total:
+            return
+        used = 0
+        for i, column in enumerate(visible):
+            if i == len(visible) - 1:
+                width = tree_width - used  # последней колонке - остаток, чтобы не было зазора от округления
+            else:
+                width = int(tree_width * base_widths[column] / base_total)
+            used += width
+            tree.column(column, width=max(width, 40))
+
+    def toggle_column(self, settings_key, column):
+        """Скрыть/показать колонку и сохранить выбор"""
+        columns = self._column_toggles[settings_key]["columns"]
+        settings = self.load_settings()
+        hidden = set(settings.get(settings_key, []))
+        if column in hidden:
+            hidden.discard(column)
+        else:
+            # Нельзя скрыть последнюю видимую колонку
+            if len([c for c in columns if c not in hidden]) <= 1:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.columns_last_visible"))
+                return
+            hidden.add(column)
+        settings[settings_key] = [c for c in columns if c in hidden]
+        self.save_settings(settings)
+        self.apply_columns_visibility(settings_key)
+
+    def show_columns_menu(self, settings_key, x_root, y_root):
+        """Меню с галочками: какие колонки показывать"""
+        cfg = self._column_toggles[settings_key]
+        hidden = set(self.load_settings().get(settings_key, []))
+        menu = tk.Menu(cfg["tree"], tearoff=0, font=("Segoe UI", 11))
+        menu.add_command(label=self.tr("bookings.columns_menu_title"), state="disabled")
+        menu.add_separator()
+        menu._vars = []  # держим ссылки, чтобы переменные галочек не удалил сборщик мусора
+        for column in cfg["columns"]:
+            var = tk.BooleanVar(master=menu, value=column not in hidden)
+            menu._vars.append(var)
+            menu.add_checkbutton(
+                label=cfg["tree"].heading(column, "text").rstrip(" ▲▼"),
+                variable=var,
+                command=lambda c=column: self.toggle_column(settings_key, c)
+            )
+        menu.tk_popup(x_root, y_root)
+
+    def show_columns_menu_under(self, settings_key, button):
+        """Открыть меню колонок под кнопкой"""
+        self.show_columns_menu(settings_key, button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
     def show_bookings_context_menu(self, event):
         """Показать контекстное меню для записи"""
+        if self.bookings_tree.identify_region(event.x, event.y) == "heading":
+            self.show_columns_menu("bookings_hidden_columns", event.x_root, event.y_root)
+            return
         item = self.bookings_tree.identify_row(event.y)
         if item:
             self.bookings_tree.selection_set(item)
@@ -6847,6 +7250,10 @@ class AutoServiceApp:
 
             self.update_total_cost()
 
+        # Заполняем VIN: из машины наряда, а если наряда ещё нет - из машины записи
+        vin = (work[10] if work else None) or booking.get("car_vin") or ""
+        self.vin_var.set(vin)
+
         # Проверяем склад на наличие новых запчастей для этого авто
         self.check_warehouse_for_car(self.car_number_entry.get().strip())
 
@@ -6891,6 +7298,7 @@ class AutoServiceApp:
         primary_worker_name = primary_work[2] if primary_work else None
         primary_mileage = primary_work[9] if primary_work else None
         primary_order_number = primary_work[14] if primary_work else None
+        primary_vin = (primary_work[10] if primary_work else None) or booking.get("car_vin")
 
         window_title = self.tr("bookings.order_number_label", order_number=primary_order_number) if primary_order_number else self.tr("bookings.info_window_title")
 
@@ -6977,6 +7385,7 @@ class AutoServiceApp:
             ("📞 " + self.tr("bookings.col_phone") + ":", booking.get('phone') or self.tr("bookings.phone_not_specified")),
             ("💬 Telegram:", f"@{tg_username}" if tg_username != '-' else '-'),
             ("🚗 " + self.tr("bookings.col_car") + ":", car_info),
+            ("🔑 " + self.tr("works.vin"), primary_vin or "-"),
         ]
         if primary_worker_name:
             info_data.append(("🔧 " + self.tr("bookings.info_label_master"), primary_worker_name))
@@ -6999,12 +7408,18 @@ class AutoServiceApp:
                 anchor="w"
             ).pack(side="left")
 
-            ctk.CTkLabel(
+            value_label = ctk.CTkLabel(
                 row,
                 text=value,
                 font=("Arial", 14),
                 anchor="w"
-            ).pack(side="left", fill="x", expand=True)
+            )
+            if label.startswith("🔑") and primary_vin:
+                # VIN: значок копирования сразу после номера
+                value_label.pack(side="left")
+                self.add_copy_button(row, primary_vin).pack(side="left", padx=(6, 0))
+            else:
+                value_label.pack(side="left", fill="x", expand=True)
 
         # ═══════════════════════════════════════════════════════
         # КАРТОЧКА: Работы
@@ -7366,7 +7781,7 @@ class AutoServiceApp:
                 font=("Arial", 14)
             ).pack(anchor="w")
         else:
-            for i, (car_brand, car_model, car_number) in enumerate(cars):
+            for i, (car_brand, car_model, car_number, car_vin) in enumerate(cars):
                 car_frame = ctk.CTkFrame(cars_content, corner_radius=8, fg_color=("gray90", "gray20"))
                 car_frame.pack(fill="x", pady=(0, 8) if i < len(cars) - 1 else 0)
 
@@ -7389,6 +7804,18 @@ class AutoServiceApp:
                         text_color=("gray30", "gray70"),
                         anchor="e"
                     ).pack(side="right")
+
+                vin_row = ctk.CTkFrame(car_frame, fg_color="transparent")
+                vin_row.pack(fill="x", padx=12, pady=(0, 10))
+                ctk.CTkLabel(
+                    vin_row,
+                    text=f"{self.tr('works.vin')} {car_vin or '-'}",
+                    font=("Arial", 12),
+                    text_color=("gray30", "gray70"),
+                    anchor="w"
+                ).pack(side="left")
+                if car_vin:
+                    self.add_copy_button(vin_row, car_vin).pack(side="left", padx=(6, 0))
 
         # ═══════════════════════════════════════════════════════
         # КАРТОЧКА: История работ
@@ -7703,7 +8130,15 @@ def main():
 
         # 4. Основное приложение
         root = ctk.CTk()
+        # Собираем интерфейс в скрытом окне и показываем его один раз, сразу развёрнутым -
+        # иначе видно, как окно открывается маленьким, разворачивается и перерисовывается
+        root.withdraw()
         app = AutoServiceApp(root, current_user=user)
+        # update() обязателен до показа: при первом update()/mainloop() CustomTkinter перекрашивает
+        # заголовок окна и возвращает окну запомненное состояние. Без этого вызова mainloop()
+        # снова спрятал бы окно, и программа "не запускалась" бы
+        root.update()
+        root.state('zoomed')  # Открытие во весь экран (заодно показывает окно)
 
         if _updater_available:
             # ВРЕМЕННО: 5 минут — для проверки, что механизм работает.
@@ -7711,15 +8146,36 @@ def main():
             UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
             def _check_and_offer_update():
-                try:
-                    upd = check_for_update()
-                    if upd:
-                        if show_update_dialog(upd, parent=root):
-                            apply_update(upd["download_url"], parent_widget=root)
-                except Exception as e:
-                    _log_error("_check_and_offer_update", e)
-                finally:
-                    root.after(UPDATE_CHECK_INTERVAL_MS, _check_and_offer_update)
+                # Запрос к серверу - в фоновом потоке, чтобы интерфейс не замирал на время сети.
+                # Окна Tk трогаем только из главного потока, поэтому результат забираем опросом
+                result = {}
+
+                def _worker():
+                    try:
+                        result["upd"] = check_for_update()
+                    except Exception as e:
+                        result["error"] = e
+
+                thread = threading.Thread(target=_worker, daemon=True)
+                thread.start()
+
+                def _wait_result():
+                    if thread.is_alive():
+                        root.after(200, _wait_result)
+                        return
+                    try:
+                        if "error" in result:
+                            _log_error("_check_and_offer_update", result["error"])
+                        elif result.get("upd"):
+                            upd = result["upd"]
+                            if show_update_dialog(upd, parent=root):
+                                apply_update(upd["download_url"], parent_widget=root, forced=upd.get("forced", False))
+                    except Exception as e:
+                        _log_error("_check_and_offer_update", e)
+                    finally:
+                        root.after(UPDATE_CHECK_INTERVAL_MS, _check_and_offer_update)
+
+                _wait_result()
 
             root.after(800, _check_and_offer_update)
 
@@ -7749,6 +8205,9 @@ def main():
                 root.after(BACKUP_CHECK_INTERVAL_MS, _auto_backup_tick)
 
         root.after(10_000, _auto_backup_tick)
+
+        # 6. Синхронизация с сайтом онлайн-записи (если настроена в config/.env)
+        app.start_web_sync()
 
         root.mainloop()
 

@@ -42,6 +42,14 @@
     "works.car_model": "მანქანის მოდელი:",
     "works.vin": "VIN:",
     "works.mileage": "გარბენი:",
+    "works.vin_conflict_title": "VIN განსხვავდება",
+    "works.vin_conflict_body": "ახალი VIN განსხვავდება ამ მანქანისთვის შენახულისგან. გადავაწეროთ?\nგანსხვავებული სიმბოლოები მონიშნულია.",
+    "works.vin_old_label": "ძველი VIN:",
+    "works.vin_new_label": "ახალი VIN:",
+    "works.vin_length_info": "სიგრძე: ძველი — {old}, ახალი — {new} (სტანდარტი — 17)",
+    "works.vin_overwrite_btn": "გადაწერა",
+    "works.vin_keep_btn": "ძველის დატოვება",
+    "works.vin_too_short": "VIN შეიცავს {count} სიმბოლოს {required}-დან. როგორც ჩანს, ბოლომდე არ არის შეყვანილი.\n\nმაინც შევინახოთ?",
     "works.context_paste": "ჩასმა",
     "works.client_section": "კლიენტის მონაცემები",
     "works.booking": "ჩანაწერი:",
@@ -119,6 +127,9 @@
     "bookings.col_car": "მანქანა",
     "bookings.col_notes": "შენიშვნა",
     "bookings.col_status": "სტატუსი",
+    "bookings.columns_btn": "სვეტები",
+    "bookings.columns_menu_title": "სვეტების ჩვენება:",
+    "bookings.columns_last_visible": "ყველა სვეტის დამალვა შეუძლებელია — ერთი მაინც უნდა დარჩეს.",
     "bookings.ctx_start_work": "სამუშაოს დაწყება",
     "bookings.ctx_edit": "რედაქტირება",
     "bookings.ctx_info": "ინფორმაცია",
@@ -480,5 +491,10 @@
     "users.error_enter_password": "შეიყვანეთ პაროლი",
     "users.error_mismatch": "პაროლები არ ემთხვევა",
     "users.done_title": "მზადაა",
-    "users.password_changed": "პაროლი წარმატებით შეიცვალა."
+    "users.password_changed": "პაროლი წარმატებით შეიცვალა.",
+
+    "web_sync.title": "ჩანაწერები საიტიდან",
+    "web_sync.header": "🌐 ახალი ჩანაწერები საიტიდან: {count}",
+    "web_sync.line": "{date} {time} — {service}\n{name}, {phone}\n{car}",
+    "web_sync.open": "ჩანაწერების გახსნა"
 }

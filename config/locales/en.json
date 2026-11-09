@@ -42,6 +42,14 @@
     "works.car_model": "Car Model:",
     "works.vin": "VIN:",
     "works.mileage": "Mileage:",
+    "works.vin_conflict_title": "VIN mismatch",
+    "works.vin_conflict_body": "The new VIN differs from the one already saved for this car. Overwrite it?\nDifferent characters are highlighted.",
+    "works.vin_old_label": "Old VIN:",
+    "works.vin_new_label": "New VIN:",
+    "works.vin_length_info": "Length: old — {old}, new — {new} (standard — 17)",
+    "works.vin_overwrite_btn": "Overwrite",
+    "works.vin_keep_btn": "Keep old",
+    "works.vin_too_short": "The VIN has {count} of {required} characters. It looks incomplete.\n\nSave anyway?",
     "works.context_paste": "Paste",
     "works.client_section": "Client Details",
     "works.booking": "Booking:",
@@ -119,6 +127,9 @@
     "bookings.col_car": "Car",
     "bookings.col_notes": "Note",
     "bookings.col_status": "Status",
+    "bookings.columns_btn": "Columns",
+    "bookings.columns_menu_title": "Show columns:",
+    "bookings.columns_last_visible": "You can't hide all columns — at least one must remain visible.",
     "bookings.ctx_start_work": "Start Job",
     "bookings.ctx_edit": "Edit",
     "bookings.ctx_info": "Info",
@@ -480,5 +491,10 @@
     "users.error_enter_password": "Enter password",
     "users.error_mismatch": "Passwords do not match",
     "users.done_title": "Done",
-    "users.password_changed": "Password changed successfully."
+    "users.password_changed": "Password changed successfully.",
+
+    "web_sync.title": "Website bookings",
+    "web_sync.header": "🌐 New bookings from the website: {count}",
+    "web_sync.line": "{date} {time} — {service}\n{name}, {phone}\n{car}",
+    "web_sync.open": "Open bookings"
 }

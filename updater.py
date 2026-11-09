@@ -314,38 +314,214 @@ def _current_exe() -> str:
     return os.path.abspath(__file__)
 
 
-def apply_update(download_url: str, parent_widget=None) -> None:
+# ─────────────────────────────────────────
+# Установка обновления
+# ─────────────────────────────────────────
+
+DOWNLOAD_ATTEMPTS = 5          # сколько раз пробуем скачать архив при обрывах связи
+DOWNLOAD_RETRY_DELAY_SEC = 3   # пауза между попытками
+DOWNLOAD_TIMEOUT = (10, 15)    # (подключение, ожидание данных) в секундах
+
+# Файлы и папки клиента, которые не входят в релиз и не должны перезаписываться
+_KEEP_FILES = ("license.key license_cache.json .env settings.json spare_parts.txt _updater.bat "
+               "updater_debug.log updater_install.log")  # логи -- иначе /MIR стирает историю обновлений
+_KEEP_DIRS = "Backup _previous"
+
+
+class UpdateCancelled(Exception):
+    """Пользователь отменил загрузку обновления."""
+
+
+def _download_with_resume(url, dest_path, cancel_event, on_progress, on_status):
     """
-    Скачивает архив новой версии (.zip всей папки onedir-сборки),
-    распаковывает во временную папку и запускает bat-установщик, который
-    после закрытия приложения разворачивает архив поверх текущей установки
-    (не трогая license.key, license_cache.json, .env, settings.json и
-    spare_parts.txt клиента) и перезапускает программу. После запуска bat —
-    завершает текущий процесс.
+    Скачивает файл с повторами. После обрыва связи продолжает с того места,
+    где остановился (HTTP Range), а не качает заново. Бросает UpdateCancelled
+    при отмене и последнее исключение, если все попытки не удались.
+    """
+    session = _no_proxy_session()
+    downloaded = 0
+    total = 0
+    last_error = None
+
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        if cancel_event.is_set():
+            raise UpdateCancelled()
+        if attempt > 1:
+            on_status(f"Нет соединения. Повторная попытка {attempt} из {DOWNLOAD_ATTEMPTS}...")
+            # Ждём с проверкой отмены, чтобы кнопка «Отмена» срабатывала сразу
+            if cancel_event.wait(DOWNLOAD_RETRY_DELAY_SEC):
+                raise UpdateCancelled()
+
+        headers = {"Range": f"bytes={downloaded}-"} if downloaded else {}
+        try:
+            with session.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT, headers=headers) as r:
+                if downloaded and r.status_code == 206:
+                    mode = "ab"  # сервер продолжил с места обрыва
+                else:
+                    r.raise_for_status()
+                    mode = "wb"  # докачка не поддержана -- начинаем сначала
+                    downloaded = 0
+                    total = int(r.headers.get("Content-Length", 0))
+                if not total and r.status_code == 206:
+                    # Content-Range: bytes 1000-9999/10000
+                    total = int(r.headers.get("Content-Range", "/0").rsplit("/", 1)[-1] or 0)
+
+                on_status("Загрузка обновления...")
+                with open(dest_path, mode) as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if cancel_event.is_set():
+                            raise UpdateCancelled()
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            on_progress(downloaded, total)
+
+            if total and downloaded < total:
+                # Соединение закрылось "штатно", но файл не докачан
+                raise requests.exceptions.ConnectionError(f"скачано {downloaded} из {total} байт")
+            return
+        except UpdateCancelled:
+            raise
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError) as e:
+            last_error = e
+            _log(f"apply_update: попытка {attempt}/{DOWNLOAD_ATTEMPTS} не удалась: {e}")
+
+    raise last_error
+
+
+def _find_release_root(extract_dir, exe_name):
+    """
+    Папка внутри распакованного архива, где лежит exe. В архиве может быть
+    либо содержимое сразу, либо оно обёрнуто в одну вложенную папку (если
+    архивировали руками через "Отправить -> сжатая папка"). None -- exe нет.
+    """
+    if os.path.isfile(os.path.join(extract_dir, exe_name)):
+        return extract_dir
+    for entry in os.listdir(extract_dir):
+        candidate = os.path.join(extract_dir, entry)
+        if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, exe_name)):
+            return candidate
+    return None
+
+
+def _build_install_bat(new_root, install_dir, exe_path, tmp_dir, pid):
+    """
+    bat-установщик. Порядок:
+      1. ждёт, пока текущий процесс программы действительно завершится;
+      2. копирует текущую версию в _previous (резервная копия для отката);
+      3. зеркалирует новую версию поверх установки (/MIR), не трогая файлы клиента;
+      4. если копирование упало или exe после него нет -- возвращает версию из _previous;
+      5. запускает программу.
+    Всё пишется в updater_install.log рядом с exe.
+    """
+    previous_dir = os.path.join(install_dir, "_previous")
+    log = os.path.join(install_dir, "updater_install.log")
+    # /R:5 /W:2 -- если файл занят, не ждём по умолчанию "миллион раз по 30 секунд"
+    rc = "/R:5 /W:2 /NFL /NDL /NJH /NJS /NP"
+    return (
+        "@echo off\n"
+        f'echo [%date% %time%] Начало установки >> "{log}"\n'
+        # 1. Ждём завершения процесса программы (максимум 30 секунд)
+        "set /a WAITED=0\n"
+        ":wait_exit\n"
+        f'tasklist /FI "PID eq {pid}" 2>nul | find " {pid} " >nul\n'
+        "if errorlevel 1 goto exited\n"
+        "set /a WAITED+=1\n"
+        "if %WAITED% GEQ 30 goto exited\n"
+        "timeout /t 1 /nobreak >nul\n"
+        "goto wait_exit\n"
+        ":exited\n"
+        # 2. Резервная копия текущей версии
+        f'robocopy "{install_dir}" "{previous_dir}" /MIR /XD {_KEEP_DIRS} /XF _updater.bat {rc} >> "{log}"\n'
+        "if errorlevel 8 goto backup_failed\n"
+        # 3. Установка новой версии
+        f'robocopy "{new_root}" "{install_dir}" /MIR /XD {_KEEP_DIRS} /XF {_KEEP_FILES} {rc} >> "{log}"\n'
+        "if errorlevel 8 goto restore\n"
+        f'if not exist "{exe_path}" goto restore\n'
+        f'echo [%date% %time%] Обновление установлено >> "{log}"\n'
+        "goto finish\n"
+        # 4. Откат
+        ":restore\n"
+        f'echo [%date% %time%] ОШИБКА установки, возвращаем предыдущую версию >> "{log}"\n'
+        f'robocopy "{previous_dir}" "{install_dir}" /MIR /XD {_KEEP_DIRS} /XF {_KEEP_FILES} {rc} >> "{log}"\n'
+        "goto finish\n"
+        ":backup_failed\n"
+        f'echo [%date% %time%] Не удалось сделать резервную копию, обновление отменено >> "{log}"\n'
+        # 5. Запуск
+        ":finish\n"
+        f'rmdir /S /Q "{tmp_dir}"\n'
+        f'start "" "{exe_path}"\n'
+        '(goto) 2>nul & del "%~f0"\n'
+    )
+
+
+def _friendly_error(exc):
+    """Понятный текст ошибки для пользователя (подробности -- в updater_debug.log)."""
+    if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                        requests.exceptions.ChunkedEncodingError)):
+        return "Нет соединения с интернетом или сервер обновлений недоступен."
+    if isinstance(exc, zipfile.BadZipFile):
+        return "Архив обновления скачался повреждённым."
+    return str(exc)
+
+
+def apply_update(download_url: str, parent_widget=None, forced: bool = False) -> None:
+    """
+    Скачивает архив новой версии (.zip всей папки onedir-сборки) с повторами
+    и докачкой, проверяет его, распаковывает во временную папку и запускает
+    bat-установщик (см. _build_install_bat), который после закрытия
+    приложения ставит новую версию с резервной копией и откатом при ошибке.
+    Если что-то пошло не так до установки -- текущая версия не трогается
+    и программа продолжает работать.
     """
     import customtkinter as ctk
+
+    cancel_event = threading.Event()
+    state = {"error": None}
 
     win = ctk.CTkToplevel(parent_widget)
     win.title("Загрузка обновления")
     win.resizable(False, False)
-    win.protocol("WM_DELETE_WINDOW", lambda: None)  # нельзя закрыть
-    win.geometry("380x130+{}+{}".format(
-        win.winfo_screenwidth()  // 2 - 190,
-        win.winfo_screenheight() // 2 - 65,
+    win.geometry("400x170+{}+{}".format(
+        win.winfo_screenwidth()  // 2 - 200,
+        win.winfo_screenheight() // 2 - 85,
     ))
     win.grab_set()
 
-    ctk.CTkLabel(win, text="Загрузка обновления...",
-                 font=ctk.CTkFont(size=13)).pack(pady=(20, 8))
+    status_label = ctk.CTkLabel(win, text="Подключение к серверу обновлений...",
+                                font=ctk.CTkFont(size=13), wraplength=360)
+    status_label.pack(pady=(18, 8))
 
-    progress = ctk.CTkProgressBar(win, width=320)
+    progress = ctk.CTkProgressBar(win, width=340)
     progress.set(0)
-    progress.pack(pady=(0, 8))
+    progress.pack(pady=(0, 6))
 
     size_label = ctk.CTkLabel(win, text="", font=ctk.CTkFont(size=11), text_color="gray")
     size_label.pack()
 
-    error_holder = [None]
+    def cancel():
+        cancel_event.set()
+        cancel_btn.configure(state="disabled", text="Отмена...")
+
+    cancel_btn = ctk.CTkButton(win, text="Отмена", width=110, fg_color="gray",
+                               hover_color="gray40", command=cancel)
+    if forced:
+        win.protocol("WM_DELETE_WINDOW", lambda: None)  # обязательное -- отменить нельзя
+    else:
+        cancel_btn.pack(pady=(8, 0))
+        win.protocol("WM_DELETE_WINDOW", cancel)
+
+    def set_status(text):
+        win.after(0, lambda: status_label.configure(text=text))
+
+    def set_progress(done, total):
+        def update():
+            if total:
+                progress.set(done / total)
+            mb = done / 1024 / 1024
+            size_label.configure(text=f"{mb:.1f} МБ" + (f" / {total / 1024 / 1024:.1f} МБ" if total else ""))
+        win.after(0, update)
 
     def do_download():
         try:
@@ -362,63 +538,36 @@ def apply_update(download_url: str, parent_widget=None) -> None:
             extract_dir = os.path.join(tmp_dir, "extracted")
             bat_path    = os.path.join(install_dir, "_updater.bat")
 
-            r = _no_proxy_session().get(download_url, stream=True, timeout=60)
-            r.raise_for_status()
+            _download_with_resume(download_url, zip_path, cancel_event, set_progress, set_status)
 
-            total      = int(r.headers.get("Content-Length", 0))
-            downloaded = 0
-
-            with open(zip_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total:
-                            win.after(0, lambda p=downloaded/total: progress.set(p))
-                        mb = downloaded / 1024 / 1024
-                        win.after(0, lambda m=mb: size_label.configure(
-                            text=f"{m:.1f} МБ" + (f" / {total/1024/1024:.1f} МБ" if total else "")
-                        ))
-
+            # Проверка архива ДО того, как трогать установку
+            set_status("Проверка архива...")
             with zipfile.ZipFile(zip_path) as zf:
+                broken = zf.testzip()
+                if broken:
+                    raise zipfile.BadZipFile(f"повреждён файл {broken}")
                 zf.extractall(extract_dir)
 
-            # В архиве может быть либо содержимое папки сразу, либо оно
-            # обёрнуто в одну вложенную папку (если архивировали руками
-            # через "Отправить -> сжатая папка") -- ищем, где реально exe.
-            new_root = extract_dir
-            if not os.path.exists(os.path.join(new_root, exe_name)):
-                for entry in os.listdir(extract_dir):
-                    candidate = os.path.join(extract_dir, entry)
-                    if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, exe_name)):
-                        new_root = candidate
-                        break
+            new_root = _find_release_root(extract_dir, exe_name)
+            if not new_root:
+                # Без этой проверки /MIR удалил бы программу из папки клиента
+                raise RuntimeError(f"В архиве обновления нет {exe_name}. Обновление не установлено.")
 
-            # /MIR -- зеркалирует папку (обновляет и удаляет лишнее из старой
-            # версии), /XF -- не трогает то, что принадлежит этой установке
-            # клиента, а не релизу: лицензию, кэш лицензии, .env с секретами,
-            # локальные настройки (settings.json, spare_parts.txt) и сам
-            # bat-скрипт (иначе он удалит себя раньше времени). /XD Backup --
-            # не трогает папку с локальными резервными копиями клиента
-            # (см. backup.py) -- без этого /MIR бы стёр её как "лишнее".
-            bat_content = (
-                "@echo off\n"
-                "timeout /t 2 /nobreak >nul\n"
-                f'robocopy "{new_root}" "{install_dir}" /MIR '
-                f'/XD Backup '
-                f'/XF license.key license_cache.json .env settings.json spare_parts.txt _updater.bat >nul\n'
-                f'rmdir /S /Q "{tmp_dir}"\n'
-                f'start "" "{exe_path}"\n'
-                '(goto) 2>nul & del "%~f0"\n'
-            )
+            if cancel_event.is_set():
+                raise UpdateCancelled()
+
             with open(bat_path, "w", encoding="cp866") as f:
-                f.write(bat_content)
+                f.write(_build_install_bat(new_root, install_dir, exe_path, tmp_dir, os.getpid()))
 
+            _log(f"apply_update: архив проверен, запускаем установщик (pid={os.getpid()})")
             win.after(0, _launch_and_exit, bat_path)
 
+        except UpdateCancelled:
+            _log("apply_update: загрузка отменена пользователем")
+            win.after(0, win.destroy)
         except Exception as e:
             _log_error("apply_update: исключение", e)
-            error_holder[0] = str(e)
+            state["error"] = e
             win.after(0, win.destroy)
 
     def _launch_and_exit(bat_path):
@@ -432,9 +581,10 @@ def apply_update(download_url: str, parent_widget=None) -> None:
     threading.Thread(target=do_download, daemon=True).start()
     win.wait_window()
 
-    if error_holder[0]:
+    if state["error"] is not None:
         messagebox.showerror(
             "Ошибка обновления",
-            f"Не удалось скачать обновление:\n{error_holder[0]}\n\nПопробуйте позже.",
+            f"Не удалось скачать обновление.\n\n{_friendly_error(state['error'])}\n\n"
+            "Программа продолжит работать на текущей версии. Обновление будет предложено снова позже.",
             parent=parent_widget,
         )

@@ -239,4 +239,11 @@ MIGRATIONS = [
     # Связь премии с записью в expenses - чтобы при удалении расхода в "Финансы"
     # премия тоже пропадала из отчётов (см. Database.delete_expense)
     "ALTER TABLE worker_bonuses ADD COLUMN IF NOT EXISTS expense_id INT DEFAULT NULL",
+    # Номер онлайн-записи на сайте (web_sync.py) - чтобы одна и та же запись с сайта
+    # не сохранилась дважды, если подтверждение сайту не дошло
+    "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS web_id INT DEFAULT NULL",
+    "ALTER TABLE bookings ADD UNIQUE INDEX IF NOT EXISTS idx_bookings_web_id (web_id)",
+    # Telegram-аккаунт подтвердил номер клиента кнопкой «Поделиться номером» - только такому
+    # аккаунту бот показывает историю авто, машины и записи (tgbot: link_verified_phone)
+    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS tg_verified TINYINT(1) NOT NULL DEFAULT 0",
 ]

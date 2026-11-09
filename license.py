@@ -23,13 +23,7 @@ import json
 import hashlib
 import requests
 from datetime import datetime, timedelta
-
-# ──────────────────────────────────────────────────
-# НАСТРОЙКИ — меняй только здесь
-LICENSE_URL = "https://api.jsonbin.io/v3/b/69a7fe29ae596e708f5df259/latest"  # URL приватного bin
-API_KEY     = "$2a$10$CVTFvLDquBvp8Fo/QCt9ueW.S3.wRVn1XdvTWX75uY7KAfRGcPh8S"  # секретный ключ jsonbin.io
-GRACE_DAYS  = 3   # сколько дней работает без интернета
-# ──────────────────────────────────────────────────
+from dotenv import load_dotenv
 
 
 def _base_dir() -> str:
@@ -37,6 +31,16 @@ def _base_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+load_dotenv(os.path.join(_base_dir(), "config", ".env"))
+
+# ──────────────────────────────────────────────────
+# НАСТРОЙКИ — секреты лежат в config/.env
+LICENSE_URL = os.getenv("JSONBIN_URL", "")      # URL приватного bin
+API_KEY     = os.getenv("JSONBIN_API_KEY", "")  # секретный ключ jsonbin.io
+GRACE_DAYS  = 7  # сколько дней работает без интернета
+# ──────────────────────────────────────────────────
 
 
 def _key_path()   -> str: return os.path.join(_base_dir(), "license.key")
@@ -81,7 +85,7 @@ def _check_online(key: str) -> bool | None:
     Возвращает:
       True  — ключ найден и active=true
       False — ключ не найден или active=false
-      None  — сервер недоступен
+      None  — сервер недоступен или ответил ошибкой (работает офлайн-кэш)
     """
     try:
         r = requests.get(
@@ -91,7 +95,7 @@ def _check_online(key: str) -> bool | None:
             proxies={"http": None, "https": None},
         )
         if r.status_code != 200:
-            return False
+            return None  # сбой jsonbin (5xx, 429, 401…) — не блокируем, даём GRACE_DAYS
         # jsonbin оборачивает данные в {"record": {...}, "metadata": {...}}
         body = r.json()
         data = body.get("record", body)
@@ -116,6 +120,16 @@ def check_license() -> tuple[bool, str]:
             "Файл лицензии не найден.\n\n"
             "Обратитесь к разработчику для получения ключа.\n"
             f"Ожидаемый путь: {_key_path()}"
+        )
+
+    if not (LICENSE_URL and API_KEY):
+        # Нет настроек в config/.env — работаем по кэшу, пока не истечёт GRACE_DAYS
+        if _check_cache(key):
+            return True, ""
+        return False, (
+            "Не заданы настройки проверки лицензии.\n\n"
+            "Добавьте JSONBIN_URL и JSONBIN_API_KEY в config/.env\n"
+            "или обратитесь к разработчику."
         )
 
     online = _check_online(key)

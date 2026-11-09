@@ -4,12 +4,13 @@
 """
 
 import json
+import os
 import re
 import pymysql
 from pymysql import Error as MySQLError
 from tkinter import messagebox
 
-from db_config import DB_CONFIG
+from db_config import DB_CONFIG, get_base_path
 from db_schema import TABLES, INDEXES, MIGRATIONS
 
 
@@ -25,6 +26,15 @@ def normalize_phone(phone):
     if len(digits) == 10:
         return '+7' + digits
     return '+' + digits if digits else None
+
+
+def max_cars_per_slot():
+    """Сколько машин можно записать на одно время (config/settings.json, max_cars_per_slot)"""
+    try:
+        with open(os.path.join(get_base_path(), 'config', 'settings.json'), 'r', encoding='utf-8') as f:
+            return max(1, int(json.load(f).get('max_cars_per_slot', 1)))
+    except (OSError, ValueError, TypeError):
+        return 1
 
 
 class Database:
@@ -311,7 +321,7 @@ class Database:
                 # Также обновляем последний известный пробег авто
                 cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (mileage, car_id))
             if vin:
-                cursor.execute("UPDATE client_cars SET vin = COALESCE(NULLIF(vin, ''), %s) WHERE id = %s", (vin, car_id))
+                cursor.execute("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, car_id))
         if booking_id and car_id:
             cursor.execute("UPDATE bookings SET car_id = %s WHERE id = %s", (car_id, booking_id))
         conn.commit()
@@ -340,7 +350,7 @@ class Database:
                 # Также обновляем последний известный пробег авто
                 cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (mileage, car_id))
             if vin:
-                cursor.execute("UPDATE client_cars SET vin = COALESCE(NULLIF(vin, ''), %s) WHERE id = %s", (vin, car_id))
+                cursor.execute("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, car_id))
         if booking_id and car_id:
             cursor.execute("UPDATE bookings SET car_id = %s WHERE id = %s", (car_id, booking_id))
         conn.commit()
@@ -1114,7 +1124,7 @@ class Database:
             conn.close()
 
     def is_time_slot_available(self, booking_date, booking_time):
-        """Проверить свободен ли слот времени"""
+        """Проверить, есть ли на это время место (не больше max_cars_per_slot машин)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
@@ -1123,7 +1133,7 @@ class Database:
         """, (booking_date, booking_time))
         count = cursor.fetchone()[0]
         conn.close()
-        return count == 0
+        return count < max_cars_per_slot()
 
     def get_bookings_at_time(self, booking_date, booking_time):
         """Получить список записей на конкретное время с информацией о машинах."""
@@ -1179,7 +1189,7 @@ class Database:
                    c.phone,
                    b.booking_date, b.booking_time, b.status, b.created_at,
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
-                   b.client_id, b.car_id, b.notes
+                   b.client_id, b.car_id, b.notes, cc.vin
             FROM bookings b
             LEFT JOIN clients c ON b.client_id = c.id
             LEFT JOIN client_cars cc ON b.car_id = cc.id
@@ -1201,7 +1211,8 @@ class Database:
                 "car_info": row[9],
                 "client_id": row[10],
                 "car_id": row[11],
-                "notes": row[12]
+                "notes": row[12],
+                "car_vin": row[13] or ""
             }
         return None
 
@@ -1454,7 +1465,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, client_id, car_brand, car_model, car_number
+            SELECT id, client_id, car_brand, car_model, car_number, vin
             FROM client_cars WHERE UPPER(car_number) = UPPER(%s)
         """, (car_number,))
         result = cursor.fetchone()
@@ -1465,7 +1476,8 @@ class Database:
                 "client_id": result[1],
                 "car_brand": result[2],
                 "car_model": result[3],
-                "car_number": result[4]
+                "car_number": result[4],
+                "vin": result[5] or ""
             }
         return None
 
@@ -1481,7 +1493,7 @@ class Database:
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
             FROM client_cars cc
             JOIN clients c ON cc.client_id = c.id
             WHERE RIGHT(REGEXP_REPLACE(c.phone, '[^0-9]', ''), 10) = %s
@@ -1522,7 +1534,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
             FROM client_cars cc
             JOIN clients c ON cc.client_id = c.id
             WHERE c.telegram_user_id = %s
@@ -1560,7 +1572,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
             FROM client_cars cc
             JOIN clients c ON cc.client_id = c.id
             WHERE c.full_name = %s
@@ -1633,7 +1645,7 @@ class Database:
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
             FROM client_cars cc
             JOIN clients c ON cc.client_id = c.id
             WHERE c.telegram_user_id = %s
