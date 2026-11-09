@@ -1,0 +1,14 @@
+name = "autoservice-license-worker"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+
+# Секреты НЕ хранятся здесь -- задаются командой `wrangler secret put <NAME>`
+# (см. README.md в этой папке). Нужны:
+#   YOOKASSA_SHOP_ID     -- shopId из личного кабинета ЮKassa
+#   YOOKASSA_SECRET_KEY  -- секретный ключ ЮKassa (Settings -> API keys)
+#   JSONBIN_BIN_ID       -- id бина (сейчас "69a7fe29ae596e708f5df259", см. license.py)
+#   JSONBIN_WRITE_KEY    -- jsonbin X-Access-Key С ПРАВОМ ЗАПИСИ (создать отдельный
+#                            от того, что сейчас лежит в license.py -- этот новый
+#                            ключ живёт ТОЛЬКО в воркере и никогда не попадает
+#                            в клиентское приложение)
+#   LICENSE_PRICE_RUB    -- сумма разовой оплаты лицензии в рублях, напр. "5000"

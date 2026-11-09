@@ -27,3 +27,11 @@ __pycache__/
 db_setup/clients/
 db_setup/logs/
 db_setup/*.msi
+
+# Бэкапы с секретами и мусор
+env_backup.zip
+*_backup.zip
+run_log.txt
+nul
+tgbot/подписки_Арсен.txt
+tgbot/инструкция_к_продакшену.txt
