@@ -2505,7 +2505,7 @@ class AutoServiceApp:
                 phone=client_phone,
                 car_number=car_number
             )
-            car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number) if client_id else None
+            car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number, update_info=True) if client_id else None
 
             # Обновляем запись
             self.db.update_work(self.editing_work_id, worker_id, description, amount, work_date, mileage, vin, booking_id, car_id, items_json)
@@ -2620,7 +2620,7 @@ class AutoServiceApp:
                         phone=client_phone,
                         car_number=car_number
                     )
-                    new_car_id = self.db.get_or_create_car(new_client_id, car_brand, car_model, car_number) if new_client_id else None
+                    new_car_id = self.db.get_or_create_car(new_client_id, car_brand, car_model, car_number, update_info=True) if new_client_id else None
 
                     # Создаём запись со статусом "В работе"
                     booking_id = self.db.add_booking(
@@ -2638,7 +2638,7 @@ class AutoServiceApp:
                 phone=client_phone,
                 car_number=car_number
             )
-            car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number) if client_id else None
+            car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number, update_info=True) if client_id else None
 
             # Добавляем работу и получаем ID
             work_id = self.db.add_work(worker_id, description, amount, work_date, mileage, vin, booking_id, car_id, items_json)

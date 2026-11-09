@@ -1394,8 +1394,9 @@ class Database:
             }
         return None
 
-    def get_or_create_car(self, client_id, car_brand, car_model, car_number):
-        """Найти или создать авто клиента. Возвращает car_id"""
+    def get_or_create_car(self, client_id, car_brand, car_model, car_number, update_info=False):
+        """Найти или создать авто клиента. Возвращает car_id.
+        update_info=True — перезаписать марку/модель найденной машины значениями из формы"""
         if not car_number:
             return None
         conn = self.get_connection()
@@ -1407,7 +1408,10 @@ class Database:
         if result:
             if client_id:
                 cursor.execute("UPDATE client_cars SET client_id = %s WHERE id = %s", (client_id, result[0]))
-                conn.commit()
+            if update_info and car_brand and car_model:
+                cursor.execute("UPDATE client_cars SET car_brand = %s, car_model = %s WHERE id = %s",
+                               (car_brand, car_model, result[0]))
+            conn.commit()
             conn.close()
             return result[0]
 
