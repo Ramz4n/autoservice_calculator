@@ -873,6 +873,114 @@ class AutoServiceApp:
         entry.delete(0, tk.END)
         entry.insert(0, format_phone_ru(phone_mask_digits(phone or "")))
 
+    # ===== Оформление окон-форм ("Записать клиента", "Добавить запчасть"): блоки-карточки, поля во всю ширину =====
+    FORM_CARD_BORDER = "#dfe3e8"
+    FORM_STATE_BORDERS = {"found": "#66bb6a", "new": "#ffa726"}  # машина найдена / новая машина
+    FORM_STATE_COLORS = {"found": "#2e7d32", "new": "#ef6c00", "warn": "#ef6c00"}
+    FORM_ERROR_BORDER = "#e53935"
+
+    def form_content(self, window, width=470):
+        """Область формы в окне; width - ширина формы"""
+        content = ctk.CTkFrame(window, fg_color="transparent")
+        content.pack(fill=tk.BOTH, expand=True, padx=18, pady=(12, 0))
+        tk.Frame(content, width=width, height=0).pack()
+        return content
+
+    def form_section(self, content, title):
+        """Блок формы: заголовок и белая карточка; возвращает (карточка, область для полей)"""
+        ctk.CTkLabel(content, text=title.rstrip(':').upper(), font=("Arial", 12, "bold"),
+                     text_color="#607d8b", anchor="w").pack(fill=tk.X, padx=4, pady=(4, 2))
+        card = ctk.CTkFrame(content, fg_color="white", corner_radius=10, border_width=1,
+                            border_color=self.FORM_CARD_BORDER)
+        card.pack(fill=tk.X, pady=(0, 8))
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill=tk.X, padx=14, pady=10)
+        return card, body
+
+    def form_label(self, parent, text, required=False):
+        """Подпись над полем; required - звёздочка у обязательного поля"""
+        return ctk.CTkLabel(parent, text=text.rstrip(":") + (" *" if required else ""), font=("Arial", 12),
+                            text_color="#37474f", anchor="w")
+
+    def form_entry(self, parent, **kwargs):
+        return ctk.CTkEntry(parent, height=34, font=("Arial", 14), corner_radius=8, **kwargs)
+
+    def form_popup_listbox(self, parent, **kwargs):
+        """Список подсказок (марки, модели...) - показывается поверх формы через place_popup"""
+        return tk.Listbox(parent, height=5, width=25, font=("Arial", 12), bd=1, relief="solid",
+                          highlightthickness=0, **kwargs)
+
+    def place_popup(self, listbox, entry, above=False):
+        """Показать список подсказок под полем (или над ним), по ширине поля и по числу строк"""
+        listbox.configure(height=min(5, max(1, listbox.size())))
+        if above:
+            listbox.place(in_=entry, relx=0.0, rely=0.0, y=-2, anchor="sw", relwidth=1.0)
+        else:
+            listbox.place(in_=entry, relx=0.0, rely=1.0, y=2, relwidth=1.0)
+        listbox.lift()
+
+    def form_set_card_state(self, card, state):
+        """Рамка карточки: зелёная - машина найдена, оранжевая - новая машина, иначе обычная"""
+        card.configure(border_color=self.FORM_STATE_BORDERS.get(state, self.FORM_CARD_BORDER),
+                       border_width=2 if state in self.FORM_STATE_BORDERS else 1)
+
+    def fit_form_window(self, window):
+        """Размер окна - по содержимому (блоки появляются и пропадают); при первом вызове - по центру экрана"""
+        window.update_idletasks()
+        w, h = window.winfo_reqwidth(), window.winfo_reqheight()
+        if getattr(window, "_form_pos", None) is None:
+            window._form_pos = ((window.winfo_screenwidth() - w) // 2,
+                                max(0, (window.winfo_screenheight() - h) // 2 - 20))
+        x, y = window._form_pos
+        tk.Wm.wm_geometry(window, f"{w}x{h}+{x}+{y}")
+
+    def form_buttons(self, window, ok_text, ok_command, cancel_command):
+        """Широкая основная кнопка и второстепенная "Отмена" внизу окна"""
+        btn_frame = ctk.CTkFrame(window, fg_color="transparent")
+        btn_frame.pack(fill=tk.X, padx=18, pady=(4, 16))
+        ctk.CTkButton(btn_frame, text=self.tr("common.cancel"), command=cancel_command, width=120, height=40,
+                      corner_radius=8, font=("Arial", 14), fg_color="transparent", border_width=1,
+                      border_color="#9e9e9e", text_color="#424242", hover_color="#e0e0e0").pack(side=tk.RIGHT)
+        ctk.CTkButton(btn_frame, text=ok_text, command=ok_command, height=40,
+                      corner_radius=8, font=("Arial", 15, "bold"), fg_color="#2e7d32",
+                      hover_color="#1b5e20").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
+    def form_bind_keys(self, window, content, on_ok, on_cancel, hide_popups):
+        """Enter - основная кнопка, Esc - отмена. Если открыт список подсказок - Enter/Esc сначала для него"""
+        def popup_open():
+            def listboxes(widget):
+                for child in widget.winfo_children():
+                    if isinstance(child, tk.Listbox):
+                        yield child
+                    yield from listboxes(child)
+            return any(lb.winfo_ismapped() for lb in listboxes(content))
+
+        def on_enter(event):
+            if isinstance(event.widget, tk.Listbox) or popup_open():
+                return
+            on_ok()
+
+        def on_escape(event):
+            if popup_open():
+                hide_popups()
+                return
+            on_cancel()
+
+        window.bind("<Return>", on_enter)
+        window.bind("<Escape>", on_escape)
+
+    def form_mark_error(self, entry, message_key, window):
+        """Незаполненное/неверное поле - красная рамка, курсор в поле и сообщение"""
+        entry.configure(border_color=self.FORM_ERROR_BORDER)
+        entry.focus_set()
+        messagebox.showwarning(self.tr("common.attention"), self.tr(message_key), parent=window)
+
+    def form_clear_error_on_type(self, entries):
+        """Красная рамка снимается, как только поле начали править"""
+        for entry in entries:
+            default = entry.cget("border_color")
+            entry.bind("<KeyRelease>", lambda e, en=entry, d=default: en.configure(border_color=d), add="+")
+
     def attach_name_autocomplete(self, entry, listbox_parent, position="right"):
         """Подсказка имён из config/first_names.txt для поля ввода имени.
         listbox_parent - контейнер, в котором лежит поле (список рисуется поверх соседних полей),
@@ -970,12 +1078,17 @@ class AutoServiceApp:
 
         entry.bind("<KeyRelease>", on_key)
         entry.bind("<Down>", on_down)
-        entry.bind("<Escape>", hide_list)
+        def on_escape(event):
+            if visible[0]:
+                hide_list()
+                return "break"
+
+        entry.bind("<Escape>", on_escape)
         entry.bind("<FocusOut>", on_focus_out)
         listbox.bind("<Button-1>", lambda e: listbox.focus_set())
         listbox.bind("<ButtonRelease-1>", on_select)
-        listbox.bind("<Return>", on_select)
-        listbox.bind("<Escape>", lambda e: (hide_list(), entry.focus_set()))
+        listbox.bind("<Return>", lambda e: (on_select(), "break")[1])
+        listbox.bind("<Escape>", lambda e: (hide_list(), entry.focus_set(), "break")[2])
         listbox.bind("<FocusOut>", on_focus_out)
         entry.bind("<MouseWheel>", on_wheel)
         listbox.bind("<MouseWheel>", on_wheel)
@@ -3433,144 +3546,140 @@ class AutoServiceApp:
             self.add_part_form_frame.focus_force()
             return
 
-        self.add_part_form_frame = ctk.CTkToplevel(self.root)
-        self.add_part_form_frame.title(self.tr("warehouse.order_part"))
-        self.add_part_form_frame.geometry("550x540")
-        self.add_part_form_frame.transient(self.root)
-        self.add_part_form_frame.grab_set()
-        self.add_part_form_frame.protocol("WM_DELETE_WINDOW", self.hide_add_part_form)
+        window = self.add_part_form_frame = ctk.CTkToplevel(self.root)
+        window.title(self.tr("warehouse.order_part"))
+        window.transient(self.root)
+        window.resizable(False, False)
+        window.protocol("WM_DELETE_WINDOW", self.hide_add_part_form)
+        content = self.wh_form_content = self.form_content(window)
 
-        # Центрируем окно
-        self.add_part_form_frame.update_idletasks()
-        x = (self.add_part_form_frame.winfo_screenwidth() - 550) // 2
-        y = (self.add_part_form_frame.winfo_screenheight() - 540) // 2
-        self.add_part_form_frame.geometry(f"+{x}+{y}")
-
-        # Прокручиваемый контейнер
-        form_container = ctk.CTkScrollableFrame(self.add_part_form_frame)
-        form_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-
-        ctk.CTkLabel(form_container, text=self.tr("warehouse.order_part_title"), font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(0, 20))
-
-        # Госномер с поиском
-        row1 = ctk.CTkFrame(form_container)
-        row1.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row1, text=self.tr("works.car_number"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.wh_car_number_entry = ctk.CTkEntry(row1, width=150, fg_color="white", text_color="black")
-        self.wh_car_number_entry.pack(side=tk.LEFT, padx=5)
+        # === АВТОМОБИЛЬ: госномер с поиском ===
+        self.wh_car_card, car_body = self.form_section(content, self.tr("bookings.section_car"))
+        self.form_label(car_body, self.tr("works.car_number")).pack(fill=tk.X)
+        number_row = ctk.CTkFrame(car_body, fg_color="transparent")
+        number_row.pack(fill=tk.X)
+        self.wh_car_number_entry = self.form_entry(number_row, placeholder_text="А123БВ777")
+        self.wh_car_number_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
-        self.wh_car_number_entry.bind('<Return>', lambda e: self.search_car_for_warehouse())
-        ctk.CTkButton(row1, text=self.tr("warehouse.find_btn"), command=self.search_car_for_warehouse, width=70).pack(side=tk.LEFT, padx=5)
+        # Enter в госномере - поиск машины, а не "Заказать"
+        self.wh_car_number_entry.bind('<Return>', lambda e: (self.search_car_for_warehouse(), "break")[1])
+        ctk.CTkButton(number_row, text=self.tr("warehouse.find_btn"), command=self.search_car_for_warehouse,
+                      width=80, height=34, corner_radius=8).pack(side=tk.LEFT, padx=(8, 0))
 
-        # Поиск по телефону клиента - подставляет госномер его машины
-        row_phone_search = ctk.CTkFrame(form_container)
-        row_phone_search.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row_phone_search, text=self.tr("bookings.add_window_phone"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.wh_phone_entry = ctk.CTkEntry(row_phone_search, width=150, fg_color="white", text_color="black")
-        self.wh_phone_entry.pack(side=tk.LEFT, padx=5)
+        # Информация о найденной машине (строка показывается, только когда есть что сказать)
+        status_holder = tk.Frame(car_body, bg="white")
+        status_holder.pack(fill=tk.X)
+        self.wh_car_info_label = ctk.CTkLabel(status_holder, text="", font=("Arial", 13, "bold"), anchor="w",
+                                              justify=tk.LEFT, wraplength=430)
+        self.wh_selected_car_id = None  # Сохраняем car_id
+
+        # Новая машина и клиент (скрыто по умолчанию): марка, модель, имя
+        new_car_holder = tk.Frame(car_body, bg="white")
+        new_car_holder.pack(fill=tk.X)
+        self.wh_new_car_frame = ctk.CTkFrame(new_car_holder, fg_color="transparent")
+        self.wh_new_car_frame.grid_columnconfigure((0, 1), weight=1, uniform="car")
+        self.wh_new_car_visible = False
+        self.form_label(self.wh_new_car_frame, self.tr("bookings.add_window_brand"), required=True).grid(row=0, column=0, sticky="w")
+        self.form_label(self.wh_new_car_frame, self.tr("bookings.add_window_model")).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.wh_new_brand_entry = self.form_entry(self.wh_new_car_frame)
+        self.wh_new_brand_entry.grid(row=1, column=0, sticky="ew")
+        self.wh_new_brand_entry.bind('<KeyRelease>', self.on_wh_brand_keyrelease)
+        self.wh_new_brand_entry.bind('<FocusOut>', self.on_wh_brand_focus_out)
+        self.wh_new_model_entry = self.form_entry(self.wh_new_car_frame)
+        self.wh_new_model_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        self.wh_new_model_entry.bind('<KeyRelease>', self.on_wh_model_keyrelease)
+        self.wh_new_model_entry.bind('<FocusOut>', self.on_wh_model_focus_out)
+        self.form_label(self.wh_new_car_frame, self.tr("works.client_name")).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.wh_new_client_name_entry = self.form_entry(self.wh_new_car_frame)
+        self.wh_new_client_name_entry.grid(row=3, column=0, columnspan=2, sticky="ew")
+        # Подсказка имён - список под полем
+        self.attach_name_autocomplete(self.wh_new_client_name_entry, content, position="below")
+        # Телефон нового клиента берётся из поля "Телефон" ниже - второго поля здесь нет
+
+        # Списки подсказок марки и модели - поверх формы под полями
+        self.wh_brand_listbox = self.form_popup_listbox(content, takefocus=False)
+        self.wh_brand_listbox_visible = False
+        self.wh_brand_listbox.bind('<<ListboxSelect>>', self.on_wh_brand_select)
+        self.wh_model_listbox = self.form_popup_listbox(content, takefocus=False)
+        self.wh_model_listbox_visible = False
+        self.wh_model_listbox.bind('<<ListboxSelect>>', self.on_wh_model_select)
+
+        # === КЛИЕНТ: поиск по телефону - подставляет госномер его машины ===
+        _, client_body = self.form_section(content, self.tr("bookings.section_client"))
+        self.form_label(client_body, self.tr("bookings.add_window_phone")).pack(fill=tk.X)
+        self.wh_phone_entry = self.form_entry(client_body)
+        self.wh_phone_entry.pack(fill=tk.X)
         self.attach_phone_mask(self.wh_phone_entry)
         self.wh_phone_entry.bind("<KeyRelease>", self.on_wh_phone_keyrelease)
-        self.wh_phone_cars_combo = ctk.CTkComboBox(row_phone_search, width=200, values=[], state="readonly",
+        self.wh_phone_cars_combo = ctk.CTkComboBox(client_body, height=34, font=("Arial", 13), values=[],
+                                                   state="readonly", corner_radius=8,
                                                    command=self.on_wh_phone_car_select)
         self.wh_phone_cars_numbers = {}
         self.wh_phone_fill = None  # что подставил поиск по телефону
 
-        # Информация о найденной машине
-        self.wh_car_info_label = ctk.CTkLabel(form_container, text="", text_color="gray")
-        self.wh_car_info_label.pack(fill=tk.X, padx=(10, 10), anchor="w")
-        self.wh_selected_car_id = None  # Сохраняем car_id
+        # === ЗАПЧАСТЬ ===
+        _, part_body = self.form_section(content, self.tr("warehouse.part_label"))
+        self.form_label(part_body, self.tr("warehouse.part_name_label"), required=True).pack(fill=tk.X)
+        self.wh_part_name_entry = self.form_entry(part_body)
+        self.wh_part_name_entry.pack(fill=tk.X)
 
-        # Фрейм для новой машины (скрыт по умолчанию)
-        self.wh_new_car_frame = ctk.CTkFrame(form_container, fg_color=("gray90", "gray20"))
-        self.wh_new_car_visible = False
-
-        # Поля для новой машины
-        ctk.CTkLabel(self.wh_new_car_frame, text=self.tr("warehouse.new_car_and_client"),
-                    font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 5))
-
-        row_brand = ctk.CTkFrame(self.wh_new_car_frame)
-        row_brand.pack(fill=tk.X, pady=3, padx=10)
-        ctk.CTkLabel(row_brand, text=self.tr("bookings.add_window_brand"), width=100, anchor="w").pack(side=tk.LEFT)
-        self.wh_new_brand_entry = ctk.CTkEntry(row_brand, width=200, fg_color="white", text_color="black")
-        self.wh_new_brand_entry.pack(side=tk.LEFT, padx=5)
-        self.wh_new_brand_entry.bind('<KeyRelease>', self.on_wh_brand_keyrelease)
-        self.wh_new_brand_entry.bind('<FocusOut>', self.on_wh_brand_focus_out)
-
-        # Listbox для автокомплита марки (склад)
-        self.wh_brand_listbox = tk.Listbox(row_brand, height=5, width=25, takefocus=False)
-        self.wh_brand_listbox_visible = False
-        self.wh_brand_listbox.bind('<<ListboxSelect>>', self.on_wh_brand_select)
-
-        row_model = ctk.CTkFrame(self.wh_new_car_frame)
-        row_model.pack(fill=tk.X, pady=3, padx=10)
-        ctk.CTkLabel(row_model, text=self.tr("bookings.add_window_model"), width=100, anchor="w").pack(side=tk.LEFT)
-        self.wh_new_model_entry = ctk.CTkEntry(row_model, width=200, fg_color="white", text_color="black")
-        self.wh_new_model_entry.pack(side=tk.LEFT, padx=5)
-        self.wh_new_model_entry.bind('<KeyRelease>', self.on_wh_model_keyrelease)
-        self.wh_new_model_entry.bind('<FocusOut>', self.on_wh_model_focus_out)
-
-        # Listbox для автокомплита модели (склад)
-        self.wh_model_listbox = tk.Listbox(row_model, height=5, width=25, takefocus=False)
-        self.wh_model_listbox_visible = False
-        self.wh_model_listbox.bind('<<ListboxSelect>>', self.on_wh_model_select)
-
-        row_client = ctk.CTkFrame(self.wh_new_car_frame)
-        row_client.pack(fill=tk.X, pady=3, padx=10)
-        ctk.CTkLabel(row_client, text=self.tr("works.client_name"), width=100, anchor="w").pack(side=tk.LEFT)
-        self.wh_new_client_name_entry = ctk.CTkEntry(row_client, width=200, fg_color="white", text_color="black")
-        self.wh_new_client_name_entry.pack(side=tk.LEFT, padx=5, pady=(0, 10))
-        # Подсказка имён - список под полем (справа его обрезает край окна). Рисуем в form_container,
-        # а не в рамке новой машины: поле имени в ней последнее, и рамка обрезала бы список снизу
-        self.attach_name_autocomplete(self.wh_new_client_name_entry, form_container, position="below")
-        # Телефон нового клиента берётся из поля "Телефон" вверху окна - второго поля здесь нет
-
-        # Название запчасти
-        row2 = ctk.CTkFrame(form_container)
-        row2.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row2, text=self.tr("warehouse.part_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.wh_part_name_entry = ctk.CTkEntry(row2, width=300, fg_color="white", text_color="black")
-        self.wh_part_name_entry.pack(side=tk.LEFT, padx=5)
-
-        # Количество
-        row3 = ctk.CTkFrame(form_container)
-        row3.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row3, text=self.tr("warehouse.quantity_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.wh_quantity_entry = ctk.CTkEntry(row3, width=100, fg_color="white", text_color="black")
-        self.wh_quantity_entry.pack(side=tk.LEFT, padx=5)
+        amounts = ctk.CTkFrame(part_body, fg_color="transparent")
+        amounts.pack(fill=tk.X, pady=(6, 0))
+        amounts.grid_columnconfigure((0, 1), weight=1, uniform="amount")
+        self.form_label(amounts, self.tr("warehouse.quantity_label")).grid(row=0, column=0, sticky="w")
+        self.form_label(amounts, self.tr("works.price_label")).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.wh_quantity_entry = self.form_entry(amounts)
+        self.wh_quantity_entry.grid(row=1, column=0, sticky="ew")
         self.wh_quantity_entry.insert(0, "1")
-
-        # Цена
-        row4 = ctk.CTkFrame(form_container)
-        row4.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row4, text=self.tr("works.price_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.wh_price_entry = ctk.CTkEntry(row4, width=150, fg_color="white", text_color="black")
-        self.wh_price_entry.pack(side=tk.LEFT, padx=5)
+        self.wh_price_entry = self.form_entry(amounts)
+        self.wh_price_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
 
         # Уже оплачено (например, хранение шин -- клиент заплатил при сдаче,
-        # и при выдаче со склада эта сумма не должна повторно попасть в счёт)
-        row_paid = ctk.CTkFrame(form_container)
-        row_paid.pack(fill=tk.X, pady=5)
+        # и при выдаче со склада эта сумма не должна повторно попасть в счёт).
+        # Текст длинный - отдельной подписью с переносом, клик по ней тоже ставит галочку
+        paid_row = ctk.CTkFrame(part_body, fg_color="transparent")
+        paid_row.pack(fill=tk.X, pady=(10, 0))
         self.wh_paid_var = tk.BooleanVar(value=False)
-        ctk.CTkCheckBox(row_paid, text=self.tr("warehouse.paid_checkbox_label"),
-                        variable=self.wh_paid_var).pack(side=tk.LEFT, padx=5)
+        ctk.CTkCheckBox(paid_row, text="", width=24, variable=self.wh_paid_var).pack(side=tk.LEFT, anchor="n")
+        paid_label = ctk.CTkLabel(paid_row, text=self.tr("warehouse.paid_checkbox_label"), font=("Arial", 12),
+                                  justify=tk.LEFT, anchor="w", wraplength=390, cursor="hand2")
+        paid_label.pack(side=tk.LEFT, fill=tk.X, padx=(4, 0))
+        paid_label.bind("<Button-1>", lambda e: self.wh_paid_var.set(not self.wh_paid_var.get()))
 
-        # Примечания
-        row5 = ctk.CTkFrame(form_container)
-        row5.pack(fill=tk.X, pady=5)
-        ctk.CTkLabel(row5, text=self.tr("warehouse.notes_label"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
-        self.wh_notes_entry = ctk.CTkEntry(row5, width=300, fg_color="white", text_color="black")
-        self.wh_notes_entry.pack(side=tk.LEFT, padx=5)
+        self.form_label(part_body, self.tr("warehouse.notes_label")).pack(fill=tk.X, pady=(6, 0))
+        self.wh_notes_entry = self.form_entry(part_body)
+        self.wh_notes_entry.pack(fill=tk.X)
 
-        # Кнопки
-        buttons_frame = ctk.CTkFrame(form_container, fg_color="transparent")
-        buttons_frame.pack(pady=20)
+        # Кнопки: широкая "Заказать" и "Отмена"; Enter - заказать, Esc - отмена
+        self.form_buttons(window, self.tr("warehouse.order_btn"), self.add_warehouse_part, self.hide_add_part_form)
+        self.form_bind_keys(window, content, self.add_warehouse_part, self.hide_add_part_form,
+                            lambda: (self.hide_wh_brand_listbox(), self.hide_wh_model_listbox()))
+        self.form_clear_error_on_type((self.wh_car_number_entry, self.wh_new_brand_entry, self.wh_phone_entry,
+                                       self.wh_part_name_entry, self.wh_quantity_entry, self.wh_price_entry))
 
-        ctk.CTkButton(buttons_frame, text=self.tr("warehouse.order_btn"), command=self.add_warehouse_part,
-                     fg_color="#2e7d32", hover_color="#1b5e20", width=120).pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(buttons_frame, text=self.tr("common.cancel"), command=self.hide_add_part_form,
-                     fg_color="#757575", hover_color="#616161", width=120).pack(side=tk.LEFT, padx=10)
-
+        self.fit_form_window(window)
+        window.update()
+        window.grab_set()
+        window.focus_force()
+        self.wh_car_number_entry.focus_set()
         self.add_part_form_visible = True
+
+    def set_wh_car_status(self, text, state=None):
+        """Строка о машине в форме склада и цвет рамки карточки.
+        state: "found" - найдена, "new" - новая машина (нужны данные), "warn" - подсказка, None - пусто"""
+        self.wh_car_info_label.configure(text=text, text_color=self.FORM_STATE_COLORS.get(state, "gray"))
+        if text:
+            self.wh_car_info_label.pack(fill=tk.X, pady=(6, 0))
+        else:
+            self.wh_car_info_label.pack_forget()
+            self.wh_car_info_label.master.configure(height=1)  # пустой контейнер Tk сам не сжимает
+        self.form_set_card_state(self.wh_car_card, state if text else None)
+        self.fit_form_window(self.add_part_form_frame)
+
+    def wh_hide_phone_cars(self):
+        if self.wh_phone_cars_combo.winfo_manager():
+            self.wh_phone_cars_combo.pack_forget()
+            self.fit_form_window(self.add_part_form_frame)
 
     def search_car_for_warehouse(self):
         """Поиск машины по госномеру для склада"""
@@ -3580,7 +3689,7 @@ class AutoServiceApp:
             if getattr(self, "wh_form_by_phone", False):
                 # Форму новой машины открыл поиск по телефону - не закрываем, ждём госномер
                 return
-            self.wh_car_info_label.configure(text=self.tr("warehouse.enter_car_number"), text_color="orange")
+            self.set_wh_car_status(self.tr("warehouse.enter_car_number"), "warn")
             self.hide_new_car_form()
             return
 
@@ -3588,17 +3697,17 @@ class AutoServiceApp:
         if car_info:
             self.wh_selected_car_id = car_info.get("car_id")
             info_text = f"{car_info.get('car_brand', '')} {car_info.get('car_model', '')} | {car_info.get('client_name') or self.tr('common.no_name')} | {car_info.get('client_phone', '')}"
-            self.wh_car_info_label.configure(text=info_text, text_color="green")
+            self.set_wh_car_status(info_text, "found")
             self.hide_new_car_form()
         else:
             self.wh_selected_car_id = None
-            self.wh_car_info_label.configure(text=self.tr("warehouse.car_not_found"), text_color="orange")
+            self.set_wh_car_status(self.tr("warehouse.car_not_found"), "new")
             self.show_new_car_form()
 
     def show_new_car_form(self):
         """Показать форму для новой машины"""
         if not self.wh_new_car_visible:
-            self.wh_new_car_frame.pack(fill=tk.X, pady=10, after=self.wh_car_info_label)
+            self.wh_new_car_frame.pack(fill=tk.X, pady=(6, 0))
             self.wh_new_car_visible = True
             # Телефон уже введён и клиент известен - подставляем его имя
             phone_digits = phone_mask_digits(self.wh_phone_entry.get())
@@ -3610,16 +3719,18 @@ class AutoServiceApp:
                     self.wh_new_client_name_entry.insert(0, client_name)
                 if self.wh_phone_fill and self.wh_phone_fill["digits"] == phone_digits:
                     self.wh_phone_fill["filled"].update(self.autofilled_diff(fields, before))
-            # Увеличиваем окно
-            self.add_part_form_frame.geometry("550x630")
+            self.fit_form_window(self.add_part_form_frame)
 
     def hide_new_car_form(self):
         """Скрыть форму для новой машины"""
         self.wh_form_by_phone = False
         if self.wh_new_car_visible:
+            self.hide_wh_brand_listbox()
+            self.hide_wh_model_listbox()
             self.wh_new_car_frame.pack_forget()
+            self.wh_new_car_frame.master.configure(height=1)  # пустой контейнер Tk сам не сжимает
             self.wh_new_car_visible = False
-            self.add_part_form_frame.geometry("550x540")
+            self.fit_form_window(self.add_part_form_frame)
 
     def on_wh_phone_keyrelease(self, event=None):
         """Поиск клиента по телефону (склад): одна машина - подставляем госномер, несколько - список"""
@@ -3630,17 +3741,17 @@ class AutoServiceApp:
         if self.wh_phone_fill and self.wh_phone_fill["digits"] != digits:
             filled = self.wh_phone_fill["filled"]
             self.wh_phone_fill = None
-            self.wh_phone_cars_combo.pack_forget()
+            self.wh_hide_phone_cars()
             self.undo_autofill(fields, filled)
             if not self.wh_car_number_entry.get().strip():
                 # Госномер был подставлен и стёрт (или форму новой машины открыл поиск по телефону) - сбрасываем
                 self.wh_selected_car_id = None
-                self.wh_car_info_label.configure(text="")
+                self.set_wh_car_status("")
                 self.hide_new_car_form()
             elif self.wh_car_info_label.cget("text") == getattr(self, "wh_phone_msg", None):
-                self.wh_car_info_label.configure(text="")
+                self.set_wh_car_status("")
         if len(digits) != 10:
-            self.wh_phone_cars_combo.pack_forget()
+            self.wh_hide_phone_cars()
             return
         if self.wh_phone_fill:
             return
@@ -3658,7 +3769,7 @@ class AutoServiceApp:
         # Госномер уже введён вручную - его не трогаем (это может быть новая машина известного клиента),
         # только подставляем имя клиента в открытую форму новой машины
         if self.wh_car_number_entry.get().strip():
-            self.wh_phone_cars_combo.pack_forget()
+            self.wh_hide_phone_cars()
             if self.wh_new_car_visible and not self.wh_new_client_name_entry.get().strip():
                 client_name = self.db.get_client_name_by_phone(digits)
                 if client_name:
@@ -3672,7 +3783,7 @@ class AutoServiceApp:
                 self.wh_phone_cars_numbers[display] = car_number
 
         if not self.wh_phone_cars_numbers:
-            self.wh_phone_cars_combo.pack_forget()
+            self.wh_hide_phone_cars()
             client_name = self.db.get_client_name_by_phone(digits)
             text = (self.tr("warehouse.phone_client_no_cars", name=client_name) if client_name
                     else self.tr("warehouse.phone_client_not_found"))
@@ -3682,16 +3793,18 @@ class AutoServiceApp:
             self.wh_selected_car_id = None
             self.show_new_car_form()
             self.wh_form_by_phone = True
-            self.wh_car_info_label.configure(text=text, text_color="orange")
+            self.set_wh_car_status(text, "new")
             return
 
         if len(self.wh_phone_cars_numbers) == 1:
-            self.wh_phone_cars_combo.pack_forget()
+            self.wh_hide_phone_cars()
             self.fill_wh_car_number(next(iter(self.wh_phone_cars_numbers.values())))
         else:
             self.wh_phone_cars_combo.configure(values=list(self.wh_phone_cars_numbers))
             self.wh_phone_cars_combo.set(self.tr("bookings.add_window_client_cars"))
-            self.wh_phone_cars_combo.pack(side=tk.LEFT, padx=5)
+            if not self.wh_phone_cars_combo.winfo_manager():
+                self.wh_phone_cars_combo.pack(fill=tk.X, pady=(8, 0))
+                self.fit_form_window(self.add_part_form_frame)
 
     def on_wh_phone_car_select(self, choice):
         """Выбрана машина клиента из списка (склад)"""
@@ -3732,14 +3845,13 @@ class AutoServiceApp:
         self.wh_brand_listbox.delete(0, tk.END)
         for brand in brands:
             self.wh_brand_listbox.insert(tk.END, brand)
-        if not self.wh_brand_listbox_visible:
-            self.wh_brand_listbox.pack(side=tk.LEFT, padx=5)
-            self.wh_brand_listbox_visible = True
+        self.place_popup(self.wh_brand_listbox, self.wh_new_brand_entry)
+        self.wh_brand_listbox_visible = True
 
     def hide_wh_brand_listbox(self):
         """Скрыть список марок (склад)"""
         if self.wh_brand_listbox_visible:
-            self.wh_brand_listbox.pack_forget()
+            self.wh_brand_listbox.place_forget()
             self.wh_brand_listbox_visible = False
 
     def on_wh_brand_select(self, event):
@@ -3785,14 +3897,13 @@ class AutoServiceApp:
         self.wh_model_listbox.delete(0, tk.END)
         for model in models:
             self.wh_model_listbox.insert(tk.END, model)
-        if not self.wh_model_listbox_visible:
-            self.wh_model_listbox.pack(side=tk.LEFT, padx=5)
-            self.wh_model_listbox_visible = True
+        self.place_popup(self.wh_model_listbox, self.wh_new_model_entry)
+        self.wh_model_listbox_visible = True
 
     def hide_wh_model_listbox(self):
         """Скрыть список моделей (склад)"""
         if self.wh_model_listbox_visible:
-            self.wh_model_listbox.pack_forget()
+            self.wh_model_listbox.place_forget()
             self.wh_model_listbox_visible = False
 
     def on_wh_model_select(self, event):
@@ -3829,19 +3940,19 @@ class AutoServiceApp:
         notes = self.wh_notes_entry.get().strip()
 
         if not part_name:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_part_name"))
+            self.form_mark_error(self.wh_part_name_entry, "works.msg_enter_part_name", self.add_part_form_frame)
             return
 
         try:
             quantity = int(quantity_str) if quantity_str else 1
         except ValueError:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_quantity_number"))
+            self.form_mark_error(self.wh_quantity_entry, "warehouse.msg_quantity_number", self.add_part_form_frame)
             return
 
         try:
             price = float(price_str.replace(",", ".")) if price_str else None
         except ValueError:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_price_number"))
+            self.form_mark_error(self.wh_price_entry, "warehouse.msg_price_number", self.add_part_form_frame)
             return
 
         # Используем car_id если машина найдена
@@ -3856,8 +3967,7 @@ class AutoServiceApp:
 
         # Форма новой машины открыта (например, поиском по телефону), а госномер не введён
         if car_id is None and self.wh_new_car_visible and not car_number:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"))
-            self.wh_car_number_entry.focus_set()
+            self.form_mark_error(self.wh_car_number_entry, "works.msg_enter_car_number", self.add_part_form_frame)
             return
 
         # Если машина не найдена и форма новой машины видна — создаём клиента и машину
@@ -3868,13 +3978,12 @@ class AutoServiceApp:
             phone_digits = phone_mask_digits(self.wh_phone_entry.get())
 
             if not brand:
-                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_enter_car_brand"))
+                self.form_mark_error(self.wh_new_brand_entry, "warehouse.msg_enter_car_brand", self.add_part_form_frame)
                 return
 
             # Проверка телефона: должен быть +7 и 10 цифр
             if len(phone_digits) != 10:
-                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_enter_full_phone"))
-                self.wh_phone_entry.focus_set()
+                self.form_mark_error(self.wh_phone_entry, "warehouse.msg_enter_full_phone", self.add_part_form_frame)
                 return
             phone = "+7" + phone_digits
 
@@ -7319,21 +7428,7 @@ class AutoServiceApp:
         add_window.title(self.tr("bookings.add_client"))
         add_window.transient(self.root)
         add_window.attributes("-topmost", True)
-
-        # Центрируем окно
-        window_width = 450
-        # Время выбирается сеткой кнопок - окно растёт на каждый дополнительный ряд
-        time_cols = 6
-        time_rows = (len(TIME_SLOTS) + time_cols - 1) // time_cols
-        window_height = 696 + max(0, time_rows - 1) * 38
-        screen_width = add_window.winfo_screenwidth()
-        screen_height = add_window.winfo_screenheight()
-        x = (screen_width - window_width) // 2
-        y = (screen_height - window_height) // 2
-        add_window.geometry(f"{window_width}x{window_height}+{x}+{y}")
-        add_window.update()
-        add_window.grab_set()
-        add_window.focus_force()
+        add_window.resizable(False, False)
 
         def on_close():
             overlay.destroy()
@@ -7341,48 +7436,78 @@ class AutoServiceApp:
 
         add_window.protocol("WM_DELETE_WINDOW", on_close)
 
-        # Основной фрейм
-        main_frame = ctk.CTkFrame(add_window)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        # Оформление формы - общие функции form_* (как в "Добавить запчасть")
+        time_cols = 6  # время - сетка кнопок по 6 в ряд
+        content = self.form_content(add_window)
+
+        def section(title):
+            return self.form_section(content, title)
+
+        field_label = self.form_label
+        make_entry = self.form_entry
+        popup_below = self.place_popup
+
+        def fit_window():
+            self.fit_form_window(add_window)
 
         # Флаг: авто найдено по госномеру
         car_found_by_number = [False]
         found_car_id = [None]
 
-        # === ГОСНОМЕР (первым) ===
-        ctk.CTkLabel(main_frame, text=self.tr("works.car_number"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
-        car_number_entry = ctk.CTkEntry(main_frame, width=200, font=("Arial", 14), placeholder_text="А123БВ777")
-        car_number_entry.pack(anchor="w", pady=(0, 5))
-        car_status_label = ctk.CTkLabel(main_frame, text="", font=("Arial", 13))
-        car_status_label.pack(anchor="w", pady=(0, 5))
+        # === АВТОМОБИЛЬ ===
+        car_card, car_body = section(self.tr("bookings.section_car"))
+        field_label(car_body, self.tr("works.car_number"), required=True).pack(fill=tk.X)
+        car_number_entry = make_entry(car_body, placeholder_text="А123БВ777")
+        car_number_entry.pack(fill=tk.X)
+        car_status_label = ctk.CTkLabel(car_body, text="", font=("Arial", 13, "bold"), anchor="w")
 
-        # === Фрейм для марки/модели (показывается динамически если авто не найдено) ===
-        car_details_frame = ctk.CTkFrame(main_frame, fg_color="#e8f5e9", corner_radius=8, border_width=2, border_color="#4caf50")
+        # Марка/модель - только для нового авто (показывается динамически)
+        car_details_frame = ctk.CTkFrame(car_body, fg_color="transparent")
+        car_details_frame.grid_columnconfigure((0, 1), weight=1, uniform="car")
         car_details_visible = [False]
+
+        field_label(car_details_frame, self.tr("bookings.add_window_brand"), required=True).grid(row=0, column=0, sticky="w")
+        field_label(car_details_frame, self.tr("bookings.add_window_model"), required=True).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        brand_entry = make_entry(car_details_frame)
+        brand_entry.grid(row=1, column=0, sticky="ew")
+        model_entry = make_entry(car_details_frame)
+        model_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
 
         # Флаги видимости listbox
         brand_listbox_visible = [False]
         model_listbox_visible = [False]
+        brand_listbox = self.form_popup_listbox(content)
+        model_listbox = self.form_popup_listbox(content)
 
-        # Марка с автокомплитом
-        brand_row = ctk.CTkFrame(car_details_frame, fg_color="transparent")
-        brand_row.pack(fill=tk.X, pady=5, padx=10)
-        ctk.CTkLabel(brand_row, text=self.tr("bookings.add_window_brand"), width=80, anchor="w", font=("Arial", 14)).pack(side=tk.LEFT)
-        brand_entry = ctk.CTkEntry(brand_row, width=200, font=("Arial", 14))
-        brand_entry.pack(side=tk.LEFT)
-        brand_listbox = tk.Listbox(brand_row, height=5, width=25, font=("Arial", 12))
+        def set_car_state(state, text=""):
+            """state: None - пусто, "found" - авто найдено, "new" - новое авто (нужны марка и модель)"""
+            self.form_set_card_state(car_card, state)
+            if text:
+                car_status_label.configure(text=text, text_color=self.FORM_STATE_COLORS.get(state, "#ef6c00"))
+                car_status_label.pack(fill=tk.X, pady=(6, 0), after=car_number_entry)
+            else:
+                car_status_label.pack_forget()
+            if state == "new":
+                if not car_details_visible[0]:
+                    car_details_frame.pack(fill=tk.X, pady=(6, 0), after=car_status_label)
+                    car_details_visible[0] = True
+            elif car_details_visible[0]:
+                hide_brand_list()
+                hide_model_list()
+                car_details_frame.pack_forget()
+                car_details_visible[0] = False
+            fit_window()
 
         def show_brand_list(brands_list):
             brand_listbox.delete(0, tk.END)
             for b in brands_list:
                 brand_listbox.insert(tk.END, b)
-            if not brand_listbox_visible[0]:
-                brand_listbox.pack(side=tk.LEFT, padx=5)
-                brand_listbox_visible[0] = True
+            popup_below(brand_listbox, brand_entry)
+            brand_listbox_visible[0] = True
 
         def hide_brand_list():
             if brand_listbox_visible[0]:
-                brand_listbox.pack_forget()
+                brand_listbox.place_forget()
                 brand_listbox_visible[0] = False
 
         def on_brand_key(event):
@@ -7407,25 +7532,16 @@ class AutoServiceApp:
         brand_entry.bind('<KeyRelease>', on_brand_key)
         brand_listbox.bind('<<ListboxSelect>>', on_brand_select)
 
-        # Модель с автокомплитом
-        model_row = ctk.CTkFrame(car_details_frame, fg_color="transparent")
-        model_row.pack(fill=tk.X, pady=5, padx=10)
-        ctk.CTkLabel(model_row, text=self.tr("bookings.add_window_model"), width=80, anchor="w", font=("Arial", 14)).pack(side=tk.LEFT)
-        model_entry = ctk.CTkEntry(model_row, width=200, font=("Arial", 14))
-        model_entry.pack(side=tk.LEFT)
-        model_listbox = tk.Listbox(model_row, height=5, width=25, font=("Arial", 12))
-
         def show_model_list(models_list):
             model_listbox.delete(0, tk.END)
             for m in models_list:
                 model_listbox.insert(tk.END, m)
-            if not model_listbox_visible[0]:
-                model_listbox.pack(side=tk.LEFT, padx=5)
-                model_listbox_visible[0] = True
+            popup_below(model_listbox, model_entry)
+            model_listbox_visible[0] = True
 
         def hide_model_list():
             if model_listbox_visible[0]:
-                model_listbox.pack_forget()
+                model_listbox.place_forget()
                 model_listbox_visible[0] = False
 
         def on_model_key(event):
@@ -7448,33 +7564,45 @@ class AutoServiceApp:
                 hide_model_list()
                 phone_entry.focus_set()
 
+        def hide_list_later(hide):
+            # Список марок/моделей прячем, когда фокус ушёл из поля (но не в сам список)
+            def check():
+                try:
+                    if add_window.focus_get() not in (brand_listbox, model_listbox):
+                        hide()
+                except (KeyError, tk.TclError):
+                    hide()
+            add_window.after(200, check)
+
         model_entry.bind('<KeyRelease>', on_model_key)
         model_entry.bind('<FocusIn>', on_model_key)
         model_listbox.bind('<<ListboxSelect>>', on_model_select)
+        brand_entry.bind('<FocusOut>', lambda e: hide_list_later(hide_brand_list), add="+")
+        model_entry.bind('<FocusOut>', lambda e: hide_list_later(hide_model_list), add="+")
 
-        # === ТЕЛЕФОН ===
-        ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_phone"), font=("Arial", 15)).pack(anchor="w", pady=(10, 5))
-
-        phone_row = ctk.CTkFrame(main_frame, fg_color="transparent")
-        phone_row.pack(anchor="w", fill=tk.X, pady=(0, 10))
-        phone_entry = ctk.CTkEntry(phone_row, width=220, font=("Arial", 14))
-        phone_entry.pack(side=tk.LEFT)
+        # === КЛИЕНТ: телефон и имя рядом ===
+        _, client_body = section(self.tr("bookings.section_client"))
+        client_grid = ctk.CTkFrame(client_body, fg_color="transparent")
+        client_grid.pack(fill=tk.X)
+        client_grid.grid_columnconfigure((0, 1), weight=1, uniform="client")
+        field_label(client_grid, self.tr("bookings.add_window_phone"), required=True).grid(row=0, column=0, sticky="w")
+        field_label(client_grid, self.tr("works.client_name"), required=True).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        phone_entry = make_entry(client_grid)
+        phone_entry.grid(row=1, column=0, sticky="ew")
         self.attach_phone_mask(phone_entry)
+        name_entry = make_entry(client_grid)
+        name_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+
+        # Подсказка имён из config/first_names.txt - список под полем
+        self.attach_name_autocomplete(name_entry, content, position="below")
 
         # Выбор машины клиента, найденного по телефону (показывается, если машин несколько)
-        phone_cars_combo = ctk.CTkComboBox(phone_row, width=180, font=("Arial", 13), values=[], state="readonly")
+        phone_cars_combo = ctk.CTkComboBox(client_body, height=34, font=("Arial", 13), values=[], state="readonly",
+                                           corner_radius=8)
         phone_cars_visible = [False]
         phone_cars_numbers = {}
         # Что подставил поиск по телефону: {"digits": номер, "filled": {поле: значение}}
         phone_fill = [None]
-
-        # === ИМЯ КЛИЕНТА ===
-        ctk.CTkLabel(main_frame, text=self.tr("works.client_name"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
-        name_entry = ctk.CTkEntry(main_frame, width=220, font=("Arial", 14))
-        name_entry.pack(anchor="w", pady=(0, 10))
-
-        # Подсказка имён из config/first_names.txt - список справа от поля
-        self.attach_name_autocomplete(name_entry, main_frame, position="right")
 
         def check_car_number(*args):
             """Проверка госномера - ищем существующее авто и владельца"""
@@ -7489,17 +7617,11 @@ class AutoServiceApp:
                     car_brand = car_info.get('car_brand', '')
                     car_model = car_info.get('car_model', '')
 
-                    # Показываем информацию
+                    # Показываем информацию, поля марки/модели скрываем
                     info_text = self.tr("bookings.add_window_car_found", brand=car_brand, model=car_model)
                     if owner_name:
-                        info_text += f" ({owner_name})"
-                    car_status_label.configure(text=info_text, text_color="#2e7d32")
-
-                    # Скрываем поля марки/модели
-                    if car_details_visible[0]:
-                        car_details_frame.pack_forget()
-                        car_details_visible[0] = False
-                        add_window.geometry(f"{window_width}x{window_height}")
+                        info_text += f" — {owner_name}"
+                    set_car_state("found", info_text)
 
                     # Заполняем марку/модель (скрытые, но для сохранения)
                     brand_entry.delete(0, tk.END)
@@ -7514,28 +7636,20 @@ class AutoServiceApp:
                     if owner_phone:
                         phone_digits = ''.join(c for c in owner_phone if c.isdigit())
                         if len(phone_digits) >= 10:
-                            # Временно отключаем валидацию для вставки
                             self.set_phone_value(phone_entry, phone_digits[-10:])
                 else:
                     # Авто не найдено - показываем поля марки/модели, сбрасываем данные
                     car_found_by_number[0] = False
                     found_car_id[0] = None
-                    car_status_label.configure(text=self.tr("bookings.add_window_new_car"), text_color="#f57c00")
                     if not car_details_visible[0]:
-                        car_details_frame.pack(fill=tk.X, pady=(0, 10), after=car_status_label)
-                        car_details_visible[0] = True
-                        add_window.geometry(f"{window_width}x{window_height + 100}")
-                    # Сбрасываем поля марки/модели
-                    brand_entry.delete(0, tk.END)
-                    model_entry.delete(0, tk.END)
+                        brand_entry.delete(0, tk.END)
+                        model_entry.delete(0, tk.END)
+                    set_car_state("new", self.tr("bookings.add_window_new_car").rstrip(":"))
             else:
                 car_found_by_number[0] = False
                 found_car_id[0] = None
-                car_status_label.configure(text="")
-                if car_details_visible[0]:
-                    car_details_frame.pack_forget()
-                    car_details_visible[0] = False
-                    add_window.geometry(f"{window_width}x{window_height}")
+                if car_status_label.winfo_ismapped() or car_details_visible[0]:
+                    set_car_state(None)
                 # Сбрасываем поля марки/модели
                 brand_entry.delete(0, tk.END)
                 model_entry.delete(0, tk.END)
@@ -7547,6 +7661,7 @@ class AutoServiceApp:
             if phone_cars_visible[0]:
                 phone_cars_combo.pack_forget()
                 phone_cars_visible[0] = False
+                fit_window()
 
         def fill_car_number(number):
             car_number_entry.delete(0, tk.END)
@@ -7614,48 +7729,70 @@ class AutoServiceApp:
                 phone_cars_combo.configure(values=list(phone_cars_numbers))
                 phone_cars_combo.set(self.tr("bookings.add_window_client_cars"))
                 if not phone_cars_visible[0]:
-                    phone_cars_combo.pack(side=tk.LEFT, padx=(10, 0))
+                    phone_cars_combo.pack(fill=tk.X, pady=(8, 0))
                     phone_cars_visible[0] = True
+                    fit_window()
 
         phone_entry.bind("<KeyRelease>", check_phone, add="+")
         phone_entry.bind("<FocusOut>", check_phone)
 
-        # Дата
-        ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_date"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
-        date_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        date_frame.pack(anchor="w", pady=(0, 5))
+        # === ДАТА И ВРЕМЯ ===
+        _, when_body = section(self.tr("bookings.section_datetime"))
+        date_row = ctk.CTkFrame(when_body, fg_color="transparent")
+        date_row.pack(fill=tk.X, pady=(0, 8))
 
         # Календарь для выбора даты
         date_entry = DateEntry(
-            date_frame,
-            width=18,
+            date_row,
+            width=12,
             background='#1f538d',
             foreground='white',
             borderwidth=2,
             date_pattern='dd.mm.yyyy',
             locale='ru_RU',
             mindate=datetime.now().date(),
-            font=("Arial", 12)
+            font=("Arial", 13)
         )
-        date_entry.pack(side=tk.LEFT)
+        date_entry.pack(side=tk.LEFT, ipady=3)
 
-        # Время
-        ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_time"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
-        time_grid = ctk.CTkFrame(main_frame, fg_color="transparent")
-        time_grid.pack(anchor="w", pady=(0, 5))
-        selected_time = [TIME_SLOTS[0]]
+        # Быстрый выбор: сегодня / завтра
+        quick_dates = {}
+        for label_key, days in (("bookings.btn_today", 0), ("bookings.btn_tomorrow", 1)):
+            quick_btn = ctk.CTkButton(date_row, text=self.tr(label_key), width=90, height=30, corner_radius=8,
+                                      font=("Arial", 13), border_width=1, border_color="#c5cdd6",
+                                      command=lambda d=days: set_booking_date(date.today() + timedelta(days=d)))
+            quick_btn.pack(side=tk.LEFT, padx=(8, 0))
+            quick_dates[days] = quick_btn
+
+        def set_booking_date(day):
+            date_entry.set_date(day)
+            update_available_times()
+
+        # Время - сетка кнопок во всю ширину карточки
+        time_grid = ctk.CTkFrame(when_body, fg_color="transparent")
+        time_grid.pack(fill=tk.X)
+        time_grid.grid_columnconfigure(tuple(range(time_cols)), weight=1, uniform="time")
+        selected_time = [None]
         time_buttons = {}
         time_badges = {}
+        past_slots = set()  # на сегодня - время, которое уже прошло
         slot_bookings = {}  # время -> список записей на выбранную дату
         slot_tooltip = [None]
 
         def select_time(slot):
+            if slot in past_slots:
+                return
             selected_time[0] = slot
             for s, btn in time_buttons.items():
-                if s == slot:
-                    btn.configure(fg_color="#1f538d", text_color="white", hover_color="#1f538d")
+                if s in past_slots:
+                    btn.configure(state="disabled", fg_color="#f1f3f5", text_color_disabled="#b0b7bf",
+                                  border_color="#e3e7eb")
+                elif s == slot:
+                    btn.configure(state="normal", fg_color="#1f538d", text_color="white", hover_color="#1f538d",
+                                  border_color="#1f538d")
                 else:
-                    btn.configure(fg_color="white", text_color="black", hover_color="#dbe6f3")
+                    btn.configure(state="normal", fg_color="white", text_color="black", hover_color="#dbe6f3",
+                                  border_color="#c5cdd6")
 
         def hide_slot_tooltip(event=None):
             if slot_tooltip[0]:
@@ -7687,11 +7824,11 @@ class AutoServiceApp:
         for i, slot in enumerate(TIME_SLOTS):
             # Ячейка с отступом сверху/справа - в угол ложится красный кружок с числом записей
             cell = ctk.CTkFrame(time_grid, fg_color="transparent")
-            cell.grid(row=i // time_cols, column=i % time_cols, padx=1, pady=1)
-            btn = ctk.CTkButton(cell, text=slot, width=56, height=28, font=("Arial", 13),
-                                corner_radius=6, border_width=1, border_color="#b0b0b0",
+            cell.grid(row=i // time_cols, column=i % time_cols, sticky="ew", padx=1, pady=1)
+            btn = ctk.CTkButton(cell, text=slot, width=50, height=30, font=("Arial", 13),
+                                corner_radius=8, border_width=1, border_color="#c5cdd6",
                                 command=lambda s=slot: select_time(s))
-            btn.pack(padx=(0, 6), pady=(6, 0))
+            btn.pack(fill=tk.X, padx=(0, 7), pady=(7, 0))
             badge = ctk.CTkLabel(cell, text="", width=16, height=16, corner_radius=8,
                                  fg_color="#e53935", text_color="white", font=("Arial", 10, "bold"))
             badge.bind("<Button-1>", lambda e, s=slot: select_time(s))
@@ -7719,48 +7856,64 @@ class AutoServiceApp:
 
         add_window.bind("<Destroy>", lambda e: hide_slot_tooltip() if e.widget is add_window else None, add="+")
 
-        # Статус (показывает если нет свободных слотов)
-        slot_status_label = ctk.CTkLabel(main_frame, text="", font=("Arial", 13))
-        slot_status_label.pack(anchor="w", pady=(0, 5))
+        # Статус (показывается, если на сегодня свободного времени не осталось)
+        slot_status_label = ctk.CTkLabel(when_body, text="", font=("Arial", 13), text_color="#ef6c00", anchor="w")
 
         def update_available_times(*args):
-            """Обновить список доступных слотов времени"""
+            """Обновить слоты времени: прошедшие на сегодня - серые, занятость - кружками"""
             try:
                 booking_date = date_entry.get_date()
+            except Exception:
+                booking_date = date.today()
+            now = datetime.now()
+            past_slots.clear()
+            if booking_date == now.date():
+                past_slots.update(s for s in TIME_SLOTS if s <= now.strftime("%H:%M"))
+            free = [s for s in TIME_SLOTS if s not in past_slots]
+            # Выбранное время оставляем, если оно ещё доступно, иначе - первое свободное
+            slot = selected_time[0] if selected_time[0] in free else (free[0] if free else None)
+            selected_time[0] = None
+            select_time(slot)
+            refresh_slot_counts()
 
-                # Показываем все слоты времени (не фильтруем занятые), занятость - кружками
-                select_time(TIME_SLOTS[0])
-                refresh_slot_counts()
-                slot_status_label.configure(text="", text_color="#2e7d32")
-            except:
-                select_time(TIME_SLOTS[0])
+            if free:
+                slot_status_label.pack_forget()
+            else:
+                slot_status_label.configure(text=self.tr("bookings.msg_no_slots_today"))
+                slot_status_label.pack(fill=tk.X, pady=(6, 0))
+            # Подсвечиваем кнопку "Сегодня"/"Завтра", если выбрана эта дата
+            for days, quick_btn in quick_dates.items():
+                active = booking_date == date.today() + timedelta(days=days)
+                quick_btn.configure(fg_color="#1f538d" if active else "white",
+                                    text_color="white" if active else "black",
+                                    hover_color="#1f538d" if active else "#dbe6f3")
+            fit_window()
 
         date_entry.bind("<<DateEntrySelected>>", update_available_times)
-        update_available_times()
 
         # === ПРИМЕЧАНИЕ (со списком ключевых слов, как в "Проделанные работы") ===
-        ctk.CTkLabel(main_frame, text=self.tr("bookings.add_window_notes"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
-        notes_row = ctk.CTkFrame(main_frame, fg_color="transparent")
-        notes_row.pack(fill=tk.X, anchor="w", pady=(0, 10))
-        notes_entry = ctk.CTkEntry(notes_row, width=220, font=("Arial", 14))
-        notes_entry.pack(side=tk.LEFT)
-        notes_keyword_listbox = tk.Listbox(notes_row, height=5, width=25, font=("Arial", 12))
+        _, notes_body = section(self.tr("bookings.section_notes"))
+        notes_entry = make_entry(notes_body)
+        notes_entry.pack(fill=tk.X)
+        # Список над полем - под ним кнопки и край окна
+        notes_keyword_listbox = self.form_popup_listbox(content)
         notes_keyword_listbox_visible = [False]
 
         def show_notes_keyword_list(keywords):
             notes_keyword_listbox.delete(0, tk.END)
             for kw in keywords:
                 notes_keyword_listbox.insert(tk.END, kw)
-            if not notes_keyword_listbox_visible[0]:
-                notes_keyword_listbox.pack(side=tk.LEFT, padx=5)
-                notes_keyword_listbox_visible[0] = True
+            popup_below(notes_keyword_listbox, notes_entry, above=True)
+            notes_keyword_listbox_visible[0] = True
 
         def hide_notes_keyword_list():
             if notes_keyword_listbox_visible[0]:
-                notes_keyword_listbox.pack_forget()
+                notes_keyword_listbox.place_forget()
                 notes_keyword_listbox_visible[0] = False
 
         def on_notes_key(event):
+            if event.keysym in ("Return", "Escape"):
+                return
             text = notes_entry.get().strip()
             if len(text) >= 1:
                 results = self.db.search_keywords(text)
@@ -7778,6 +7931,7 @@ class AutoServiceApp:
                 notes_entry.insert(0, notes_keyword_listbox.get(sel[0]))
                 hide_notes_keyword_list()
                 notes_entry.focus_set()
+            return "break"
 
         def on_notes_focus_out(event):
             def check_and_hide():
@@ -7794,6 +7948,12 @@ class AutoServiceApp:
         notes_keyword_listbox.bind('<Double-Button-1>', on_notes_select)
         notes_keyword_listbox.bind('<Return>', on_notes_select)
 
+        # Незаполненное обязательное поле - красная рамка (снимается, как только поле начали править)
+        def mark_error(entry, message_key):
+            self.form_mark_error(entry, message_key, add_window)
+
+        self.form_clear_error_on_type((car_number_entry, brand_entry, model_entry, phone_entry, name_entry))
+
         def save_booking():
             """Сохранить запись"""
             name = name_entry.get().strip()
@@ -7807,28 +7967,32 @@ class AutoServiceApp:
             model = model_entry.get().strip()
             existing_car_id = found_car_id[0]  # ID найденного авто или None
 
-            if not name:
-                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_enter_client_name"), parent=add_window)
-                return
-
             # Валидация госномера - обязательно
             if not number:
-                messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"), parent=add_window)
+                mark_error(car_number_entry, "works.msg_enter_car_number")
                 return
 
             # Если авто не найдено - нужны марка и модель
             if not car_found_by_number[0]:
                 if not brand:
-                    messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_brand"), parent=add_window)
+                    mark_error(brand_entry, "works.msg_enter_brand")
                     return
                 if not model:
-                    messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_model"), parent=add_window)
+                    mark_error(model_entry, "works.msg_enter_model")
                     return
 
             # Валидация телефона - должен быть +7 и 10 цифр после
             phone_digits = ''.join(c for c in phone_raw if c.isdigit())
             if len(phone_digits) != 11 or not phone_digits.startswith('7'):
-                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_enter_phone_after_plus7"), parent=add_window)
+                mark_error(phone_entry, "bookings.msg_enter_phone_after_plus7")
+                return
+
+            if not name:
+                mark_error(name_entry, "bookings.msg_enter_client_name")
+                return
+
+            if not time_str:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_slots_today"), parent=add_window)
                 return
 
             # В базу - без форматирования, +7XXXXXXXXXX
@@ -7913,14 +8077,20 @@ class AutoServiceApp:
             else:
                 messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_booking_failed"), parent=add_window)
 
-        # Кнопки (в отдельном фрейме внизу окна, чтобы всегда были под всеми полями)
-        btn_frame = ctk.CTkFrame(add_window, fg_color="transparent")
-        btn_frame.pack(side=tk.BOTTOM, pady=15)
+        # Кнопки: широкая основная "Записать" и второстепенная "Отмена"; Enter - записать, Esc - отмена
+        self.form_buttons(add_window, self.tr("bookings.btn_book"), save_booking, on_close)
+        self.form_bind_keys(add_window, content, save_booking, on_close,
+                            lambda: (hide_brand_list(), hide_model_list(), hide_notes_keyword_list()))
 
-        ctk.CTkButton(btn_frame, text=self.tr("bookings.btn_book"), command=save_booking,
-                     fg_color="#2e7d32", hover_color="#1b5e20", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(btn_frame, text=self.tr("common.cancel"), command=on_close,
-                     fg_color="#757575", hover_color="#616161", width=130, height=36, font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
+        # На сегодня свободного времени не осталось - сразу открываем завтрашний день
+        now = datetime.now()
+        if all(slot <= now.strftime("%H:%M") for slot in TIME_SLOTS):
+            date_entry.set_date(now.date() + timedelta(days=1))
+        update_available_times()  # заодно подгоняет высоту окна
+        add_window.update()
+        add_window.grab_set()
+        add_window.focus_force()
+        car_number_entry.focus_set()
 
     # ===== Скрытие/показ колонок таблиц (общее для "Записей" и "Склада") =====
     # Настройки хранятся в settings.json под ключом settings_key: список скрытых колонок
