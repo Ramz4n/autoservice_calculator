@@ -2042,6 +2042,40 @@ class Database:
         pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
         return pwd_hash, salt
 
+    def get_app_setting(self, name):
+        """Значение общей настройки из app_settings (None, если не задана)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_settings WHERE name = %s", (name,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def set_app_setting(self, name, value):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO app_settings (name, value) VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE value = VALUES(value)
+        """, (name, value))
+        conn.commit()
+        conn.close()
+
+    def has_reports_password(self) -> bool:
+        """Задан ли пароль для просмотра отчётов за другие даты"""
+        return bool(self.get_app_setting("reports_password"))
+
+    def set_reports_password(self, password: str):
+        pwd_hash, salt = self._hash_password(password)
+        self.set_app_setting("reports_password", f"{salt}${pwd_hash}")
+
+    def check_reports_password(self, password: str) -> bool:
+        stored = self.get_app_setting("reports_password")
+        if not stored or "$" not in stored:
+            return False
+        salt, pwd_hash = stored.split("$", 1)
+        return self._hash_password(password, salt)[0] == pwd_hash
+
     def ensure_default_admin(self) -> bool:
         """Создать admin/admin если нет ни одного пользователя. Возвращает True если создал."""
         conn = self.get_connection()

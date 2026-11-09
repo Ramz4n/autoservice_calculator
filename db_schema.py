@@ -194,6 +194,15 @@ TABLES = {
         ) ENGINE=InnoDB
     ''',
 
+    # Общие настройки программы, одинаковые на всех компьютерах (ключ - значение).
+    # reports_password - пароль для просмотра отчётов за другие даты ("соль$хэш")
+    'app_settings': '''
+        CREATE TABLE IF NOT EXISTS app_settings (
+            name VARCHAR(50) PRIMARY KEY,
+            value TEXT
+        ) ENGINE=InnoDB
+    ''',
+
     # Расписание сотрудников: выходной, отпуск, больничный (период date_from..date_to)
     'worker_absences': '''
         CREATE TABLE IF NOT EXISTS worker_absences (

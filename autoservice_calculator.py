@@ -648,6 +648,10 @@ class AutoServiceApp:
     def on_tab_changed(self):
         """Обработчик переключения вкладок"""
         current_tab = self.current_tab
+        # Ушли с вкладки - выбор периода снова закрыт паролем
+        for tab, lock in getattr(self, "period_locks", {}).items():
+            if current_tab != tab and lock["unlocked"]:
+                self.lock_period(tab)
         if current_tab == "reports":
             # Автоматически обновляем отчёт при переключении на вкладку
             self.generate_report(show_empty_message=False)
@@ -1226,6 +1230,9 @@ class AutoServiceApp:
         ctk.CTkButton(btn_frame, text="Удалить", width=120,
                       fg_color="red", hover_color="darkred",
                       command=self._users_tab_delete).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text=self.tr("reports.set_password_btn"), width=180,
+                      fg_color="#6a1b9a", hover_color="#4a148c",
+                      command=self.change_reports_password).pack(side=tk.LEFT, padx=5)
         self.refresh_users_list()
 
     def _add_user_from_tab(self):
@@ -4254,6 +4261,10 @@ class AutoServiceApp:
                                   locale='ru_RU')
         self.date_to.pack(side=tk.LEFT, padx=5)
 
+        # Без пароля отчёт только за сегодня; другие даты открываются паролем для отчётов
+        self.add_period_lock("reports", dates_frame, (self.date_from, self.date_to),
+                             lambda: self.generate_report(show_empty_message=False))
+
         ctk.CTkLabel(dates_frame, text=self.tr("reports.master_percent_label")).pack(side=tk.LEFT, padx=(20, 5))
         settings = self.load_settings()
         self.percent_var = tk.StringVar(value=str(settings.get('master_percent', 50)))
@@ -4392,8 +4403,109 @@ class AutoServiceApp:
         self.other_income_tooltip = LabelTooltip(self.other_income_label, self.format_currency, is_expense=False)
         self.expenses_tooltip = LabelTooltip(self.expenses_label, self.format_currency, is_expense=True)
 
+    # Выбор периода под паролем для отчётов ("Отчёты", "Статистика"): без пароля - только сегодня.
+    # self.period_locks[вкладка] = {"entries": (дата с, дата по), "button": кнопка, "refresh": пересчёт, "unlocked": bool}
+
+    def add_period_lock(self, tab, parent, entries, refresh):
+        """Кнопка "Другой период" рядом с датами; даты сразу закрываются на сегодня"""
+        if not hasattr(self, "period_locks"):
+            self.period_locks = {}
+        button = ctk.CTkButton(parent, text="", width=150, command=lambda: self.toggle_period_lock(tab))
+        button.pack(side=tk.LEFT, padx=(10, 0))
+        self.period_locks[tab] = {"entries": entries, "button": button, "refresh": refresh, "unlocked": False}
+        self.lock_period(tab)
+
+    def is_period_unlocked(self, tab):
+        return self.period_locks[tab]["unlocked"]
+
+    def lock_period(self, tab):
+        """Закрыть выбор периода: только сегодня"""
+        lock = self.period_locks[tab]
+        lock["unlocked"] = False
+        for entry in lock["entries"]:
+            entry.configure(state="normal")
+            entry.set_date(date.today())
+            entry.configure(state="disabled")
+        lock["button"].configure(text=self.tr("reports.period_locked_btn"))
+
+    def toggle_period_lock(self, tab):
+        """Кнопка у дат: ввести пароль и открыть выбор периода / снова закрыть"""
+        lock = self.period_locks[tab]
+        if lock["unlocked"]:
+            self.lock_period(tab)
+            lock["refresh"]()
+            return
+        if not self.db.has_reports_password():
+            messagebox.showinfo(self.tr("reports.password_title"), self.tr("reports.msg_no_password"))
+            return
+        password = self.ask_password(self.tr("reports.password_title"), self.tr("reports.password_prompt"))
+        if password is None:
+            return
+        if not self.db.check_reports_password(password):
+            messagebox.showerror(self.tr("reports.password_title"), self.tr("reports.msg_wrong_password"))
+            return
+        lock["unlocked"] = True
+        for entry in lock["entries"]:
+            entry.configure(state="normal")
+        lock["button"].configure(text=self.tr("reports.period_unlocked_btn"))
+
+    def ask_password(self, title, prompt):
+        """Окно ввода пароля (символы скрыты). Возвращает введённое или None, если отменили"""
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("360x170")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        result = [None]
+
+        ctk.CTkLabel(dialog, text=prompt, wraplength=320, justify=tk.LEFT).pack(padx=20, pady=(18, 8), anchor="w")
+        entry = ctk.CTkEntry(dialog, width=320, show="•", fg_color="white", text_color="black")
+        entry.pack(padx=20)
+
+        def ok(event=None):
+            result[0] = entry.get()
+            dialog.destroy()
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(pady=15)
+        ctk.CTkButton(buttons, text="OK", width=120, command=ok).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(buttons, text=self.tr("common.cancel"), width=120, fg_color="#757575", hover_color="#616161",
+                      command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+        entry.bind("<Return>", ok)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.after(100, entry.focus_force)
+        self.root.wait_window(dialog)
+        return result[0]
+
+    def change_reports_password(self):
+        """Настройки -> Пользователи: задать или сменить пароль для отчётов"""
+        title = self.tr("reports.password_title")
+        if self.db.has_reports_password():
+            current = self.ask_password(title, self.tr("reports.password_current_prompt"))
+            if current is None:
+                return
+            if not self.db.check_reports_password(current):
+                messagebox.showerror(title, self.tr("reports.msg_wrong_password"), parent=self.root)
+                return
+        new = self.ask_password(title, self.tr("reports.password_new_prompt"))
+        if not new:
+            return
+        repeat = self.ask_password(title, self.tr("reports.password_repeat_prompt"))
+        if repeat is None:
+            return
+        if new != repeat:
+            messagebox.showerror(title, self.tr("reports.msg_password_mismatch"), parent=self.root)
+            return
+        self.db.set_reports_password(new)
+        messagebox.showinfo(title, self.tr("reports.msg_password_saved"), parent=self.root)
+
     def generate_report(self, show_empty_message=True):
         """Сформировать отчёт за период"""
+        if not self.is_period_unlocked("reports"):
+            # Без пароля - только сегодня (заодно сменится дата, если программа открыта с прошлого дня)
+            self.lock_period("reports")
         date_from = self.date_from.get_date().strftime('%Y-%m-%d')
         date_to = self.date_to.get_date().strftime('%Y-%m-%d')
 
@@ -5425,8 +5537,11 @@ class AutoServiceApp:
         ctk.CTkLabel(center_container, text=self.tr("about.contacts_title"),
                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(0, 8))
 
-        ctk.CTkLabel(center_container, text=self.tr("about.telegram"),
-                    font=ctk.CTkFont(size=13)).pack(pady=(0, 2))
+        # Клик по Telegram - открыть чат
+        telegram_label = ctk.CTkLabel(center_container, text=self.tr("about.telegram"),
+                                      font=ctk.CTkFont(size=13, underline=True), text_color="#1e88e5", cursor="hand2")
+        telegram_label.pack(pady=(0, 2))
+        telegram_label.bind("<Button-1>", lambda e: webbrowser.open("https://t.me/R_AM_Z"))
 
         ctk.CTkLabel(center_container, text=self.tr("about.email"),
                     font=ctk.CTkFont(size=13)).pack(pady=(0, 10))
@@ -5707,6 +5822,10 @@ class AutoServiceApp:
         self.stats_date_to = DateEntry(dates_frame, width=15, date_pattern='dd.mm.yyyy', locale='ru_RU')
         self.stats_date_to.pack(side=tk.LEFT, padx=5)
 
+        # Без пароля статистика только за сегодня; другие даты открываются паролем для отчётов
+        self.add_period_lock("statistics", dates_frame, (self.stats_date_from, self.stats_date_to),
+                             lambda: self.generate_statistics(show_empty_message=False))
+
         ctk.CTkButton(dates_frame, text=self.tr("statistics.generate_btn"),
                       command=self.generate_statistics).pack(side=tk.LEFT, padx=20)
 
@@ -5910,6 +6029,9 @@ class AutoServiceApp:
 
     def generate_statistics(self, show_empty_message=True):
         """Сформировать статистику за выбранный период"""
+        if not self.is_period_unlocked("statistics"):
+            # Без пароля - только сегодня
+            self.lock_period("statistics")
         date_from = self.stats_date_from.get_date().strftime('%Y-%m-%d')
         date_to = self.stats_date_to.get_date().strftime('%Y-%m-%d')
 
