@@ -193,6 +193,21 @@ TABLES = {
             FOREIGN KEY (client_id) REFERENCES clients(id)
         ) ENGINE=InnoDB
     ''',
+
+    # Расписание сотрудников: выходной, отпуск, больничный (период date_from..date_to)
+    'worker_absences': '''
+        CREATE TABLE IF NOT EXISTS worker_absences (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            worker_id INT NOT NULL,
+            date_from DATE NOT NULL,
+            date_to DATE NOT NULL,
+            kind VARCHAR(20) NOT NULL DEFAULT 'day_off',
+            note VARCHAR(255) DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE CASCADE,
+            INDEX idx_worker_absences_dates (worker_id, date_from, date_to)
+        ) ENGINE=InnoDB
+    ''',
 }
 
 # Индексы для быстрого поиска

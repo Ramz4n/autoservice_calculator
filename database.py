@@ -6,6 +6,7 @@
 import json
 import os
 import re
+from datetime import timedelta
 import pymysql
 from pymysql import Error as MySQLError
 from tkinter import messagebox
@@ -128,6 +129,89 @@ class Database:
         workers = cursor.fetchall()
         conn.close()
         return workers
+
+    # --- Расписание сотрудников ---
+
+    def get_worker_absences(self, date_from, date_to, worker_id=None):
+        """Отсутствия, пересекающие период [date_from, date_to]"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        sql = """
+            SELECT id, worker_id, date_from, date_to, kind, note FROM worker_absences
+            WHERE date_from <= %s AND date_to >= %s
+        """
+        params = [date_to, date_from]
+        if worker_id is not None:
+            sql += " AND worker_id = %s"
+            params.append(worker_id)
+        cursor.execute(sql + " ORDER BY date_from", params)
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"id": r[0], "worker_id": r[1], "date_from": r[2], "date_to": r[3], "kind": r[4], "note": r[5] or ""}
+                for r in rows]
+
+    def set_worker_day(self, worker_id, day, kind):
+        """Отметить один день сотрудника: kind = 'day_off' / 'vacation' / 'sick', None - рабочий день.
+        Периоды, которые задевают этот день, разрезаются; соседние дни того же вида склеиваются в один период"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # Вырезаем день из всех периодов, которые его содержат
+            cursor.execute("""
+                SELECT id, date_from, date_to, kind, note FROM worker_absences
+                WHERE worker_id = %s AND date_from <= %s AND date_to >= %s
+            """, (worker_id, day, day))
+            for absence_id, date_from, date_to, old_kind, note in cursor.fetchall():
+                cursor.execute("DELETE FROM worker_absences WHERE id = %s", (absence_id,))
+                for part_from, part_to in ((date_from, day - timedelta(days=1)), (day + timedelta(days=1), date_to)):
+                    if part_from <= part_to:
+                        cursor.execute("""
+                            INSERT INTO worker_absences (worker_id, date_from, date_to, kind, note)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (worker_id, part_from, part_to, old_kind, note))
+
+            if kind:
+                # Соседние дни того же вида - продлеваем их период, а не плодим однодневные
+                cursor.execute("""
+                    SELECT id, date_from, date_to FROM worker_absences
+                    WHERE worker_id = %s AND kind = %s AND (date_to = %s OR date_from = %s)
+                """, (worker_id, kind, day - timedelta(days=1), day + timedelta(days=1)))
+                left = right = None
+                for absence_id, date_from, date_to in cursor.fetchall():
+                    if date_to == day - timedelta(days=1):
+                        left = (absence_id, date_from)
+                    else:
+                        right = (absence_id, date_to)
+                if left and right:
+                    cursor.execute("UPDATE worker_absences SET date_to = %s WHERE id = %s", (right[1], left[0]))
+                    cursor.execute("DELETE FROM worker_absences WHERE id = %s", (right[0],))
+                elif left:
+                    cursor.execute("UPDATE worker_absences SET date_to = %s WHERE id = %s", (day, left[0]))
+                elif right:
+                    cursor.execute("UPDATE worker_absences SET date_from = %s WHERE id = %s", (day, right[0]))
+                else:
+                    cursor.execute("""
+                        INSERT INTO worker_absences (worker_id, date_from, date_to, kind)
+                        VALUES (%s, %s, %s, %s)
+                    """, (worker_id, day, day, kind))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_worker_schedule(self, date_from, date_to):
+        """Статус каждого сотрудника на каждый день периода: {worker_id: {date: kind}}.
+        Дни, когда сотрудник работает, в словарь не попадают. kind: 'day_off', 'vacation', 'sick'"""
+        schedule = {}
+        for absence in self.get_worker_absences(date_from, date_to):
+            day = max(absence["date_from"], date_from)
+            last = min(absence["date_to"], date_to)
+            while day <= last:
+                schedule.setdefault(absence["worker_id"], {})[day] = absence["kind"]
+                day += timedelta(days=1)
+        return schedule
 
     # --- Методы для работы с марками и моделями ---
 

@@ -10,6 +10,7 @@ from tkinter import ttk, messagebox, filedialog
 from datetime import datetime, date, timedelta
 from tkcalendar import DateEntry
 import json
+import calendar as pycalendar
 import qrcode
 from PIL import Image, ImageTk
 from reportlab.pdfgen import canvas
@@ -454,6 +455,7 @@ class AutoServiceApp:
             (self.tr("menu.add_work"), "works"),
             (self.tr("menu.bookings"), "bookings"),
             (self.tr("menu.warehouse"), "warehouse"),
+            (self.tr("menu.staff"), "staff"),
             *([(self.tr("menu.reports"), "reports"), (self.tr("menu.expenses"), "expenses"), (self.tr("menu.statistics"), "statistics")] if _is_admin else []),
             #("Поиск деталей", "parts_search"),
             (self.tr("menu.settings"), "settings")
@@ -535,6 +537,11 @@ class AutoServiceApp:
         self.warehouse_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.content_frames["warehouse"] = self.warehouse_frame
         self.setup_warehouse_tab()
+
+        # Вкладка сотрудников: расписание выходных, отпусков, больничных
+        self.staff_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.content_frames["staff"] = self.staff_frame
+        self.setup_staff_tab()
 
         # Вкладка отчётов
         self.reports_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -650,6 +657,10 @@ class AutoServiceApp:
         elif current_tab == "works":
             # Автоматически обновляем список записей для выбора клиента
             self.refresh_bookings_combo()
+            # и список мастеров - кто сегодня по расписанию отсутствует
+            self.refresh_workers_combo()
+        elif current_tab == "staff":
+            self.refresh_staff_tab()
         elif current_tab == "warehouse":
             # Автоматически обновляем список запчастей на складе
             self.refresh_warehouse()
@@ -1379,6 +1390,209 @@ class AutoServiceApp:
             self.workers_tree.insert("", tk.END, values=(worker_name,), tags=(worker_id, row_tag))
 
             row_index += 1
+
+    # ===== ВКЛАДКА "СОТРУДНИКИ" (РАСПИСАНИЕ) =====
+
+    # Виды отсутствия: цвет клетки в календаре
+    STAFF_KIND_COLORS = {
+        "day_off": "#ffcc80",   # выходной
+        "vacation": "#a5d6a7",  # отпуск
+        "sick": "#ef9a9a",      # больничный
+    }
+    STAFF_PERIOD_KINDS = ("day_off", "vacation", "sick")
+
+    def staff_kind_label(self, kind):
+        return self.tr(f"staff.kind_{kind}")
+
+    def setup_staff_tab(self):
+        """Вкладка "Сотрудники": календарь на месяц (сотрудники x дни)"""
+        parent = self.staff_frame
+        today = date.today()
+        self.staff_month = date(today.year, today.month, 1)
+        self.staff_workers = []
+        self.staff_content_size = (0, 0)
+
+        # Всё по центру: заголовок, переключение месяца, сводка на сегодня, легенда, таблица
+        ctk.CTkLabel(parent, text=self.tr("staff.title"),
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(padx=10, pady=(10, 4))
+        nav = ctk.CTkFrame(parent, fg_color="transparent")
+        nav.pack(padx=10)
+        ctk.CTkButton(nav, text="◀", width=36, command=lambda: self.staff_change_month(-1)).pack(side=tk.LEFT)
+        self.staff_month_label = ctk.CTkLabel(nav, text="", width=150, font=ctk.CTkFont(size=15, weight="bold"))
+        self.staff_month_label.pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(nav, text="▶", width=36, command=lambda: self.staff_change_month(1)).pack(side=tk.LEFT)
+        ctk.CTkButton(nav, text=self.tr("staff.today_btn"), width=80,
+                      command=lambda: self.staff_change_month(0)).pack(side=tk.LEFT, padx=(10, 0))
+
+        self.staff_summary_label = ctk.CTkLabel(parent, text="", justify=tk.CENTER, wraplength=900)
+        self.staff_summary_label.pack(padx=12, pady=(6, 0))
+
+        # Легенда - она же выбор того, что ставится в график по клику на клетку
+        legend = ctk.CTkFrame(parent, fg_color="transparent")
+        legend.pack(padx=10, pady=(4, 6))
+        self.staff_brush = "day_off"
+        self.staff_brush_buttons = {}
+        for kind in self.STAFF_PERIOD_KINDS:
+            button = tk.Label(legend, text=f"  {self.tr('staff.short_' + kind)}  {self.staff_kind_label(kind)}  ",
+                              bg=self.STAFF_KIND_COLORS[kind], font=("Arial", 10), cursor="hand2", pady=3)
+            button.pack(side=tk.LEFT, padx=4)
+            button.bind("<Button-1>", lambda e, k=kind: self.set_staff_brush(k))
+            self.staff_brush_buttons[kind] = button
+        self.set_staff_brush(self.staff_brush)
+        ctk.CTkLabel(legend, text=self.tr("staff.hint"), text_color="gray").pack(side=tk.LEFT, padx=10)
+
+        # Календарь: холст по размеру таблицы, прокрутка - только если окно меньше таблицы
+        self.staff_body = ctk.CTkFrame(parent, fg_color="transparent")
+        self.staff_body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        cal_frame = tk.Frame(self.staff_body, bg="white", highlightthickness=1, highlightbackground="#bdbdbd")
+        cal_frame.pack(side=tk.TOP, anchor="n")
+        self.staff_canvas = tk.Canvas(cal_frame, bg="white", highlightthickness=0, width=1, height=1)
+        self.staff_x_scroll = tk.Scrollbar(cal_frame, orient=tk.HORIZONTAL, command=self.staff_canvas.xview)
+        self.staff_y_scroll = tk.Scrollbar(cal_frame, orient=tk.VERTICAL, command=self.staff_canvas.yview)
+        self.staff_canvas.configure(xscrollcommand=self.staff_x_scroll.set, yscrollcommand=self.staff_y_scroll.set)
+        self.staff_canvas.grid(row=0, column=0)
+        self.staff_x_scroll.grid(row=1, column=0, sticky="ew")
+        self.staff_y_scroll.grid(row=0, column=1, sticky="ns")
+        self.staff_canvas.bind("<Button-1>", self.on_staff_canvas_click)
+        self.staff_canvas.bind("<MouseWheel>",
+                               lambda e: self.staff_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        self.staff_body.bind("<Configure>", self.fit_staff_canvas, add=True)
+
+        self.refresh_staff_tab()
+
+    def fit_staff_canvas(self, event=None):
+        """Размер таблицы = размер содержимого; если не влезает в окно - урезаем и показываем прокрутку"""
+        avail_w, avail_h = self.staff_body.winfo_width() - 2, self.staff_body.winfo_height() - 2
+        if avail_w <= 1 or avail_h <= 1:
+            return
+        need_w, need_h = self.staff_content_size
+        bar = self.staff_y_scroll.winfo_reqwidth()
+        show_x = need_w > avail_w
+        show_y = need_h > avail_h - (bar if show_x else 0)
+        if show_y and not show_x:
+            show_x = need_w > avail_w - bar
+        self.staff_canvas.configure(width=min(need_w, avail_w - (bar if show_y else 0)),
+                                    height=min(need_h, avail_h - (bar if show_x else 0)))
+        self.staff_x_scroll.grid() if show_x else self.staff_x_scroll.grid_remove()
+        self.staff_y_scroll.grid() if show_y else self.staff_y_scroll.grid_remove()
+
+    def staff_change_month(self, step):
+        """step = -1 / 1 - листаем месяц, 0 - к текущему месяцу"""
+        if step == 0:
+            today = date.today()
+            self.staff_month = date(today.year, today.month, 1)
+        else:
+            month = self.staff_month.month - 1 + step
+            self.staff_month = date(self.staff_month.year + month // 12, month % 12 + 1, 1)
+        self.draw_staff_calendar()
+
+    def refresh_staff_tab(self):
+        """Перечитать сотрудников и расписание"""
+        self.staff_workers = self.db.get_all_workers()
+        self.update_staff_summary()
+        self.draw_staff_calendar()
+
+    def update_staff_summary(self):
+        """Сводка на сегодня: сколько работает, кто отсутствует"""
+        if not self.staff_workers:
+            self.staff_summary_label.configure(text=self.tr("staff.no_workers"))
+            return
+        today = date.today()
+        schedule = self.db.get_worker_schedule(today, today)
+        absent = [f"{name} ({self.staff_kind_label(schedule[wid][today])})"
+                  for wid, name in self.staff_workers if today in schedule.get(wid, {})]
+        text = self.tr("staff.today_summary", working=len(self.staff_workers) - len(absent), total=len(self.staff_workers))
+        if absent:
+            text += "   " + self.tr("staff.today_absent", list=", ".join(absent))
+        self.staff_summary_label.configure(text=text)
+
+    STAFF_NAME_W = 170
+    STAFF_CELL = 28
+    STAFF_HEAD = 40
+
+    def draw_staff_calendar(self):
+        """Нарисовать календарь месяца: строки - сотрудники, столбцы - дни"""
+        canvas = self.staff_canvas
+        canvas.delete("all")
+        first = self.staff_month
+        days_in_month = pycalendar.monthrange(first.year, first.month)[1]
+        last = first.replace(day=days_in_month)
+        self.staff_month_label.configure(text=f"{self.tr(f'staff.month_{first.month}')} {first.year}")
+        schedule = self.db.get_worker_schedule(first, last) if self.staff_workers else {}
+        today = date.today()
+        name_w, cell, head = self.STAFF_NAME_W, self.STAFF_CELL, self.STAFF_HEAD
+        width = name_w + days_in_month * cell
+        height = head + len(self.staff_workers) * cell
+
+        # Шапка: число и день недели, выходные дни недели подкрашены
+        for d in range(1, days_in_month + 1):
+            day = first.replace(day=d)
+            x = name_w + (d - 1) * cell
+            weekend = day.weekday() >= 5
+            canvas.create_rectangle(x, 0, x + cell, head, fill="#eceff1" if weekend else "#fafafa", outline="#cfd8dc")
+            canvas.create_text(x + cell / 2, 13, text=str(d), font=("Arial", 10, "bold"),
+                               fill="#c62828" if weekend else "#212121")
+            canvas.create_text(x + cell / 2, 29, text=self.tr(f"staff.weekday_{day.weekday()}"), font=("Arial", 8),
+                               fill="#c62828" if weekend else "#757575")
+        canvas.create_rectangle(0, 0, name_w, head, fill="#fafafa", outline="#cfd8dc")
+
+        # Строки сотрудников
+        for row, (worker_id, name) in enumerate(self.staff_workers):
+            y = head + row * cell
+            canvas.create_rectangle(0, y, name_w, y + cell, fill="white", outline="#cfd8dc")
+            canvas.create_text(8, y + cell / 2, text=name, anchor="w", font=("Arial", 10), width=name_w - 12)
+            worker_days = schedule.get(worker_id, {})
+            for d in range(1, days_in_month + 1):
+                day = first.replace(day=d)
+                x = name_w + (d - 1) * cell
+                kind = worker_days.get(day)
+                canvas.create_rectangle(x, y, x + cell, y + cell,
+                                        fill=self.STAFF_KIND_COLORS.get(kind, "white"), outline="#cfd8dc")
+                if kind:
+                    canvas.create_text(x + cell / 2, y + cell / 2, text=self.tr(f"staff.short_{kind}"),
+                                       font=("Arial", 9, "bold"), fill="#37474f")
+
+        # Сегодняшний день - синяя рамка по всему столбцу
+        if first.year == today.year and first.month == today.month:
+            x = name_w + (today.day - 1) * cell
+            canvas.create_rectangle(x, 0, x + cell, max(height, head), outline="#1565c0", width=2)
+
+        canvas.configure(scrollregion=(0, 0, width + 1, height + 1))
+        self.staff_content_size = (width + 1, height + 1)
+        self.fit_staff_canvas()
+
+    def on_staff_canvas_click(self, event):
+        """Клик по клетке календаря - поставить выбранное в легенде (или снять)"""
+        x = self.staff_canvas.canvasx(event.x)
+        y = self.staff_canvas.canvasy(event.y)
+        row = int((y - self.STAFF_HEAD) // self.STAFF_CELL)
+        if y < self.STAFF_HEAD or row >= len(self.staff_workers):
+            return
+        worker_id = self.staff_workers[row][0]
+
+        col = int((x - self.STAFF_NAME_W) // self.STAFF_CELL)
+        days_in_month = pycalendar.monthrange(self.staff_month.year, self.staff_month.month)[1]
+        if x < self.STAFF_NAME_W or col >= days_in_month:
+            return
+        day = self.staff_month.replace(day=col + 1)
+        kind = self.db.get_worker_schedule(day, day).get(worker_id, {}).get(day)
+        # Там уже стоит выбранное - снимаем (рабочий день), иначе ставим выбранное
+        self.db.set_worker_day(worker_id, day, None if kind == self.staff_brush else self.staff_brush)
+        self.after_staff_change()
+
+    def set_staff_brush(self, kind):
+        """Выбор в легенде: что ставить в график по клику на клетку"""
+        self.staff_brush = kind
+        for k, button in self.staff_brush_buttons.items():
+            selected = k == kind
+            button.configure(relief="solid" if selected else "flat", borderwidth=2 if selected else 0,
+                             font=("Arial", 10, "bold" if selected else "normal"))
+
+    def after_staff_change(self):
+        """Расписание изменилось - перерисовать вкладку и обновить список мастеров в "Добавить работу" """
+        self.update_staff_summary()
+        self.draw_staff_calendar()
+        self.refresh_workers_combo()
 
     # ===== ВКЛАДКА ПОИСКА ДЕТАЛЕЙ =====
 
@@ -2401,12 +2615,31 @@ class AutoServiceApp:
 
 
     def refresh_workers_combo(self):
-        """Обновить выпадающий список работников"""
+        """Обновить выпадающий список работников. Кто сегодня по расписанию отсутствует -
+        в конце списка с пометкой ("Иванов — отпуск"). Выбранный мастер сохраняется"""
         workers = self.db.get_all_workers()
-        self.workers_data = {w[1]: w[0] for w in workers}
+        today = date.today()
+        try:
+            schedule = self.db.get_worker_schedule(today, today)
+        except Exception as e:
+            print(f"Не удалось загрузить расписание сотрудников: {e}")
+            schedule = {}
+        previous_id = getattr(self, "workers_data", {}).get(self.worker_combo.get())
+
+        working, absent = [], []
+        for worker_id, name in workers:
+            kind = schedule.get(worker_id, {}).get(today)
+            if kind:
+                absent.append((self.tr("works.worker_absent_suffix", name=name, kind=self.staff_kind_label(kind)), worker_id))
+            else:
+                working.append((name, worker_id))
+        self.workers_data = dict(working + absent)
+        self.worker_names_by_id = {worker_id: name for worker_id, name in workers}
+
         worker_names = [self.tr("works.select_master")] + list(self.workers_data.keys())
         self.worker_combo.configure(values=worker_names)
-        self.worker_combo.set(self.tr("works.select_master"))
+        selected = next((name for name, wid in self.workers_data.items() if wid == previous_id), None)
+        self.worker_combo.set(selected or self.tr("works.select_master"))
 
     def check_warehouse_for_car(self, car_number):
         """Проверить склад на наличие запчастей для данного автомобиля"""
@@ -2743,6 +2976,25 @@ class AutoServiceApp:
         )
 
         worker_id = self.workers_data[selected_worker]
+
+        # Мастер по расписанию отсутствует в день работы - переспрашиваем (бывает, что выходит в свой выходной)
+        check_date = date.today()
+        if getattr(self, 'editing_work_id', None):
+            original_work = self.db.get_work_by_id(self.editing_work_id)
+            if original_work and original_work[5]:
+                work_day = original_work[5]
+                if isinstance(work_day, datetime):
+                    work_day = work_day.date()
+                elif not isinstance(work_day, date):
+                    work_day = datetime.strptime(str(work_day)[:10], '%Y-%m-%d').date()
+                check_date = work_day
+        absence_kind = self.db.get_worker_schedule(check_date, check_date).get(worker_id, {}).get(check_date)
+        if absence_kind and not messagebox.askyesno(
+                self.tr("common.attention"),
+                self.tr("works.msg_worker_absent",
+                        name=getattr(self, "worker_names_by_id", {}).get(worker_id, selected_worker),
+                        date=check_date.strftime('%d.%m.%Y'), kind=self.staff_kind_label(absence_kind))):
+            return
         car_brand = self.car_brand_entry.get().strip()
         car_model = self.car_model_entry.get().strip()
         car_number = self.car_number_entry.get().strip().upper()
