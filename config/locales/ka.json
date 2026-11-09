@@ -231,6 +231,8 @@
     "warehouse.order_btn": "შეკვეთა",
     "warehouse.enter_car_number": "შეიყვანეთ სახელმწიფო ნომერი",
     "warehouse.car_not_found": "მანქანა ვერ მოიძებნა — შეავსეთ მონაცემები ქვემოთ",
+    "warehouse.phone_client_not_found": "კლიენტი ვერ მოიძებნა — შეიყვანეთ სახელმწიფო ნომერი და ავტომობილის მონაცემები ქვემოთ",
+    "warehouse.phone_client_no_cars": "{name}: მანქანები არ არის — შეიყვანეთ სახელმწიფო ნომერი და ავტომობილის მონაცემები ქვემოთ",
     "warehouse.msg_quantity_number": "რაოდენობა უნდა იყოს რიცხვი!",
     "warehouse.msg_price_number": "ფასი უნდა იყოს რიცხვი!",
     "warehouse.msg_enter_car_brand": "შეიყვანეთ მანქანის მარკა!",

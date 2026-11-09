@@ -220,6 +220,8 @@
     "warehouse.order_btn": "Poruči",
     "warehouse.enter_car_number": "Unesite registarski broj",
     "warehouse.car_not_found": "Vozilo nije pronađeno — popunite podatke ispod",
+    "warehouse.phone_client_not_found": "Klijent nije pronađen — unesite registarski broj i podatke o vozilu ispod",
+    "warehouse.phone_client_no_cars": "{name}: nema vozila u bazi — unesite registarski broj i podatke o vozilu ispod",
     "warehouse.msg_quantity_number": "Količina mora biti broj!",
     "warehouse.msg_price_number": "Cena mora biti broj!",
     "warehouse.msg_enter_car_brand": "Unesite marku vozila!",

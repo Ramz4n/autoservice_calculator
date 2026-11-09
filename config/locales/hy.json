@@ -231,6 +231,8 @@
     "warehouse.order_btn": "Պատվիրել",
     "warehouse.enter_car_number": "Մուտքագրեք պետհամարանիշը",
     "warehouse.car_not_found": "Մեքենան չի գտնվել — լրացրեք տվյալները ստորև",
+    "warehouse.phone_client_not_found": "Հաճախորդ չի գտնվել — մուտքագրեք համարանիշը և մեքենայի տվյալները ստորև",
+    "warehouse.phone_client_no_cars": "{name} - մեքենաներ չկան — մուտքագրեք համարանիշը և մեքենայի տվյալները ստորև",
     "warehouse.msg_quantity_number": "Քանակը պետք է լինի թիվ!",
     "warehouse.msg_price_number": "Գինը պետք է լինի թիվ!",
     "warehouse.msg_enter_car_brand": "Մուտքագրեք մեքենայի մակնիշը!",

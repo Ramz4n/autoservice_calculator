@@ -224,6 +224,8 @@
     "warehouse.order_btn": "Заказать",
     "warehouse.enter_car_number": "Введите госномер",
     "warehouse.car_not_found": "Машина не найдена — заполните данные ниже",
+    "warehouse.phone_client_not_found": "Клиент не найден — введите госномер и данные авто ниже",
+    "warehouse.phone_client_no_cars": "{name}: машин в базе нет — введите госномер и данные авто ниже",
     "warehouse.msg_quantity_number": "Количество должно быть числом!",
     "warehouse.msg_price_number": "Цена должна быть числом!",
     "warehouse.msg_enter_car_brand": "Введите марку машины!",

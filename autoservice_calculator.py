@@ -103,6 +103,16 @@ PHONE_MASK = "+7(___)-___-__-__"
 PHONE_SLOTS = [i for i, c in enumerate(PHONE_MASK) if c == "_"]
 
 
+def phone_mask_digits(text):
+    """Цифры номера после +7 (до 10). Понимает и маску +7(909)-58_-__-__, и обычный ввод 89095813910"""
+    if len(text) == len(PHONE_MASK) and text.startswith("+7("):
+        return "".join(text[pos] for pos in PHONE_SLOTS if text[pos].isdigit())
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 11 and digits[0] in "78":
+        digits = digits[1:]
+    return digits[-10:]
+
+
 def format_phone_ru(digits):
     """Подставить до 10 цифр после +7 в маску: "909581" -> +7(909)-581-__-__"""
     chars = list(PHONE_MASK)
@@ -717,6 +727,136 @@ class AutoServiceApp:
             # Порядок как в файле - вверху самые частые (русские), повторы убираем
             self._first_names = list(dict.fromkeys(names))
         return self._first_names
+
+    def attach_phone_mask(self, entry):
+        """Поле телефона с маской +7(___)-___-__-__ (номер читать через phone_mask_digits,
+        подставлять через set_phone_value)"""
+        entry.delete(0, tk.END)
+        entry.insert(0, PHONE_MASK)
+
+        # Ввод номера по маске +7(___)-___-__-__: цифры стоят на своих позициях,
+        # удалённая цифра заменяется на "_", остальные не сдвигаются
+        def set_phone_text(text):
+            entry.delete(0, tk.END)
+            entry.insert(0, text)
+
+        def phone_slots_in(start, end):
+            """Номера позиций цифр (0..9), попадающих в диапазон символов [start, end)"""
+            return [i for i, pos in enumerate(PHONE_SLOTS) if start <= pos < end]
+
+        def put_phone_digits(slot, digits):
+            """Записать цифры подряд начиная с позиции slot, курсор - за последней"""
+            chars = list(entry.get())
+            for d in digits:
+                if slot >= len(PHONE_SLOTS):
+                    break
+                chars[PHONE_SLOTS[slot]] = d
+                slot += 1
+            set_phone_text("".join(chars))
+            entry.icursor(PHONE_SLOTS[slot] if slot < len(PHONE_SLOTS) else len(PHONE_MASK))
+
+        def clear_phone_selection():
+            """Стереть выделенные цифры, вернуть позицию начала выделения (или None)"""
+            if not entry.select_present():
+                return None
+            start, end = entry.index("sel.first"), entry.index("sel.last")
+            chars = list(entry.get())
+            for i in phone_slots_in(start, end):
+                chars[PHONE_SLOTS[i]] = "_"
+            set_phone_text("".join(chars))
+            entry.icursor(start)
+            return start
+
+        def on_phone_key(event):
+            if event.state & 0x4:  # Ctrl+C / Ctrl+V / Ctrl+A - стандартное поведение
+                return None
+            cursor = entry.index(tk.INSERT)
+            if event.keysym == "BackSpace":
+                if clear_phone_selection() is None:
+                    before = phone_slots_in(0, cursor)
+                    if before:
+                        slot = before[-1]
+                        chars = list(entry.get())
+                        chars[PHONE_SLOTS[slot]] = "_"
+                        set_phone_text("".join(chars))
+                        entry.icursor(PHONE_SLOTS[slot])
+                return "break"
+            if event.keysym == "Delete":
+                if clear_phone_selection() is None:
+                    after = phone_slots_in(cursor, len(PHONE_MASK))
+                    if after:
+                        chars = list(entry.get())
+                        chars[PHONE_SLOTS[after[0]]] = "_"
+                        set_phone_text("".join(chars))
+                        entry.icursor(PHONE_SLOTS[after[0]])
+                return "break"
+            if event.char.isdigit():
+                start = clear_phone_selection()
+                if start is not None:
+                    cursor = start
+                after = phone_slots_in(cursor, len(PHONE_MASK))
+                if after:
+                    put_phone_digits(after[0], event.char)
+                return "break"
+            # Буквы и прочие символы не пропускаем; стрелки, Tab, Enter и т.п. (без символа) - как обычно
+            return "break" if event.char.isprintable() and event.char else None
+
+        def on_phone_paste(event):
+            try:
+                digits = ''.join(c for c in entry.clipboard_get() if c.isdigit())
+            except tk.TclError:
+                return "break"
+            if not digits:
+                return "break"
+            if len(digits) >= 10:
+                # Номер целиком: 89095813910 / 79095813910 / 9095813910
+                if len(digits) == 11 and digits[0] in "78":
+                    digits = digits[1:]
+                set_phone_text(PHONE_MASK)
+                put_phone_digits(0, digits[:10])
+            else:
+                start = clear_phone_selection()
+                cursor = start if start is not None else entry.index(tk.INSERT)
+                after = phone_slots_in(cursor, len(PHONE_MASK))
+                if after:
+                    put_phone_digits(after[0], digits)
+            return "break"
+
+        def on_phone_click(event):
+            # В пустое поле курсор ставим на первую цифру, а не туда, куда попал клик
+            if not any(c.isdigit() for c in entry.get()[2:]):
+                entry.after_idle(lambda: entry.icursor(PHONE_SLOTS[0]))
+
+        entry.bind("<KeyPress>", on_phone_key)
+        entry.bind("<<Paste>>", on_phone_paste)
+        entry.bind("<<Cut>>", lambda e: "break")
+        entry.bind("<ButtonRelease-1>", on_phone_click)
+        entry.bind("<FocusIn>", on_phone_click)
+
+    def snapshot_fields(self, fields):
+        """Текущие значения полей {ключ: поле} - чтобы потом понять, что подставил поиск"""
+        return {key: field.get() for key, field in fields.items()}
+
+    def autofilled_diff(self, fields, before):
+        """Какие поля изменились после поиска (их подставила программа): {ключ: значение}"""
+        after = self.snapshot_fields(fields)
+        return {key: value for key, value in after.items() if value != before[key]}
+
+    def undo_autofill(self, fields, filled):
+        """Стереть подставленное поиском по прошлому номеру. Поле, которое уже поправили руками, не трогаем"""
+        for key, value in filled.items():
+            field = fields[key]
+            if field.get() != value:
+                continue
+            if value.startswith("+7("):
+                self.set_phone_value(field, "")
+            else:
+                field.delete(0, tk.END)
+
+    def set_phone_value(self, entry, phone):
+        """Подставить номер в поле с маской (+79095813910 / 89095813910 / пусто)"""
+        entry.delete(0, tk.END)
+        entry.insert(0, format_phone_ru(phone_mask_digits(phone or "")))
 
     def attach_name_autocomplete(self, entry, listbox_parent, position="right"):
         """Подсказка имён из config/first_names.txt для поля ввода имени.
@@ -1505,6 +1645,7 @@ class AutoServiceApp:
         ctk.CTkLabel(row_client_phone, text=self.tr("works.client_phone"), width=150, anchor="w").pack(side=tk.LEFT, padx=5)
         self.client_phone_entry = ctk.CTkEntry(row_client_phone, width=200, fg_color="white", text_color="black")
         self.client_phone_entry.pack(side=tk.LEFT, padx=5)
+        self.attach_phone_mask(self.client_phone_entry)
         # При вводе телефона ищем данные клиента
         self.client_phone_entry.bind('<KeyRelease>', self.on_client_phone_keyrelease)
 
@@ -1892,14 +2033,14 @@ class AutoServiceApp:
 
     def on_booking_select(self, choice):
         """Обработчик выбора записи из списка"""
+        self.works_phone_fill = None
         if choice and choice in self.bookings_data:
             booking_info = self.bookings_data[choice]
             self.selected_booking_id = booking_info['id']
             # Автозаполнение полей клиента
             self.client_name_entry.delete(0, tk.END)
             self.client_name_entry.insert(0, booking_info['name'])
-            self.client_phone_entry.delete(0, tk.END)
-            self.client_phone_entry.insert(0, booking_info['phone'])
+            self.set_phone_value(self.client_phone_entry, booking_info['phone'])
             # Загружаем машины этого клиента (передаём car_id из записи)
             self.load_client_cars(booking_info['phone'], booking_info['name'], booking_info.get('car_id'))
 
@@ -1995,11 +2136,21 @@ class AutoServiceApp:
 
     def on_client_phone_keyrelease(self, event):
         """При вводе телефона - искать данные клиента и его машины"""
-        phone_raw = self.client_phone_entry.get().strip()
-        phone_digits = ''.join(c for c in phone_raw if c.isdigit())
+        # Ищем только когда номер введён полностью (в маске +7 всегда есть - считаем только цифры после него)
+        phone_digits = phone_mask_digits(self.client_phone_entry.get())
+        phone_raw = "+7" + phone_digits
+        fields = self.works_phone_fill_fields()
 
-        # Ищем только если введено 10-11 цифр
-        if len(phone_digits) >= 10:
+        # Номер изменили - убираем всё, что подставили по прошлому номеру
+        fill = getattr(self, "works_phone_fill", None)
+        if fill and fill["digits"] != phone_digits:
+            self.works_phone_fill = None
+            self.undo_autofill(fields, fill["filled"])
+        elif fill:
+            return  # тот же номер уже обработан
+
+        if len(phone_digits) == 10:
+            before = self.snapshot_fields(fields)
             # Нормализуем до последних 10 цифр
             last_10 = phone_digits[-10:]
 
@@ -2025,11 +2176,17 @@ class AutoServiceApp:
 
             # Загружаем машины клиента
             self.load_client_cars(phone_raw, client_name or "")
+            self.works_phone_fill = {"digits": phone_digits, "filled": self.autofilled_diff(fields, before)}
         else:
             # Если цифр меньше 10 - очищаем список машин
             self.client_cars_combo.configure(values=[self.tr("works.new_car")])
             self.client_cars_combo.set(self.tr("works.new_car"))
             self.client_cars_data = {}
+
+    def works_phone_fill_fields(self):
+        """Поля вкладки "Добавить работу", которые заполняет поиск по телефону"""
+        return {"name": self.client_name_entry, "brand": self.car_brand_entry, "model": self.car_model_entry,
+                "number": self.car_number_entry, "vin": self.vin_entry}
 
     def on_car_number_change(self, event=None):
         """Автозаполнение по госномеру"""
@@ -2077,8 +2234,7 @@ class AutoServiceApp:
             self.client_name_entry.insert(0, client_info["client_name"])
 
         if client_info.get("client_phone"):
-            self.client_phone_entry.delete(0, tk.END)
-            self.client_phone_entry.insert(0, client_info["client_phone"])
+            self.set_phone_value(self.client_phone_entry, client_info["client_phone"])
 
         # Загружаем список машин клиента
         self.load_client_cars_without_autofill(client_info.get("client_phone", ""), client_info.get("client_name", ""))
@@ -2166,6 +2322,17 @@ class AutoServiceApp:
 
     def on_client_car_select(self, choice):
         """Обработчик выбора машины клиента"""
+        fill = getattr(self, "works_phone_fill", None)
+        if fill:
+            fields = self.works_phone_fill_fields()
+            before = self.snapshot_fields(fields)
+            self._fill_client_car(choice)
+            # Машину выбрали из списка по телефону - при смене номера её тоже уберём
+            fill["filled"].update(self.autofilled_diff(fields, before))
+        else:
+            self._fill_client_car(choice)
+
+    def _fill_client_car(self, choice):
         # Сбрасываем красный цвет при любом выборе
         self.client_cars_combo.configure(text_color="black")
 
@@ -2614,7 +2781,13 @@ class AutoServiceApp:
         # Данные клиента
         booking_id = getattr(self, 'selected_booking_id', None)
         client_name = self.client_name_entry.get().strip()
-        client_phone = self.client_phone_entry.get().strip()
+        # Телефон из маски -> +7XXXXXXXXXX; неполный номер не сохраняем
+        phone_digits = phone_mask_digits(self.client_phone_entry.get())
+        if phone_digits and len(phone_digits) != 10:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_enter_phone_after_plus7"))
+            self.client_phone_entry.focus_set()
+            return
+        client_phone = "+7" + phone_digits if phone_digits else ""
 
         # Получаем telegram_user_id из записи если есть
         telegram_user_id = None
@@ -2801,6 +2974,7 @@ class AutoServiceApp:
     def clear_work_form(self, restore_warehouse=True):
         """Очистить форму добавления работы"""
         self.editing_work_id = None
+        self.works_phone_fill = None
         self.worker_combo.set(self.tr("works.select_master"))
         self.works_list = []
         for item in self.works_tree.get_children():
@@ -2811,7 +2985,7 @@ class AutoServiceApp:
         self.mileage_entry.delete(0, tk.END)
         self.vin_entry.delete(0, tk.END)
         self.client_name_entry.delete(0, tk.END)
-        self.client_phone_entry.delete(0, tk.END)
+        self.set_phone_value(self.client_phone_entry, "")
         self.booking_combo.set("")
         self.selected_booking_id = None
         self.client_cars_combo.configure(values=[self.tr("works.new_car")])
@@ -2993,20 +3167,24 @@ class AutoServiceApp:
 
     def show_add_part_form(self):
         """Показать форму добавления запчасти"""
-        if self.add_part_form_visible:
-            self.hide_add_part_form()
+        # Окно уже открыто - просто поднимаем его. Раньше кнопка работала как переключатель,
+        # и после закрытия окна крестиком (флаг не сбрасывался) открывалась только со второго нажатия
+        if self.add_part_form_visible and self.add_part_form_frame.winfo_exists():
+            self.add_part_form_frame.lift()
+            self.add_part_form_frame.focus_force()
             return
 
         self.add_part_form_frame = ctk.CTkToplevel(self.root)
         self.add_part_form_frame.title(self.tr("warehouse.order_part"))
-        self.add_part_form_frame.geometry("550x500")
+        self.add_part_form_frame.geometry("550x540")
         self.add_part_form_frame.transient(self.root)
         self.add_part_form_frame.grab_set()
+        self.add_part_form_frame.protocol("WM_DELETE_WINDOW", self.hide_add_part_form)
 
         # Центрируем окно
         self.add_part_form_frame.update_idletasks()
         x = (self.add_part_form_frame.winfo_screenwidth() - 550) // 2
-        y = (self.add_part_form_frame.winfo_screenheight() - 500) // 2
+        y = (self.add_part_form_frame.winfo_screenheight() - 540) // 2
         self.add_part_form_frame.geometry(f"+{x}+{y}")
 
         # Прокручиваемый контейнер
@@ -3024,6 +3202,19 @@ class AutoServiceApp:
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
         self.wh_car_number_entry.bind('<Return>', lambda e: self.search_car_for_warehouse())
         ctk.CTkButton(row1, text=self.tr("warehouse.find_btn"), command=self.search_car_for_warehouse, width=70).pack(side=tk.LEFT, padx=5)
+
+        # Поиск по телефону клиента - подставляет госномер его машины
+        row_phone_search = ctk.CTkFrame(form_container)
+        row_phone_search.pack(fill=tk.X, pady=5)
+        ctk.CTkLabel(row_phone_search, text=self.tr("bookings.add_window_phone"), width=120, anchor="w").pack(side=tk.LEFT, padx=5)
+        self.wh_phone_entry = ctk.CTkEntry(row_phone_search, width=150, fg_color="white", text_color="black")
+        self.wh_phone_entry.pack(side=tk.LEFT, padx=5)
+        self.attach_phone_mask(self.wh_phone_entry)
+        self.wh_phone_entry.bind("<KeyRelease>", self.on_wh_phone_keyrelease)
+        self.wh_phone_cars_combo = ctk.CTkComboBox(row_phone_search, width=200, values=[], state="readonly",
+                                                   command=self.on_wh_phone_car_select)
+        self.wh_phone_cars_numbers = {}
+        self.wh_phone_fill = None  # что подставил поиск по телефону
 
         # Информация о найденной машине
         self.wh_car_info_label = ctk.CTkLabel(form_container, text="", text_color="gray")
@@ -3068,32 +3259,11 @@ class AutoServiceApp:
         row_client.pack(fill=tk.X, pady=3, padx=10)
         ctk.CTkLabel(row_client, text=self.tr("works.client_name"), width=100, anchor="w").pack(side=tk.LEFT)
         self.wh_new_client_name_entry = ctk.CTkEntry(row_client, width=200, fg_color="white", text_color="black")
-        self.wh_new_client_name_entry.pack(side=tk.LEFT, padx=5)
-
-        row_phone = ctk.CTkFrame(self.wh_new_car_frame)
-        row_phone.pack(fill=tk.X, pady=3, padx=10)
-        ctk.CTkLabel(row_phone, text=self.tr("bookings.add_window_phone"), width=100, anchor="w").pack(side=tk.LEFT)
-
-        # Валидация телефона: +7 и только 10 цифр после
-        def validate_wh_phone(new_value):
-            if len(new_value) < 2:
-                return False
-            if not new_value.startswith("+7"):
-                return False
-            if new_value == "+7":
-                return True
-            after_prefix = new_value[2:]
-            if not after_prefix.isdigit():
-                return False
-            if len(after_prefix) > 10:
-                return False
-            return True
-
-        vcmd_phone = (self.add_part_form_frame.register(validate_wh_phone), '%P')
-        self.wh_new_phone_entry = ctk.CTkEntry(row_phone, width=200, fg_color="white", text_color="black",
-                                                validate="key", validatecommand=vcmd_phone)
-        self.wh_new_phone_entry.pack(side=tk.LEFT, padx=5, pady=(0, 10))
-        self.wh_new_phone_entry.insert(0, "+7")
+        self.wh_new_client_name_entry.pack(side=tk.LEFT, padx=5, pady=(0, 10))
+        # Подсказка имён - список под полем (справа его обрезает край окна). Рисуем в form_container,
+        # а не в рамке новой машины: поле имени в ней последнее, и рамка обрезала бы список снизу
+        self.attach_name_autocomplete(self.wh_new_client_name_entry, form_container, position="below")
+        # Телефон нового клиента берётся из поля "Телефон" вверху окна - второго поля здесь нет
 
         # Название запчасти
         row2 = ctk.CTkFrame(form_container)
@@ -3147,8 +3317,11 @@ class AutoServiceApp:
         """Поиск машины по госномеру для склада"""
         car_number = self.wh_car_number_entry.get().strip()
         if not car_number:
-            self.wh_car_info_label.configure(text=self.tr("warehouse.enter_car_number"), text_color="orange")
             self.wh_selected_car_id = None
+            if getattr(self, "wh_form_by_phone", False):
+                # Форму новой машины открыл поиск по телефону - не закрываем, ждём госномер
+                return
+            self.wh_car_info_label.configure(text=self.tr("warehouse.enter_car_number"), text_color="orange")
             self.hide_new_car_form()
             return
 
@@ -3168,17 +3341,115 @@ class AutoServiceApp:
         if not self.wh_new_car_visible:
             self.wh_new_car_frame.pack(fill=tk.X, pady=10, after=self.wh_car_info_label)
             self.wh_new_car_visible = True
-            # Автоматически заполняем госномер
-            car_number = self.wh_car_number_entry.get().strip().upper()
+            # Телефон уже введён и клиент известен - подставляем его имя
+            phone_digits = phone_mask_digits(self.wh_phone_entry.get())
+            if len(phone_digits) == 10 and not self.wh_new_client_name_entry.get().strip():
+                fields = self.wh_phone_fill_fields()
+                before = self.snapshot_fields(fields)
+                client_name = self.db.get_client_name_by_phone(phone_digits)
+                if client_name:
+                    self.wh_new_client_name_entry.insert(0, client_name)
+                if self.wh_phone_fill and self.wh_phone_fill["digits"] == phone_digits:
+                    self.wh_phone_fill["filled"].update(self.autofilled_diff(fields, before))
             # Увеличиваем окно
-            self.add_part_form_frame.geometry("550x620")
+            self.add_part_form_frame.geometry("550x630")
 
     def hide_new_car_form(self):
         """Скрыть форму для новой машины"""
+        self.wh_form_by_phone = False
         if self.wh_new_car_visible:
             self.wh_new_car_frame.pack_forget()
             self.wh_new_car_visible = False
-            self.add_part_form_frame.geometry("550x500")
+            self.add_part_form_frame.geometry("550x540")
+
+    def on_wh_phone_keyrelease(self, event=None):
+        """Поиск клиента по телефону (склад): одна машина - подставляем госномер, несколько - список"""
+        digits = phone_mask_digits(self.wh_phone_entry.get())
+        fields = self.wh_phone_fill_fields()
+
+        # Номер изменили - убираем всё, что подставили по прошлому номеру
+        if self.wh_phone_fill and self.wh_phone_fill["digits"] != digits:
+            filled = self.wh_phone_fill["filled"]
+            self.wh_phone_fill = None
+            self.wh_phone_cars_combo.pack_forget()
+            self.undo_autofill(fields, filled)
+            if not self.wh_car_number_entry.get().strip():
+                # Госномер был подставлен и стёрт (или форму новой машины открыл поиск по телефону) - сбрасываем
+                self.wh_selected_car_id = None
+                self.wh_car_info_label.configure(text="")
+                self.hide_new_car_form()
+            elif self.wh_car_info_label.cget("text") == getattr(self, "wh_phone_msg", None):
+                self.wh_car_info_label.configure(text="")
+        if len(digits) != 10:
+            self.wh_phone_cars_combo.pack_forget()
+            return
+        if self.wh_phone_fill:
+            return
+
+        before = self.snapshot_fields(fields)
+        self.wh_phone_fill = {"digits": digits, "filled": {}}
+        self.fill_wh_by_phone(digits)
+        self.wh_phone_fill["filled"] = self.autofilled_diff(fields, before)
+
+    def wh_phone_fill_fields(self):
+        """Поля формы склада, которые заполняет поиск по телефону"""
+        return {"car_number": self.wh_car_number_entry, "new_name": self.wh_new_client_name_entry}
+
+    def fill_wh_by_phone(self, digits):
+        # Госномер уже введён вручную - его не трогаем (это может быть новая машина известного клиента),
+        # только подставляем имя клиента в открытую форму новой машины
+        if self.wh_car_number_entry.get().strip():
+            self.wh_phone_cars_combo.pack_forget()
+            if self.wh_new_car_visible and not self.wh_new_client_name_entry.get().strip():
+                client_name = self.db.get_client_name_by_phone(digits)
+                if client_name:
+                    self.wh_new_client_name_entry.insert(0, client_name)
+            return
+
+        self.wh_phone_cars_numbers = {}
+        for car_brand, car_model, car_number, _vin in self.db.get_client_cars_by_phone(digits):
+            if car_number:
+                display = f"{car_brand or ''} {car_model or ''} {car_number}".strip()
+                self.wh_phone_cars_numbers[display] = car_number
+
+        if not self.wh_phone_cars_numbers:
+            self.wh_phone_cars_combo.pack_forget()
+            client_name = self.db.get_client_name_by_phone(digits)
+            text = (self.tr("warehouse.phone_client_no_cars", name=client_name) if client_name
+                    else self.tr("warehouse.phone_client_not_found"))
+            # Клиента или его машин нет в базе - сразу открываем форму новой машины,
+            # как при ненайденном госномере
+            self.wh_phone_msg = text
+            self.wh_selected_car_id = None
+            self.show_new_car_form()
+            self.wh_form_by_phone = True
+            self.wh_car_info_label.configure(text=text, text_color="orange")
+            return
+
+        if len(self.wh_phone_cars_numbers) == 1:
+            self.wh_phone_cars_combo.pack_forget()
+            self.fill_wh_car_number(next(iter(self.wh_phone_cars_numbers.values())))
+        else:
+            self.wh_phone_cars_combo.configure(values=list(self.wh_phone_cars_numbers))
+            self.wh_phone_cars_combo.set(self.tr("bookings.add_window_client_cars"))
+            self.wh_phone_cars_combo.pack(side=tk.LEFT, padx=5)
+
+    def on_wh_phone_car_select(self, choice):
+        """Выбрана машина клиента из списка (склад)"""
+        number = self.wh_phone_cars_numbers.get(choice)
+        if number:
+            fields = self.wh_phone_fill_fields()
+            before = self.snapshot_fields(fields)
+            self.fill_wh_car_number(number)
+            # Машину выбрали из списка по телефону - при смене номера её тоже уберём
+            if self.wh_phone_fill:
+                self.wh_phone_fill["filled"].update(self.autofilled_diff(fields, before))
+
+    def fill_wh_car_number(self, number):
+        """Подставить госномер в форму склада и найти машину"""
+        self.wh_car_number_entry.delete(0, tk.END)
+        self.wh_car_number_entry.insert(0, number)
+        self.search_car_for_warehouse()
 
     # === Автокомплит для марки (форма склада) ===
     def on_wh_brand_keyrelease(self, event):
@@ -3324,21 +3595,29 @@ class AutoServiceApp:
                 car_id = car_info.get("car_id")
                 self.wh_selected_car_id = car_id
 
+        # Форма новой машины открыта (например, поиском по телефону), а госномер не введён
+        if car_id is None and self.wh_new_car_visible and not car_number:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"))
+            self.wh_car_number_entry.focus_set()
+            return
+
         # Если машина не найдена и форма новой машины видна — создаём клиента и машину
         if car_id is None and self.wh_new_car_visible and car_number:
             brand = self.wh_new_brand_entry.get().strip()
             model = self.wh_new_model_entry.get().strip()
             client_name = self.wh_new_client_name_entry.get().strip()
-            phone = self.wh_new_phone_entry.get().strip()
+            phone_digits = phone_mask_digits(self.wh_phone_entry.get())
 
             if not brand:
                 messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_enter_car_brand"))
                 return
 
             # Проверка телефона: должен быть +7 и 10 цифр
-            if phone == "+7" or len(phone) < 12:
+            if len(phone_digits) != 10:
                 messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_enter_full_phone"))
+                self.wh_phone_entry.focus_set()
                 return
+            phone = "+7" + phone_digits
 
             # Создаём или находим клиента
             client_id = self.db.get_or_create_client(
@@ -6806,112 +7085,14 @@ class AutoServiceApp:
         phone_row.pack(anchor="w", fill=tk.X, pady=(0, 10))
         phone_entry = ctk.CTkEntry(phone_row, width=220, font=("Arial", 14))
         phone_entry.pack(side=tk.LEFT)
-        phone_entry.insert(0, PHONE_MASK)
-
-        # Ввод номера по маске +7(___)-___-__-__: цифры стоят на своих позициях,
-        # удалённая цифра заменяется на "_", остальные не сдвигаются
-        def set_phone_text(text):
-            phone_entry.delete(0, tk.END)
-            phone_entry.insert(0, text)
-
-        def phone_slots_in(start, end):
-            """Номера позиций цифр (0..9), попадающих в диапазон символов [start, end)"""
-            return [i for i, pos in enumerate(PHONE_SLOTS) if start <= pos < end]
-
-        def put_phone_digits(slot, digits):
-            """Записать цифры подряд начиная с позиции slot, курсор - за последней"""
-            chars = list(phone_entry.get())
-            for d in digits:
-                if slot >= len(PHONE_SLOTS):
-                    break
-                chars[PHONE_SLOTS[slot]] = d
-                slot += 1
-            set_phone_text("".join(chars))
-            phone_entry.icursor(PHONE_SLOTS[slot] if slot < len(PHONE_SLOTS) else len(PHONE_MASK))
-
-        def clear_phone_selection():
-            """Стереть выделенные цифры, вернуть позицию начала выделения (или None)"""
-            if not phone_entry.select_present():
-                return None
-            start, end = phone_entry.index("sel.first"), phone_entry.index("sel.last")
-            chars = list(phone_entry.get())
-            for i in phone_slots_in(start, end):
-                chars[PHONE_SLOTS[i]] = "_"
-            set_phone_text("".join(chars))
-            phone_entry.icursor(start)
-            return start
-
-        def on_phone_key(event):
-            if event.state & 0x4:  # Ctrl+C / Ctrl+V / Ctrl+A - стандартное поведение
-                return None
-            cursor = phone_entry.index(tk.INSERT)
-            if event.keysym == "BackSpace":
-                if clear_phone_selection() is None:
-                    before = phone_slots_in(0, cursor)
-                    if before:
-                        slot = before[-1]
-                        chars = list(phone_entry.get())
-                        chars[PHONE_SLOTS[slot]] = "_"
-                        set_phone_text("".join(chars))
-                        phone_entry.icursor(PHONE_SLOTS[slot])
-                return "break"
-            if event.keysym == "Delete":
-                if clear_phone_selection() is None:
-                    after = phone_slots_in(cursor, len(PHONE_MASK))
-                    if after:
-                        chars = list(phone_entry.get())
-                        chars[PHONE_SLOTS[after[0]]] = "_"
-                        set_phone_text("".join(chars))
-                        phone_entry.icursor(PHONE_SLOTS[after[0]])
-                return "break"
-            if event.char.isdigit():
-                start = clear_phone_selection()
-                if start is not None:
-                    cursor = start
-                after = phone_slots_in(cursor, len(PHONE_MASK))
-                if after:
-                    put_phone_digits(after[0], event.char)
-                return "break"
-            # Буквы и прочие символы не пропускаем; стрелки, Tab, Enter и т.п. (без символа) - как обычно
-            return "break" if event.char.isprintable() and event.char else None
-
-        def on_phone_paste(event):
-            try:
-                digits = ''.join(c for c in phone_entry.clipboard_get() if c.isdigit())
-            except tk.TclError:
-                return "break"
-            if not digits:
-                return "break"
-            if len(digits) >= 10:
-                # Номер целиком: 89095813910 / 79095813910 / 9095813910
-                if len(digits) == 11 and digits[0] in "78":
-                    digits = digits[1:]
-                set_phone_text(PHONE_MASK)
-                put_phone_digits(0, digits[:10])
-            else:
-                start = clear_phone_selection()
-                cursor = start if start is not None else phone_entry.index(tk.INSERT)
-                after = phone_slots_in(cursor, len(PHONE_MASK))
-                if after:
-                    put_phone_digits(after[0], digits)
-            return "break"
-
-        def on_phone_click(event):
-            # В пустое поле курсор ставим на первую цифру, а не туда, куда попал клик
-            if not any(c.isdigit() for c in phone_entry.get()[2:]):
-                phone_entry.after_idle(lambda: phone_entry.icursor(PHONE_SLOTS[0]))
-
-        phone_entry.bind("<KeyPress>", on_phone_key)
-        phone_entry.bind("<<Paste>>", on_phone_paste)
-        phone_entry.bind("<<Cut>>", lambda e: "break")
-        phone_entry.bind("<ButtonRelease-1>", on_phone_click)
-        phone_entry.bind("<FocusIn>", on_phone_click)
+        self.attach_phone_mask(phone_entry)
 
         # Выбор машины клиента, найденного по телефону (показывается, если машин несколько)
         phone_cars_combo = ctk.CTkComboBox(phone_row, width=180, font=("Arial", 13), values=[], state="readonly")
         phone_cars_visible = [False]
         phone_cars_numbers = {}
-        last_checked_phone = [""]
+        # Что подставил поиск по телефону: {"digits": номер, "filled": {поле: значение}}
+        phone_fill = [None]
 
         # === ИМЯ КЛИЕНТА ===
         ctk.CTkLabel(main_frame, text=self.tr("works.client_name"), font=("Arial", 15)).pack(anchor="w", pady=(0, 5))
@@ -6960,7 +7141,7 @@ class AutoServiceApp:
                         phone_digits = ''.join(c for c in owner_phone if c.isdigit())
                         if len(phone_digits) >= 10:
                             # Временно отключаем валидацию для вставки
-                            set_phone_text(format_phone_ru(phone_digits[-10:]))
+                            self.set_phone_value(phone_entry, phone_digits[-10:])
                 else:
                     # Авто не найдено - показываем поля марки/модели, сбрасываем данные
                     car_found_by_number[0] = False
@@ -7001,21 +7182,38 @@ class AutoServiceApp:
         def on_phone_car_select(choice):
             number = phone_cars_numbers.get(choice)
             if number:
+                before = self.snapshot_fields(phone_fill_fields)
                 fill_car_number(number)
+                # Машину выбрали из списка по телефону - при смене номера её тоже уберём
+                if phone_fill[0]:
+                    phone_fill[0]["filled"].update(self.autofilled_diff(phone_fill_fields, before))
 
         phone_cars_combo.configure(command=on_phone_car_select)
+
+        phone_fill_fields = {"name": name_entry, "car_number": car_number_entry}
 
         def check_phone(*args):
             """Проверка телефона - подставляем имя клиента и его машины"""
             phone_digits = ''.join(c for c in phone_entry.get() if c.isdigit())
+            # Номер изменили - убираем всё, что подставили по прошлому номеру
+            if phone_fill[0] and phone_fill[0]["digits"] != phone_digits:
+                filled = phone_fill[0]["filled"]
+                phone_fill[0] = None
+                hide_phone_cars()
+                self.undo_autofill(phone_fill_fields, filled)
+                if "car_number" in filled:
+                    check_car_number()  # сбросит найденную марку/модель
             if len(phone_digits) != 11:
-                last_checked_phone[0] = ""
                 hide_phone_cars()
                 return
-            if phone_digits == last_checked_phone[0]:
+            if phone_fill[0]:
                 return
-            last_checked_phone[0] = phone_digits
+            before = self.snapshot_fields(phone_fill_fields)
+            phone_fill[0] = {"digits": phone_digits, "filled": {}}
+            fill_by_phone(phone_digits)
+            phone_fill[0]["filled"] = self.autofilled_diff(phone_fill_fields, before)
 
+        def fill_by_phone(phone_digits):
             client_name = self.db.get_client_name_by_phone(phone_digits)
             if client_name and not name_entry.get().strip():
                 name_entry.insert(0, client_name)
@@ -7509,6 +7707,7 @@ class AutoServiceApp:
 
     def edit_booking_in_add_work(self):
         """Редактировать запись - переход на вкладку добавления работы (без проверки статуса)"""
+        self.works_phone_fill = None
         selection = self.bookings_tree.selection()
         if not selection:
             messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
@@ -7541,8 +7740,7 @@ class AutoServiceApp:
 
         self.client_name_entry.delete(0, tk.END)
         self.client_name_entry.insert(0, full_name)
-        self.client_phone_entry.delete(0, tk.END)
-        self.client_phone_entry.insert(0, phone)
+        self.set_phone_value(self.client_phone_entry, phone)
 
         # Загружаем машины клиента
         self.load_client_cars(phone, full_name, car_id)

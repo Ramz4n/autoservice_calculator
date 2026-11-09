@@ -231,6 +231,8 @@
     "warehouse.order_btn": "Order",
     "warehouse.enter_car_number": "Enter plate number",
     "warehouse.car_not_found": "Car not found — fill in the details below",
+    "warehouse.phone_client_not_found": "Client not found — enter the plate number and car details below",
+    "warehouse.phone_client_no_cars": "{name}: no cars on file — enter the plate number and car details below",
     "warehouse.msg_quantity_number": "Quantity must be a number!",
     "warehouse.msg_price_number": "Price must be a number!",
     "warehouse.msg_enter_car_brand": "Enter the car brand!",
