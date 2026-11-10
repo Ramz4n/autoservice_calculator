@@ -283,6 +283,8 @@
     "warehouse.quantity_label": "Քանակ:",
     "warehouse.notes_label": "Նշումներ:",
     "warehouse.paid_checkbox_label": "Հաճախորդն արդեն վճարել է (օրինակ՝ պահպանման համար) — այս գումարը չավելացնել հաշվին աշխատանքի մեջ օգտագործելիս",
+    "warehouse.paid_short": "Վճարված է նախապես — չավելացնել հաշվին",
+    "warehouse.quantity_short": "Քան.",
     "warehouse.already_paid_marker": "արդեն վճարված է",
     "warehouse.ctx_mark_paid": "Նշել որպես վճարված",
     "warehouse.ctx_mark_unpaid": "Նշել որպես չվճարված",

@@ -283,6 +283,8 @@
     "warehouse.quantity_label": "რაოდენობა:",
     "warehouse.notes_label": "შენიშვნები:",
     "warehouse.paid_checkbox_label": "კლიენტმა უკვე გადაიხადა (მაგ. შენახვა) — არ დაემატოს ეს თანხა ინვოისში სამუშაოზე გაცემისას",
+    "warehouse.paid_short": "წინასწარ გადახდილი — არ დაემატოს ანგარიშს",
+    "warehouse.quantity_short": "რაოდ.",
     "warehouse.already_paid_marker": "უკვე გადახდილია",
     "warehouse.ctx_mark_paid": "მონიშვნა როგორც გადახდილი",
     "warehouse.ctx_mark_unpaid": "მონიშვნა როგორც გადაუხდელი",

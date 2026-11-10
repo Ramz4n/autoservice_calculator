@@ -276,6 +276,8 @@
     "warehouse.quantity_label": "Количество:",
     "warehouse.notes_label": "Примечания:",
     "warehouse.paid_checkbox_label": "Клиент уже оплатил (например, хранение) — не добавлять сумму в счёт при выдаче в работу",
+    "warehouse.paid_short": "Оплачено заранее — не включать в счёт",
+    "warehouse.quantity_short": "Кол-во",
     "warehouse.already_paid_marker": "оплачено ранее",
     "warehouse.ctx_mark_paid": "Отметить оплаченным",
     "warehouse.ctx_mark_unpaid": "Отметить неоплаченным",

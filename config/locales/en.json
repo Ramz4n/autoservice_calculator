@@ -283,6 +283,8 @@
     "warehouse.quantity_label": "Quantity:",
     "warehouse.notes_label": "Notes:",
     "warehouse.paid_checkbox_label": "Client already paid (e.g. storage) — don't add this amount to the invoice when issued for a job",
+    "warehouse.paid_short": "Paid in advance — don't add to the bill",
+    "warehouse.quantity_short": "Qty",
     "warehouse.already_paid_marker": "already paid",
     "warehouse.ctx_mark_paid": "Mark as paid",
     "warehouse.ctx_mark_unpaid": "Mark as unpaid",

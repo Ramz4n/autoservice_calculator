@@ -272,6 +272,8 @@
     "warehouse.quantity_label": "Količina:",
     "warehouse.notes_label": "Napomene:",
     "warehouse.paid_checkbox_label": "Klijent je već platio (npr. skladištenje) — ne dodavati ovaj iznos na račun prilikom izdavanja za posao",
+    "warehouse.paid_short": "Plaćeno unapred — ne dodavati u račun",
+    "warehouse.quantity_short": "Kol.",
     "warehouse.already_paid_marker": "već plaćeno",
     "warehouse.ctx_mark_paid": "Označi kao plaćeno",
     "warehouse.ctx_mark_unpaid": "Označi kao neplaćeno",

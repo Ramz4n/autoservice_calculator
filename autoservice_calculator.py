@@ -4498,7 +4498,8 @@ class AutoServiceApp:
             entry.delete(0, tk.END)
             entry.configure(border_color=self.wh_normal_border)
         self.set_phone_value(self.wh_phone_entry, "")
-        self.wh_phone_entry.configure(border_color=self.wh_normal_border)
+        self.wh_phone_entry.configure(border_color=self.wh_normal_border, fg_color=self.wh_entry_bg)
+        self.hide_popup(self.wh_part_listbox)
         self.wh_quantity_entry.insert(0, "1")
         self.restore_placeholder(self.wh_car_number_entry)
         self.wh_paid_var.set(False)
@@ -4527,50 +4528,62 @@ class AutoServiceApp:
         window.dim_overlay = self.wh_part_overlay   # форма принадлежит затемнению - всегда над ним, но не над другими программами
         window.resizable(False, False)
         window.protocol("WM_DELETE_WINDOW", self.hide_add_part_form)
-        content = self.wh_form_content = self.form_content(window)
+        content = self.wh_form_content = self.form_content(window, width=560)
 
-        # === АВТОМОБИЛЬ: госномер с поиском ===
-        self.wh_car_card, car_body = self.form_section(content, self.tr("bookings.section_car"))
-        self.form_label(car_body, self.tr("works.car_number")).pack(fill=tk.X)
-        number_row = ctk.CTkFrame(car_body, fg_color="transparent")
-        number_row.pack(fill=tk.X)
-        self.wh_car_number_entry = self.form_entry(number_row, placeholder_text="А123БВ777")
-        self.wh_car_number_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # === КЛИЕНТ И АВТОМОБИЛЬ: госномер и телефон в одну строку (как во вкладке "Добавить работу") ===
+        self.wh_car_card, car_body = self.form_section(content, self.tr("works.section_client_car"))
+        row = ctk.CTkFrame(car_body, fg_color="transparent")
+        row.pack(fill=tk.X)
+        self.wh_car_number_entry = self.works_cell(row, 0, self.tr("works.car_number"),
+                                                   self.form_entry(row, width=160, placeholder_text="А123БВ777"), 160)
+        self.wh_phone_entry = self.works_cell(row, 1, self.tr("bookings.add_window_phone"), self.form_entry(row, width=200))
         # Машина ищется сама по мере ввода (как в "Записать клиента"), кнопка "Найти" не нужна
         self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.search_car_for_warehouse())
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
         # Enter в госномере - поиск машины, а не "Заказать"
         self.wh_car_number_entry.bind('<Return>', lambda e: (self.search_car_for_warehouse(), "break")[1])
+        self.attach_phone_mask(self.wh_phone_entry)
+        self.wh_phone_entry.bind("<KeyRelease>", self.on_wh_phone_keyrelease)
+        self.wh_entry_bg = self.wh_phone_entry.cget("fg_color")
 
         # Информация о найденной машине (строка показывается, только когда есть что сказать)
         status_holder = tk.Frame(car_body, bg="white")
         status_holder.pack(fill=tk.X)
         self.wh_car_info_label = ctk.CTkLabel(status_holder, text="", font=("Arial", 13, "bold"), anchor="w",
-                                              justify=tk.LEFT, wraplength=430)
+                                              justify=tk.LEFT, wraplength=520)
         self.wh_selected_car_id = None  # Сохраняем car_id
 
-        # Новая машина и клиент (скрыто по умолчанию): марка, модель, имя
+        # Машины клиента, найденного по телефону (если их несколько)
+        cars_holder = tk.Frame(car_body, bg="white")
+        cars_holder.pack(fill=tk.X)
+        self.wh_phone_cars_combo = ctk.CTkComboBox(cars_holder, height=34, font=("Arial", 13), values=[],
+                                                   state="readonly", corner_radius=8,
+                                                   command=self.on_wh_phone_car_select)
+        self.wh_phone_cars_numbers = {}
+        self.wh_phone_fill = None  # что подставил поиск по телефону
+
+        # Новая машина (скрыто по умолчанию): марка | модель | имя клиента - в одну строку
         new_car_holder = tk.Frame(car_body, bg="white")
         new_car_holder.pack(fill=tk.X)
         self.wh_new_car_frame = ctk.CTkFrame(new_car_holder, fg_color="transparent")
-        self.wh_new_car_frame.grid_columnconfigure((0, 1), weight=1, uniform="car")
+        self.wh_new_car_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="car")
         self.wh_new_car_visible = False
-        self.form_label(self.wh_new_car_frame, self.tr("bookings.add_window_brand"), required=True).grid(row=0, column=0, sticky="w")
-        self.form_label(self.wh_new_car_frame, self.tr("bookings.add_window_model")).grid(row=0, column=1, sticky="w", padx=(10, 0))
-        self.wh_new_brand_entry = self.form_entry(self.wh_new_car_frame)
+        frame = self.wh_new_car_frame
+        self.form_label(frame, self.tr("bookings.add_window_brand"), required=True).grid(row=0, column=0, sticky="w")
+        self.form_label(frame, self.tr("bookings.add_window_model")).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.form_label(frame, self.tr("works.client_name")).grid(row=0, column=2, sticky="w", padx=(10, 0))
+        self.wh_new_brand_entry = self.form_entry(frame)
         self.wh_new_brand_entry.grid(row=1, column=0, sticky="ew")
         self.wh_new_brand_entry.bind('<KeyRelease>', self.on_wh_brand_keyrelease)
         self.wh_new_brand_entry.bind('<FocusOut>', self.on_wh_brand_focus_out)
-        self.wh_new_model_entry = self.form_entry(self.wh_new_car_frame)
+        self.wh_new_model_entry = self.form_entry(frame)
         self.wh_new_model_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
         self.wh_new_model_entry.bind('<KeyRelease>', self.on_wh_model_keyrelease)
         self.wh_new_model_entry.bind('<FocusOut>', self.on_wh_model_focus_out)
-        self.form_label(self.wh_new_car_frame, self.tr("works.client_name")).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        self.wh_new_client_name_entry = self.form_entry(self.wh_new_car_frame)
-        self.wh_new_client_name_entry.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.wh_new_client_name_entry = self.form_entry(frame)
+        self.wh_new_client_name_entry.grid(row=1, column=2, sticky="ew", padx=(10, 0))
         # Подсказка имён - список под полем
         self.attach_name_autocomplete(self.wh_new_client_name_entry, content, position="below")
-        # Телефон нового клиента берётся из поля "Телефон" ниже - второго поля здесь нет
 
         # Списки подсказок марки и модели - поверх формы под полями
         self.wh_brand_listbox = self.form_popup_listbox(content, takefocus=False)
@@ -4580,62 +4593,118 @@ class AutoServiceApp:
         self.wh_model_listbox_visible = False
         self.wh_model_listbox.bind('<<ListboxSelect>>', self.on_wh_model_select)
 
-        # === КЛИЕНТ: поиск по телефону - подставляет госномер его машины ===
-        _, client_body = self.form_section(content, self.tr("bookings.section_client"))
-        self.form_label(client_body, self.tr("bookings.add_window_phone")).pack(fill=tk.X)
-        self.wh_phone_entry = self.form_entry(client_body)
-        self.wh_phone_entry.pack(fill=tk.X)
-        self.attach_phone_mask(self.wh_phone_entry)
-        self.wh_phone_entry.bind("<KeyRelease>", self.on_wh_phone_keyrelease)
-        self.wh_phone_cars_combo = ctk.CTkComboBox(client_body, height=34, font=("Arial", 13), values=[],
-                                                   state="readonly", corner_radius=8,
-                                                   command=self.on_wh_phone_car_select)
-        self.wh_phone_cars_numbers = {}
-        self.wh_phone_fill = None  # что подставил поиск по телефону
-
-        # === ЗАПЧАСТЬ ===
+        # === ЗАПЧАСТЬ: название | кол-во | цена - в одну строку ===
         _, part_body = self.form_section(content, self.tr("warehouse.part_label"))
-        self.form_label(part_body, self.tr("warehouse.part_name_label"), required=True).pack(fill=tk.X)
-        self.wh_part_name_entry = self.form_entry(part_body)
-        self.wh_part_name_entry.pack(fill=tk.X)
-
-        amounts = ctk.CTkFrame(part_body, fg_color="transparent")
-        amounts.pack(fill=tk.X, pady=(6, 0))
-        amounts.grid_columnconfigure((0, 1), weight=1, uniform="amount")
-        self.form_label(amounts, self.tr("warehouse.quantity_label")).grid(row=0, column=0, sticky="w")
-        self.form_label(amounts, self.tr("works.price_label")).grid(row=0, column=1, sticky="w", padx=(10, 0))
-        self.wh_quantity_entry = self.form_entry(amounts)
-        self.wh_quantity_entry.grid(row=1, column=0, sticky="ew")
+        row = ctk.CTkFrame(part_body, fg_color="transparent")
+        row.pack(fill=tk.X)
+        self.wh_part_name_entry = self.works_cell(row, 0, self.tr("warehouse.part_name_label"), self.form_entry(row),
+                                                  required=True)
+        self.wh_quantity_entry = self.works_cell(row, 1, self.tr("warehouse.quantity_short"),
+                                                 self.form_entry(row, width=60), 60)
         self.wh_quantity_entry.insert(0, "1")
-        self.wh_price_entry = self.form_entry(amounts)
-        self.wh_price_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        self.wh_price_entry = self.works_cell(row, 2, self.tr("works.price_label"), self.form_entry(row, width=100), 100)
 
-        # Уже оплачено (например, хранение шин -- клиент заплатил при сдаче,
-        # и при выдаче со склада эта сумма не должна повторно попасть в счёт).
-        # Текст длинный - отдельной подписью с переносом, клик по ней тоже ставит галочку
+        # Подсказки названий запчастей (из списка запчастей) - под полем, с прокруткой
+        self.wh_part_listbox = self.form_popup_listbox(content)
+        self.wh_part_listbox.bind("<ButtonRelease-1>", self.on_wh_part_select)
+        self.wh_part_listbox.bind("<Return>", self.on_wh_part_select)
+        self.wh_part_name_entry.bind("<KeyRelease>", self.on_wh_part_name_keyrelease)
+        self.wh_part_name_entry.bind("<Down>", self.on_wh_part_name_down)
+        self.wh_part_name_entry.bind("<FocusOut>", lambda e: self.root.after(200, self._wh_part_list_focus_check))
+
+        # Уже оплачено (например, хранение шин - клиент заплатил при сдаче, и при выдаче со склада
+        # эта сумма не должна повторно попасть в счёт). Коротко в строку, подробно - подсказкой при наведении
         paid_row = ctk.CTkFrame(part_body, fg_color="transparent")
-        paid_row.pack(fill=tk.X, pady=(10, 0))
+        paid_row.pack(fill=tk.X, pady=(8, 0))
         self.wh_paid_var = tk.BooleanVar(value=False)
-        ctk.CTkCheckBox(paid_row, text="", width=24, variable=self.wh_paid_var).pack(side=tk.LEFT, anchor="n")
-        paid_label = ctk.CTkLabel(paid_row, text=self.tr("warehouse.paid_checkbox_label"), font=("Arial", 12),
-                                  justify=tk.LEFT, anchor="w", wraplength=390, cursor="hand2")
-        paid_label.pack(side=tk.LEFT, fill=tk.X, padx=(4, 0))
+        paid_box = ctk.CTkCheckBox(paid_row, text="", width=24, variable=self.wh_paid_var)
+        paid_box.pack(side=tk.LEFT)
+        paid_label = ctk.CTkLabel(paid_row, text=self.tr("warehouse.paid_short"), font=("Arial", 12),
+                                  anchor="w", cursor="hand2")
+        paid_label.pack(side=tk.LEFT, padx=(4, 0))
         paid_label.bind("<Button-1>", lambda e: self.wh_paid_var.set(not self.wh_paid_var.get()))
+        for widget in (paid_box, paid_label):
+            self.attach_hover_tip(widget, self.tr("warehouse.paid_checkbox_label"))
 
-        self.form_label(part_body, self.tr("warehouse.notes_label")).pack(fill=tk.X, pady=(6, 0))
+        self.form_label(part_body, self.tr("warehouse.notes_label")).pack(fill=tk.X, pady=(8, 0))
         self.wh_notes_entry = self.form_entry(part_body)
         self.wh_notes_entry.pack(fill=tk.X)
 
         # Кнопки: широкая "Заказать" и "Отмена"; Enter - заказать, Esc - отмена
         self.form_buttons(window, self.tr("warehouse.order_btn"), self.add_warehouse_part, self.hide_add_part_form)
         self.form_bind_keys(window, content, self.add_warehouse_part, self.hide_add_part_form,
-                            lambda: (self.hide_wh_brand_listbox(), self.hide_wh_model_listbox()))
+                            lambda: (self.hide_wh_brand_listbox(), self.hide_wh_model_listbox(),
+                                     self.hide_popup(self.wh_part_listbox)))
         self.form_clear_error_on_type((self.wh_car_number_entry, self.wh_new_brand_entry, self.wh_phone_entry,
                                        self.wh_part_name_entry, self.wh_quantity_entry, self.wh_price_entry))
 
         self.wh_normal_border = self.wh_car_number_entry.cget("border_color")
         window.update_idletasks()
         return window
+
+    def on_wh_part_name_keyrelease(self, event=None):
+        """Подсказки названий запчастей: из списка запчастей (как во вкладке "Добавить работу")"""
+        if event is not None and event.keysym in ("Down", "Up", "Return", "Escape", "Tab"):
+            return
+        text = self.wh_part_name_entry.get().strip().lower()
+        parts = getattr(self, "spare_parts_list", []) or []
+        matches = [p for p in parts if text in p.lower()][:50] if text else []
+        # Название уже введено полностью - список не нужен
+        if not matches or (len(matches) == 1 and matches[0].lower() == text):
+            self.hide_popup(self.wh_part_listbox)
+            return
+        self.wh_part_listbox.delete(0, tk.END)
+        for name in matches:
+            self.wh_part_listbox.insert(tk.END, name)
+        self.place_popup(self.wh_part_listbox, self.wh_part_name_entry)
+
+    def on_wh_part_name_down(self, event=None):
+        """Стрелка вниз - перейти в список подсказок"""
+        if self.wh_part_listbox.popup_frame.winfo_ismapped():
+            self.wh_part_listbox.focus_set()
+            self.wh_part_listbox.selection_clear(0, tk.END)
+            self.wh_part_listbox.selection_set(0)
+            self.wh_part_listbox.activate(0)
+            return "break"
+
+    def on_wh_part_select(self, event=None):
+        selection = self.wh_part_listbox.curselection()
+        if selection:
+            self.wh_part_name_entry.delete(0, tk.END)
+            self.wh_part_name_entry.insert(0, self.wh_part_listbox.get(selection[0]))
+        self.hide_popup(self.wh_part_listbox)
+        self.wh_quantity_entry.focus_set()
+        return "break"
+
+    def _wh_part_list_focus_check(self):
+        try:
+            if self.root.focus_get() is not self.wh_part_listbox:
+                self.hide_popup(self.wh_part_listbox)
+        except (KeyError, tk.TclError):
+            self.hide_popup(self.wh_part_listbox)
+
+    def attach_hover_tip(self, widget, text):
+        """Подсказка при наведении мыши (жёлтая, как у таблиц)"""
+        tip = [None]
+
+        def show(event):
+            hide()
+            win = tk.Toplevel(widget)
+            win.wm_overrideredirect(True)
+            win.transient(widget.winfo_toplevel())
+            win.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 16}")
+            tk.Label(win, text=text, bg="#ffffe0", relief="solid", borderwidth=1, font=("Segoe UI", 10),
+                     justify=tk.LEFT, wraplength=360, padx=8, pady=4).pack()
+            tip[0] = win
+
+        def hide(event=None):
+            if tip[0] is not None:
+                tip[0].destroy()
+                tip[0] = None
+
+        widget.bind("<Enter>", show, add="+")
+        widget.bind("<Leave>", hide, add="+")
+        widget.bind("<Button-1>", hide, add="+")
 
     def set_wh_car_status(self, text, state=None):
         """Строка о машине в форме склада и цвет рамки карточки.
@@ -4657,6 +4726,7 @@ class AutoServiceApp:
     def search_car_for_warehouse(self):
         """Поиск машины по госномеру для склада - по мере ввода (с 6 символов), как в "Записать клиента" """
         car_number = self.wh_car_number_entry.get().strip()
+        self._wh_phone_unmark_if_changed()
         if car_number and car_number.upper() == getattr(self, "wh_searched_number", None):
             return  # этот госномер уже искали - не дёргаем базу на каждое нажатие (Tab, стрелки)
         self.wh_searched_number = car_number.upper() if len(car_number) >= 6 else None
@@ -4684,7 +4754,9 @@ class AutoServiceApp:
         self.wh_plate_phone = None
         if car_info:
             self.wh_selected_car_id = car_info.get("car_id")
-            info_text = f"{car_info.get('car_brand', '')} {car_info.get('car_model', '')} | {car_info.get('client_name') or self.tr('common.no_name')} | {car_info.get('client_phone', '')}"
+            # Телефон - в поле рядом, здесь только машина и владелец (как во вкладке "Добавить работу")
+            car_title = " ".join(x for x in (car_info.get('car_brand'), car_info.get('car_model')) if x)
+            info_text = f"✓ {car_title} — {car_info.get('client_name') or self.tr('common.no_name')}"
             self.set_wh_car_status(info_text, "found")
             self.hide_new_car_form()
             # Телефон владельца - в поле телефона (если там ещё ничего не набрано)
@@ -4692,6 +4764,7 @@ class AutoServiceApp:
             if owner_phone and not phone_mask_digits(self.wh_phone_entry.get()):
                 self.set_phone_value(self.wh_phone_entry, owner_phone)
                 self.wh_plate_phone = self.wh_phone_entry.get()
+                self.wh_phone_entry.configure(fg_color=self.WORKS_AUTOFILL_BG)   # подставила программа
                 # Номер уже "найден" - повторный поиск по нему ничего не подставит
                 self.wh_phone_fill = {"digits": phone_mask_digits(self.wh_plate_phone), "filled": {}}
         else:
@@ -4727,8 +4800,14 @@ class AutoServiceApp:
             self.wh_new_car_visible = False
             self.fit_form_window(self.add_part_form_frame)
 
+    def _wh_phone_unmark_if_changed(self):
+        """Телефон уже не тот, что подставил госномер (правили руками или убрали) - снять зелёную подсветку"""
+        if self.wh_phone_entry.get() != getattr(self, "wh_plate_phone", None):
+            self.wh_phone_entry.configure(fg_color=self.wh_entry_bg)
+
     def on_wh_phone_keyrelease(self, event=None):
         """Поиск клиента по телефону (склад): одна машина - подставляем госномер, несколько - список"""
+        self._wh_phone_unmark_if_changed()
         digits = phone_mask_digits(self.wh_phone_entry.get())
         fields = self.wh_phone_fill_fields()
 
