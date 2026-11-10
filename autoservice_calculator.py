@@ -11,7 +11,6 @@ from datetime import datetime, date, timedelta
 from tkcalendar import DateEntry
 import json
 import calendar as pycalendar
-import qrcode
 from PIL import Image, ImageTk
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
@@ -2106,22 +2105,24 @@ class AutoServiceApp:
         col = ctk.CTkFrame(self.works_scroll, fg_color="transparent")
         col.pack(fill=tk.X, padx=8)
         self.works_column = col
-        works_title = ctk.CTkLabel(col, text=self.tr("works.title"), font=("Segoe UI", 20, "bold"), anchor="w")
-        works_title.pack(fill=tk.X, padx=4, pady=(4, 2))
-
-        # Полоска "Редактирование записи ..." - видна, пока правим уже сохранённую запись
-        self.works_edit_banner = ctk.CTkFrame(col, fg_color="#fff3e0", corner_radius=8, border_width=1,
-                                              border_color="#ffb74d")
-        self.works_edit_banner_label = ctk.CTkLabel(self.works_edit_banner, text="", font=("Arial", 13, "bold"),
-                                                    text_color="#e65100", anchor="w", justify="left")
-        self.works_edit_banner_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12, pady=8)
-        ctk.CTkButton(self.works_edit_banner, text=self.tr("works.edit_banner_exit"), width=10, height=30,
-                      corner_radius=8, font=("Arial", 13), fg_color="transparent", border_width=1,
-                      border_color="#ffb74d", text_color="#e65100", hover_color="#ffe0b2",
-                      command=self.clear_work_form).pack(side=tk.RIGHT, padx=10, pady=6)
-        self.works_edit_banner_after = works_title
-        self.works_info_banner = ctk.CTkLabel(col, text="", font=("Arial", 13, "bold"), text_color="#2e7d32",
-                                              fg_color="#e8f5e9", corner_radius=8, anchor="w", height=36)
+        # Строка заголовка постоянной высоты: при редактировании сохранённой записи заголовок становится
+        # "✎ Редактирование записи: ..." (оранжевый) и справа кнопка "Выйти из редактирования" - форма не сдвигается
+        title_row = ctk.CTkFrame(col, fg_color="transparent", height=40)
+        self.works_title_row = title_row
+        title_row.pack(fill=tk.X, padx=4, pady=(4, 2))
+        title_row.pack_propagate(False)
+        self.works_edit_banner_label = ctk.CTkLabel(title_row, text=self.tr("works.title"),
+                                                    font=("Segoe UI", 20, "bold"), anchor="w")
+        self.works_edit_banner_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.works_title_color = self.works_edit_banner_label.cget("text_color")
+        self.works_edit_banner = ctk.CTkButton(
+            title_row, text=self.tr("works.edit_banner_exit"), width=10, height=30, corner_radius=8,
+            font=("Arial", 13), fg_color="transparent", border_width=1, border_color="#ffb74d",
+            text_color="#e65100", hover_color="#ffe0b2", command=self.clear_work_form)
+        # Всплывающее сообщение ("Открыта новая запись ...") - поверх формы, форму не сдвигает
+        self.works_info_banner = ctk.CTkLabel(self.works_frame, text="", font=("Arial", 14, "bold"),
+                                              text_color="white", fg_color="#2e7d32", bg_color="transparent",
+                                              corner_radius=10, height=40)
         self.works_editing_title = ""
 
         # ===== Запись и мастер - одна строка =====
@@ -2213,6 +2214,10 @@ class AutoServiceApp:
         self.vin_context_menu = tk.Menu(self.root, tearoff=0)
         self.vin_context_menu.add_command(label=self.tr("works.context_paste"), command=self.paste_to_vin)
         self.vin_entry.bind("<Button-3>", self.show_vin_context_menu)
+
+        # Данные встали (нашли по госномеру / телефону, открыли запись) - поля закрыты от случайной правки.
+        # Поправить конкретное поле - карандаш ✎ справа в поле
+        self.works_setup_field_locks()
 
         # Подсветка подставленных полей: поправили руками - подсветка снимается
         self.works_autofilled = {}
@@ -2317,12 +2322,15 @@ class AutoServiceApp:
         return " ".join(p for p in parts if p)
 
     def works_update_edit_banner(self):
-        """Показать/спрятать полоску "Редактирование записи ..." """
+        """Заголовок вкладки: обычный или "✎ Редактирование записи: ..." с кнопкой выхода (высота строки та же)"""
         if getattr(self, "editing_work_id", None):
             self.works_edit_banner_label.configure(
-                text=self.tr("works.edit_banner", car=self.works_editing_title or "—"))
-            self.works_edit_banner.pack(fill=tk.X, pady=(2, 6), after=self.works_edit_banner_after)
+                text=self.tr("works.edit_banner", car=self.works_editing_title or "—"),
+                font=("Segoe UI", 18, "bold"), text_color="#e65100")
+            self.works_edit_banner.pack(side=tk.RIGHT)
         else:
+            self.works_edit_banner_label.configure(text=self.tr("works.title"), font=("Segoe UI", 20, "bold"),
+                                                   text_color=self.works_title_color)
             self.works_edit_banner.pack_forget()
 
     def works_form_snapshot(self):
@@ -2407,18 +2415,31 @@ class AutoServiceApp:
         self.load_client_cars("+7" + phone_digits if phone_digits else "", name, auto_select=False)
         # Телефон уже "найден" - повторно по нему не ищем
         self.works_phone_fill = {"digits": phone_digits, "filled": {}}
+        self.works_lock_filled()
         car = value if value in self.client_cars_data else self.tr("works.new_record_new_car")
         self.works_show_info_banner(self.tr("works.new_record_opened", car=car))
         return True
 
     def works_show_info_banner(self, text, ms=3500):
-        """Зелёная полоска под заголовком на несколько секунд"""
-        self.works_info_banner.configure(text=text)
-        self.works_info_banner.pack(fill=tk.X, pady=(2, 6), after=self.works_edit_banner_after)
+        """Зелёное сообщение на несколько секунд - всплывает поверх верха формы (по ширине колонки),
+        ничего не сдвигая; клик по нему - скрыть сразу"""
+        banner = self.works_info_banner
+        banner.configure(text=text)
+        self.root.update_idletasks()
+        col = self.works_column
+        x = col.winfo_rootx() - self.works_frame.winfo_rootx()
+        width = col.winfo_width() if col.winfo_width() > 1 else self.WORKS_MAX_WIDTH
+        # Ровно поверх строки заголовка (с небольшим запасом), чтобы из-под него ничего не выглядывало
+        row = self.works_title_row
+        y = row.winfo_rooty() - self.works_frame.winfo_rooty() - 4
+        banner.configure(width=width, height=row.winfo_height() + 8)
+        banner.place(x=x, y=max(4, y))
+        banner.lift()
+        banner.bind("<Button-1>", lambda e: banner.place_forget())
         job = getattr(self, "_works_info_banner_job", None)
         if job:
             self.root.after_cancel(job)
-        self._works_info_banner_job = self.root.after(ms, self.works_info_banner.pack_forget)
+        self._works_info_banner_job = self.root.after(ms, banner.place_forget)
 
     def works_relayout(self, event=None):
         """Колонка вкладки - по центру и не шире WORKS_MAX_WIDTH; нижняя строка - по ширине колонки"""
@@ -2435,6 +2456,92 @@ class AutoServiceApp:
         left = col.winfo_rootx() - self.works_frame.winfo_rootx()
         right = self.works_frame.winfo_width() - left - col.winfo_width()
         self.works_bottom_bar.pack_configure(padx=(max(10, left), max(10, right)))
+
+    WORKS_LOCK_TAG = "WorksFieldLock"
+    WORKS_LOCK_ALLOWED_KEYS = {"Tab", "ISO_Left_Tab", "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
+                               "Escape", "Return", "KP_Enter", "Shift_L", "Shift_R", "Control_L", "Control_R",
+                               "Alt_L", "Alt_R"}
+
+    def works_setup_field_locks(self):
+        """Замок на полях клиента и машины: набор с клавиатуры, вставка и вырезание не проходят, пока поле закрыто
+        (программа при этом может менять поле как угодно). Карандаш ✎ открывает поле для правки"""
+        self.works_locked = set()
+        self.works_lock_widgets = {}   # внутреннее поле tk.Entry -> ключ
+        self.works_lock_pencils = {}
+        fields = self.works_lookup_fields()
+        self.works_text_color = self.car_brand_entry.cget("text_color")
+        for key, entry in fields.items():
+            inner = entry._entry
+            inner.bindtags((self.WORKS_LOCK_TAG,) + inner.bindtags())
+            self.works_lock_widgets[str(inner)] = key
+            pencil = ctk.CTkButton(entry.master, text="✎", width=26, height=24, corner_radius=6,
+                                   font=("Arial", 14), fg_color="transparent", hover_color="#e3f2fd",
+                                   text_color="#1565c0", cursor="hand2",
+                                   command=lambda key=key: self.works_unlock_field(key, focus=True))
+            self.works_lock_pencils[key] = pencil
+        self.root.bind_class(self.WORKS_LOCK_TAG, "<Key>", self._works_lock_key)
+        for event in ("<<Paste>>", "<<Cut>>", "<<Clear>>", "<<PasteSelection>>"):
+            self.root.bind_class(self.WORKS_LOCK_TAG, event, self._works_lock_block)
+
+    def _works_lock_is_locked(self, widget):
+        return self.works_lock_widgets.get(str(widget)) in self.works_locked
+
+    def _works_lock_key(self, event):
+        if not self._works_lock_is_locked(event.widget):
+            return None
+        if event.keysym in self.WORKS_LOCK_ALLOWED_KEYS:
+            return None
+        if event.state & 0x4 and event.keysym.lower() in ("c", "a", "insert", "cyrillic_es", "cyrillic_ef"):
+            return None   # Ctrl+C / Ctrl+A - копировать можно
+        return "break"
+
+    def _works_lock_block(self, event):
+        return "break" if self._works_lock_is_locked(event.widget) else None
+
+    def works_lock_field(self, key):
+        """Закрыть поле, если в нём что-то есть"""
+        entry = self.works_lookup_fields()[key]
+        value = entry.get()
+        if not value.strip() or (key == "phone" and not phone_mask_digits(value)):
+            return
+        self.works_locked.add(key)
+        entry.configure(text_color="#455a64")
+        pencil = self.works_lock_pencils[key]
+        if key == "vin":
+            # У VIN справа счётчик 17/17 - карандаш встаёт на его место
+            pencil.place(in_=self.vin_counter_label, relx=0.5, rely=0.5, anchor="center")
+        else:
+            pencil.place(in_=entry, relx=1.0, x=-4, rely=0.5, anchor="e")
+        pencil.lift()
+
+    def works_unlock_field(self, key, focus=False):
+        """Открыть поле для правки (карандаш)"""
+        self.works_locked.discard(key)
+        entry = self.works_lookup_fields()[key]
+        entry.configure(text_color=self.works_text_color)
+        self.works_lock_pencils[key].place_forget()
+        if focus:
+            entry.focus_set()
+            entry.icursor(tk.END)
+            if key != "phone":
+                entry.select_range(0, tk.END)
+
+    def works_lock_filled(self):
+        """Закрыть все заполненные поля клиента и машины (данные встали)"""
+        for key in self.works_lookup_fields():
+            self.works_lock_field(key)
+
+    def works_unlock_empty(self):
+        """Пустое поле закрытым не держим - его надо заполнить"""
+        fields = self.works_lookup_fields()
+        for key in list(self.works_locked):
+            value = fields[key].get()
+            if not value.strip() or (key == "phone" and not phone_mask_digits(value)):
+                self.works_unlock_field(key)
+
+    def works_unlock_all(self):
+        for key in list(getattr(self, "works_locked", ())):
+            self.works_unlock_field(key)
 
     def works_lookup_fields(self):
         """Поля, которые подставляет поиск по госномеру / телефону / записи"""
@@ -2486,6 +2593,8 @@ class AutoServiceApp:
     # Обработчики автокомплита для марки
     def on_brand_keyrelease(self, event):
         """Обработчик ввода текста для марки"""
+        if "brand" in getattr(self, "works_locked", ()):
+            return  # поле закрыто - подсказки не нужны
         search_text = self.car_brand_entry.get().strip()
         if len(search_text) < 1:
             self.hide_brand_listbox()
@@ -2610,6 +2719,8 @@ class AutoServiceApp:
 
     def show_vin_context_menu(self, event):
         """Показать контекстное меню для поля VIN"""
+        if "vin" in getattr(self, "works_locked", ()):
+            return
         self.vin_context_menu.tk_popup(event.x_root, event.y_root)
 
     def paste_to_vin(self):
@@ -2693,6 +2804,22 @@ class AutoServiceApp:
 
     def on_booking_select(self, choice):
         """Обработчик выбора записи из списка"""
+        # По записи уже есть наряд (запись "в работе") - открываем его целиком, как "Редактировать":
+        # видно, что уже сделано, новые работы дописываются в этот же наряд
+        if choice and choice in self.bookings_data:
+            booking_id = self.bookings_data[choice]['id']
+            already_open = booking_id == self.selected_booking_id and getattr(self, "editing_work_id", None)
+            if not already_open and self.db.get_work_by_booking_id(booking_id):
+                previous = getattr(self, "_works_booking_choice", "")
+                if not self.works_leave_current_record():
+                    self.booking_combo.set(previous)   # остались в текущей записи
+                    return
+                self.open_booking_in_add_work(booking_id)
+                self._works_booking_choice = self.booking_combo.get()
+                self.works_show_info_banner(self.tr("works.record_reopened", car=self.works_car_title() or choice))
+                return
+        self._works_booking_choice = choice or ""
+
         self.works_phone_fill = None
         self.works_number_fill = None
         if choice and choice in self.bookings_data:
@@ -2708,6 +2835,8 @@ class AutoServiceApp:
             self.works_mark_autofilled(before)
             if booking_info['name']:
                 self.works_set_lookup_state("found", self.tr("works.lookup_booking", name=booking_info['name']))
+            self.works_lock_filled()
+            self.works_record_number = self.car_number_entry.get().strip()
 
             # Если по записи уже есть наряд - подставляем мастера, который его ведёт
             existing_work = self.db.get_work_by_booking_id(booking_info['id'])
@@ -2802,6 +2931,8 @@ class AutoServiceApp:
 
     def on_client_phone_keyrelease(self, event):
         """При вводе телефона - искать данные клиента и его машины"""
+        if "phone" in getattr(self, "works_locked", ()):
+            return  # поле закрыто (данные встали) - заново не ищем
         # Ищем только когда номер введён полностью (в маске +7 всегда есть - считаем только цифры после него)
         phone_digits = phone_mask_digits(self.client_phone_entry.get())
         phone_raw = "+7" + phone_digits
@@ -2811,13 +2942,21 @@ class AutoServiceApp:
         fill = getattr(self, "works_phone_fill", None)
         if fill and fill["digits"] != phone_digits:
             self.works_phone_fill = None
-            self.undo_autofill(fields, fill["filled"])
+            undo = fill["filled"]
+            if "number" in getattr(self, "works_locked", ()):
+                # Машина уже определена (закрыта) - телефон это только контакт: убираем лишь имя,
+                # подставленное по прошлому номеру, машину не трогаем
+                undo = {k: v for k, v in undo.items() if k == "name"}
+            self.undo_autofill(fields, undo)
             self.works_unmark_edited()
+            self.works_unlock_empty()
             if not self.works_number_fill:
                 self.works_set_lookup_state(None)
         elif fill:
             return  # тот же номер уже обработан
 
+        if len(phone_digits) == 10 and self.works_owner_change_lookup(phone_digits, fields):
+            return
         if len(phone_digits) == 10:
             before = self.snapshot_fields(fields)
             # Нормализуем до последних 10 цифр
@@ -2852,9 +2991,11 @@ class AutoServiceApp:
             cars_count = len(self.client_cars_data)
             if cars_count > 1 and self.client_cars_combo.get() == self.tr("works.select_car"):
                 self.works_set_lookup_state("pick", self.tr("works.lookup_pick_car", count=cars_count))
+                self.works_lock_filled()
             elif client_name or cars_count:
                 self.works_set_lookup_state("found", self.tr("works.lookup_client_found",
                                                              name=client_name or self.client_name_entry.get().strip()))
+                self.works_lock_filled()
             else:
                 self.works_set_lookup_state("new", self.tr("works.lookup_new_client"))
         else:
@@ -2863,6 +3004,36 @@ class AutoServiceApp:
             self.client_cars_combo.set(self.tr("works.new_car"))
             self.client_cars_data = {}
 
+    def works_owner_change_lookup(self, phone_digits, fields):
+        """Машина уже определена (госномер закрыт), а телефон поменяли (через ✎) - возможно, сменился владелец.
+        Машину не трогаем (не подставляем машины этого человека), подставляем только его имя, если он есть
+        в базе, и предупреждаем: при сохранении спросим, новый ли это владелец. True - обработали"""
+        if "number" not in getattr(self, "works_locked", ()):
+            return False
+        car = self.db.get_car_owner_by_number(self.car_number_entry.get().strip())
+        if not car or not car["client_id"]:
+            return False
+        before = self.snapshot_fields(fields)
+        same = self.works_same_person(phone_digits, "", car["owner_phone"], car["owner_name"])
+        name = car["owner_name"] if same else self.db.get_client_name_by_phone("+7" + phone_digits)
+        self.client_name_entry.delete(0, tk.END)
+        if name:
+            self.client_name_entry.insert(0, name)
+        else:
+            # Человека нет в базе - имя прежнего владельца убираем, поле открыто: вписать нового
+            self.works_unlock_field("name")
+        self.works_phone_fill = {"digits": phone_digits, "filled": self.autofilled_diff(fields, before)}
+        self.works_mark_autofilled(before)
+        if not name:
+            self.client_name_entry.focus_set()
+        if same:
+            self.works_set_lookup_state("found", self.tr("works.lookup_car_found",
+                                                         name=car["owner_name"] or self.tr("common.no_name")))
+        else:
+            self.works_set_lookup_state("new", self.tr("works.lookup_owner_change",
+                                                       owner=car["owner_name"] or self.tr("common.no_name")))
+        return True
+
     def works_phone_fill_fields(self):
         """Поля вкладки "Добавить работу", которые заполняет поиск по телефону / госномеру"""
         return {"name": self.client_name_entry, "phone": self.client_phone_entry, "brand": self.car_brand_entry,
@@ -2870,8 +3041,41 @@ class AutoServiceApp:
 
     CAR_NUMBER_LIVE_MIN = 8   # с какой длины госномера искать прямо при вводе (номер введён целиком)
 
+    def works_check_record_plate_change(self, car_number, record_number):
+        """В открытой записи госномер сменили. Это госномер другой машины из базы - иначе работа молча
+        переедет на чужую машину: спрашиваем, открыть ли запись для той машины, или вернуть госномер.
+        Госномера в базе нет - считаем, что исправили опечатку"""
+        clients = self.db.get_all_clients_by_car_number(car_number)
+        if not clients:
+            return
+        other = clients[0]
+        car = " ".join(x for x in (other.get("car_brand"), other.get("car_model")) if x) or car_number.upper()
+        owner = other.get("client_name") or self.tr("common.no_name")
+        open_other = messagebox.askyesno(
+            self.tr("works.dialog_plate_other_car_title"),
+            self.tr("works.dialog_plate_other_car_body", number=car_number.upper(), car=car, owner=owner,
+                    current=self.works_editing_title or record_number, old=record_number))
+        # Госномер записи возвращаем в любом случае: с ним запись и сохраняется, если её сохранят
+        self.car_number_entry.delete(0, tk.END)
+        self.car_number_entry.insert(0, record_number)
+        self.works_lock_field("number")
+        if not open_other or not self.works_leave_current_record():
+            return
+
+        booking_id = self.works_find_car_booking(car_number)
+        if booking_id:
+            self.open_booking_in_add_work(booking_id)
+            self.works_show_info_banner(self.tr("works.record_reopened", car=self.works_car_title()))
+        else:
+            # Новая запись: ищем по госномеру как обычно - подставятся владелец и машина
+            self.car_number_entry.insert(0, car_number)
+            self.on_car_number_change()
+            self.works_show_info_banner(self.tr("works.new_record_opened", car=self.works_car_title()))
+
     def on_car_number_keyrelease(self, event=None):
         """Ввод госномера: ищем через паузу после последней нажатой клавиши, чтобы не дёргать базу на каждую букву"""
+        if "number" in getattr(self, "works_locked", ()):
+            return
         pending = getattr(self, "_car_number_search_job", None)
         if pending:
             self.root.after_cancel(pending)
@@ -2882,6 +3086,16 @@ class AutoServiceApp:
         self._car_number_search_job = None
         car_number = self.car_number_entry.get().strip()
 
+        # Открыта запись (редактирование или выбрана из списка) и госномер в ней поменяли
+        record_number = getattr(self, "works_record_number", None)
+        in_record = getattr(self, "editing_work_id", None) or getattr(self, "selected_booking_id", None)
+        if in_record and record_number:
+            if live or car_number.upper() == record_number.upper():
+                return
+            if car_number and len(car_number) >= 3:
+                self.works_check_record_plate_change(car_number, record_number)
+            return
+
         # Номер изменили - убираем всё, что подставили по прошлому номеру (поправленное руками не трогаем)
         fill = getattr(self, "works_number_fill", None)
         if fill and fill["number"].upper() != car_number.upper():
@@ -2889,6 +3103,7 @@ class AutoServiceApp:
             self.works_phone_fill = None
             self.undo_autofill(self.works_phone_fill_fields(), fill["filled"])
             self.works_unmark_edited()
+            self.works_unlock_empty()
             self.client_cars_combo.configure(values=[self.tr("works.new_car")])
             self.client_cars_combo.set("")
             self.client_cars_data = {}
@@ -2979,6 +3194,7 @@ class AutoServiceApp:
         self.works_mark_autofilled(before)
         name = client_info.get("client_name") or self.tr("common.no_name")
         self.works_set_lookup_state("found", self.tr("works.lookup_car_found", name=name))
+        self.works_lock_filled()
         # Всё подставили - курсор сразу в "Пробег"
         self.mileage_entry.focus_set()
 
@@ -3070,8 +3286,10 @@ class AutoServiceApp:
             name = self.client_name_entry.get().strip() or self.tr("common.no_name")
             self.works_set_lookup_state("found", self.tr("works.lookup_client_found", name=name))
             self.check_warehouse_for_car(self.car_number_entry.get().strip())
+            self.works_lock_filled()
             self.mileage_entry.focus_set()
         elif choice == self.tr("works.new_car"):
+            self.works_unlock_empty()
             self.works_set_lookup_state("new", self.tr("works.lookup_new_car"))
             self.check_warehouse_for_car("")
             self.car_number_entry.focus_set()
@@ -3103,6 +3321,8 @@ class AutoServiceApp:
     # Обработчики автокомплита для модели
     def on_model_keyrelease(self, event):
         """Обработчик ввода текста для модели"""
+        if "model" in getattr(self, "works_locked", ()):
+            return  # поле закрыто - подсказки не нужны
         brand = self.car_brand_entry.get().strip()
         if not brand:
             self.hide_model_listbox()
@@ -3359,6 +3579,9 @@ class AutoServiceApp:
 
     def remove_part_from_list(self, item_id):
         """Удалить запчасть из списка (✕ в строке)"""
+        name, price = self.parts_list[self.parts_tree.index(item_id)]
+        if not self.works_confirm_remove("part", name, price):
+            return
 
         # Деталь со склада снова доступна для "Со склада"; на склад в базе вернётся при сохранении наряда
         if item_id in self.warehouse_part_ids:
@@ -3404,9 +3627,18 @@ class AutoServiceApp:
         self.hide_work_keyword_listbox()
         self.work_name_entry.focus_set()
 
+    def works_confirm_remove(self, kind, name, price):
+        """✕ в строке работы / запчасти - переспрашиваем, чтобы не удалить случайным кликом"""
+        return messagebox.askyesno(
+            self.tr("works.confirm_remove_title"),
+            self.tr(f"works.confirm_remove_{kind}", name=name, price=self.format_currency(price)))
+
     def remove_work_from_list(self, item_id):
         """Удалить работу из списка (✕ в строке)"""
         item_index = self.works_tree.index(item_id)
+        name, price = self.works_list[item_index]
+        if not self.works_confirm_remove("work", name, price):
+            return
         del self.works_list[item_index]
         self.works_tree.delete(item_id)
 
@@ -3505,6 +3737,161 @@ class AutoServiceApp:
         self.works_sum_label.configure(text=self.tr("works.sum_works", amount=self.format_currency(works_sum)))
         self.parts_sum_label.configure(text=self.tr("works.sum_parts", amount=self.format_currency(parts_sum)))
         self.works_total_label.configure(text=self.tr("works.total", amount=self.format_currency(works_sum + parts_sum)))
+
+    @staticmethod
+    def works_same_person(phone_digits, name, other_phone, other_name):
+        """Тот же ли человек: по телефону (последние 10 цифр), а если телефона нет - по имени"""
+        other_digits = re.sub(r"\D", "", other_phone or "")[-10:]
+        if phone_digits and other_digits:
+            return phone_digits[-10:] == other_digits
+        if not name or not other_name:
+            return True   # сравнить не с чем - считаем, что тот же
+        return " ".join(name.split()).lower() == " ".join(other_name.split()).lower()
+
+    @staticmethod
+    def works_name_changed(name, other_name):
+        """Имя сменилось по сути (другое первое слово): "Равшан" -> "Роман". Дописали фамилию - не считается"""
+        a, b = (name or "").split(), (other_name or "").split()
+        return bool(a and b) and a[0].lower().replace("ё", "е") != b[0].lower().replace("ё", "е")
+
+    def works_confirm_rename(self, phone_digits, client_name, old_name, old_phone, phone_entry, parent=None):
+        """Телефон тот же, а имя другое - это переименование клиента или другой человек?
+        True - продолжаем (имя клиента обновится), False - сохранение остановлено"""
+        if not phone_digits or not self.works_same_person(phone_digits, "", old_phone, "") \
+                or not self.works_name_changed(client_name, old_name):
+            return True
+        kwargs = {"parent": parent} if parent else {}
+        answer = messagebox.askyesnocancel(
+            self.tr("works.dialog_rename_title"),
+            self.tr("works.dialog_rename_body", phone="+7" + phone_digits[-10:], old=old_name, new=client_name),
+            **kwargs)
+        if answer:
+            return True
+        if answer is False:
+            # Другой человек - у него свой телефон: открываем поле телефона
+            if phone_entry is getattr(self, "client_phone_entry", None) and "phone" in getattr(self, "works_locked", ()):
+                self.works_unlock_field("phone", focus=True)
+            else:
+                phone_entry.focus_set()
+        return False
+
+    def works_resolve_owner(self, car_number, vin, client_name, phone_digits):
+        """Перед сохранением: та ли машина и тот ли владелец. Возвращает решение для works_owner_ids
+        или None - сохранение отменили.
+        - Госномера в базе нет, а такой VIN есть у машины с другим госномером - спрашиваем, та ли это машина
+          (перерегистрация: госномер у машины меняется, история остаётся с ней).
+        - У машины другой владелец, чем в форме - спрашиваем, новый ли это владелец (машину продали):
+          да - машина и вся история её работ переходят к нему; нет - у владельца обновятся имя / телефон."""
+        owner = {"car": self.db.get_car_owner_by_number(car_number), "plate_from": None,
+                 "client_id": None, "reassign": True, "lookup_by_car": True, "update_contact": False,
+                 "new_owner": False}
+        car = owner["car"]
+        vin = (vin or "").strip().upper()
+        if not car and len(vin) == VIN_LENGTH:
+            same_vin = self.db.get_car_by_vin(vin, exclude_number=car_number)
+            if same_vin and same_vin["client_id"] and not self.works_same_person(
+                    phone_digits, client_name, same_vin["owner_phone"], same_vin["owner_name"]):
+                # Тот же VIN, новый госномер и другой человек - обычно машину продали и перерегистрировали.
+                # Спрашиваем сразу про всё в одном окне
+                title = " ".join(x for x in (same_vin["car_brand"], same_vin["car_model"], same_vin["car_number"]) if x)
+                old_name = same_vin["owner_name"] or self.tr("common.no_name")
+                old_person = f"{old_name} ({same_vin['owner_phone']})" if same_vin["owner_phone"] else old_name
+                new_name = client_name or self.tr("common.no_name")
+                new_person = f"{new_name} (+7{phone_digits})" if phone_digits else new_name
+                answer = messagebox.askyesnocancel(
+                    self.tr("works.dialog_same_vin_title"),
+                    self.tr("works.dialog_same_vin_owner_body", vin=vin, car=title, old=old_person,
+                            number=car_number, new=new_person, new_name=new_name, old_name=old_name))
+                if answer is None:
+                    self.vin_entry.focus_set()
+                    return None
+                owner.update(car=same_vin, plate_from=same_vin["car_number"], lookup_by_car=False)
+                if answer:
+                    owner.update(new_owner=True)          # новый владелец: машина и история - к нему
+                else:
+                    owner.update(client_id=same_vin["client_id"], update_contact=True)   # тот же человек
+                return owner
+            if same_vin:
+                title = " ".join(x for x in (same_vin["car_brand"], same_vin["car_model"], same_vin["car_number"]) if x)
+                if not messagebox.askyesno(
+                        self.tr("works.dialog_same_vin_title"),
+                        self.tr("works.dialog_same_vin_body", vin=vin, car=title,
+                                owner=same_vin["owner_name"] or self.tr("common.no_name"), number=car_number)):
+                    self.vin_entry.focus_set()
+                    return None
+                owner["car"] = car = same_vin
+                owner["plate_from"] = same_vin["car_number"]
+
+        if not car or not car["client_id"]:
+            return owner
+
+        # Редактируем наряд и в форме - клиент этого наряда (машину могли уже продать) - владельца не трогаем
+        editing = getattr(self, "editing_work_id", None)
+        if editing:
+            work = self.db.get_work_by_id(editing)
+            if work and work[-1] and not self.works_confirm_rename(phone_digits, client_name, work[12] or "", work[13] or "",
+                                                                   self.client_phone_entry):
+                return None
+            if work and work[-1] and self.works_same_person(phone_digits, client_name, work[13], work[12]):
+                owner.update(client_id=work[-1], reassign=work[-1] == car["client_id"], lookup_by_car=False,
+                             update_contact=True)
+                return owner
+
+        if not self.works_confirm_rename(phone_digits, client_name, car["owner_name"], car["owner_phone"],
+                                         self.client_phone_entry):
+            return None
+        if self.works_same_person(phone_digits, client_name, car["owner_phone"], car["owner_name"]):
+            return owner
+
+        new_person = client_name or (("+7" + phone_digits) if phone_digits else self.tr("common.no_name"))
+        if phone_digits and client_name:
+            new_person = f"{client_name} (+7{phone_digits})"
+        old_person = car["owner_name"] or self.tr("common.no_name")
+        if car["owner_phone"]:
+            old_person = f"{old_person} ({car['owner_phone']})"
+        answer = messagebox.askyesnocancel(
+            self.tr("works.dialog_new_owner_title"),
+            self.tr("works.dialog_new_owner_body", number=car["car_number"] or car_number, old=old_person,
+                    new=new_person, old_name=car["owner_name"] or self.tr("common.no_name")))
+        if answer is None:
+            return None
+        if answer:
+            # Новый владелец: клиента ищем / создаём по его телефону, не по госномеру (там прежний владелец).
+            # Вся история машины переходит к нему (works_owner_ids)
+            owner.update(lookup_by_car=False, new_owner=True)
+        else:
+            # Тот же человек - обновим ему имя / телефон
+            owner.update(client_id=car["client_id"], lookup_by_car=False, update_contact=True)
+        return owner
+
+    def works_owner_ids(self, owner, telegram_user_id, client_name, client_phone, car_brand, car_model, car_number):
+        """Клиент и машина для сохранения по решению works_resolve_owner. Считается один раз (кэш в owner)"""
+        if "ids" in owner:
+            return owner["ids"]
+        car = owner["car"]
+        if owner["plate_from"] and car:
+            # Та же машина (по VIN) с новым госномером
+            self.db.update_car_number(car["id"], car_number)
+        client_id = owner["client_id"]
+        if not client_id:
+            client_id = self.db.get_or_create_client(
+                telegram_user_id=telegram_user_id,
+                full_name=client_name,
+                phone=client_phone,
+                car_number=car_number if owner["lookup_by_car"] else None
+            )
+        elif owner["update_contact"]:
+            self.db.update_client_contact(client_id, client_name, client_phone)
+        if owner["reassign"]:
+            car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number, update_info=True) if client_id else None
+        else:
+            # Машина уже у другого владельца - наряд прежнего клиента её не забирает
+            car_id = self.db.get_or_create_car(None, car_brand, car_model, car_number, update_info=True)
+        if owner["new_owner"] and client_id and car_id:
+            # Машину продали: все прошлые наряды и записи этой машины - теперь у нового владельца
+            self.db.transfer_car_history(car_id, client_id)
+        owner["ids"] = (client_id, car_id)
+        return owner["ids"]
 
     def _link_warehouse_parts_to_work(self, work_id):
         """Наряд сохранили - отметить склад: детали из списка - "установлена" и привязаны к наряду,
@@ -3616,6 +4003,15 @@ class AutoServiceApp:
         if not telegram_user_id and client_phone:
             telegram_user_id = self.db.get_telegram_user_id_by_phone(client_phone)
 
+        # Та ли это машина и тот ли владелец: машину могли продать (другой человек на том же госномере)
+        # или перерегистрировать (тот же VIN, новый госномер) - спрашиваем, пока ничего не записано
+        owner = self.works_resolve_owner(car_number, vin, client_name, phone_digits)
+        if owner is None:
+            return
+
+        def client_and_car(tg_user_id=telegram_user_id):
+            return self.works_owner_ids(owner, tg_user_id, client_name, client_phone, car_brand, car_model, car_number)
+
         # Проверяем, редактируем ли существующую запись
         if hasattr(self, 'editing_work_id') and self.editing_work_id:
             # Получаем оригинальную дату записи
@@ -3628,16 +4024,11 @@ class AutoServiceApp:
                 work_date = datetime.now().strftime('%Y-%m-%d')
 
             # Создаём/находим клиента и машину
-            client_id = self.db.get_or_create_client(
-                telegram_user_id=telegram_user_id,
-                full_name=client_name,
-                phone=client_phone,
-                car_number=car_number
-            )
-            car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number, update_info=True) if client_id else None
+            client_id, car_id = client_and_car()
 
             # Обновляем запись
-            self.db.update_work(self.editing_work_id, worker_id, description, amount, work_date, mileage, vin, booking_id, car_id, items_json)
+            self.db.update_work(self.editing_work_id, worker_id, description, amount, work_date, mileage, vin, booking_id, car_id, items_json,
+                                client_id=client_id)
 
             # Удаляем старые запчасти и добавляем новые
             self.db.delete_parts_by_work_id(self.editing_work_id)
@@ -3659,7 +4050,10 @@ class AutoServiceApp:
             if booking_id:
                 existing_work = self.db.get_last_work_by_booking_id(booking_id)
                 if existing_work:
-                    # У записи уже есть работа - всегда объединяем в один наряд, без вопроса
+                    # У записи уже есть работа - всегда объединяем в один наряд, без вопроса.
+                    # Сменился владелец / контакты / госномер (ответы на вопросы выше) - применяем и здесь
+                    if owner["new_owner"] or owner["update_contact"] or owner["plate_from"]:
+                        client_and_car()
                     self.db.append_to_work(existing_work["work_id"], description, amount, items_json)
 
                     # Добавляем запчасти к существующей работе
@@ -3697,8 +4091,10 @@ class AutoServiceApp:
                     )
 
                     if messagebox.askyesno(self.tr("works.dialog_car_busy_title"), msg):
-                        # Объединяем с существующей работой
+                        # Объединяем с существующей работой (смену владельца / контактов - применяем)
                         existing_work_id = active_work["work_id"]
+                        if owner["new_owner"] or owner["update_contact"] or owner["plate_from"]:
+                            client_and_car()
                         self.db.append_to_work(existing_work_id, description, amount, items_json)
 
                         # Добавляем запчасти к существующей работе
@@ -3743,13 +4139,7 @@ class AutoServiceApp:
                             tg_username = tg_data["username"] or ""
 
                     # Создаём/находим клиента и машину для booking
-                    new_client_id = self.db.get_or_create_client(
-                        telegram_user_id=tg_user_id if tg_user_id else None,
-                        full_name=client_name,
-                        phone=client_phone,
-                        car_number=car_number
-                    )
-                    new_car_id = self.db.get_or_create_car(new_client_id, car_brand, car_model, car_number, update_info=True) if new_client_id else None
+                    new_client_id, new_car_id = client_and_car(tg_user_id if tg_user_id else None)
 
                     # Создаём запись со статусом "В работе"
                     booking_id = self.db.add_booking(
@@ -3761,16 +4151,11 @@ class AutoServiceApp:
                     )
 
             # Создаём/находим клиента и машину для работы
-            client_id = self.db.get_or_create_client(
-                telegram_user_id=telegram_user_id,
-                full_name=client_name,
-                phone=client_phone,
-                car_number=car_number
-            )
-            car_id = self.db.get_or_create_car(client_id, car_brand, car_model, car_number, update_info=True) if client_id else None
+            client_id, car_id = client_and_car()
 
             # Добавляем работу и получаем ID
-            work_id = self.db.add_work(worker_id, description, amount, work_date, mileage, vin, booking_id, car_id, items_json)
+            work_id = self.db.add_work(worker_id, description, amount, work_date, mileage, vin, booking_id, car_id, items_json,
+                                       client_id=client_id)
 
             # Если есть запчасти - сохраняем их
             if self.parts_list:
@@ -3794,6 +4179,8 @@ class AutoServiceApp:
         self.works_number_fill = None
         self._works_looked_up_number = None
         self.works_clear_marks()
+        self.works_unlock_all()
+        self.works_record_number = None
         self.works_set_lookup_state(None)
         self.works_editing_title = ""
         self.works_edit_snapshot = None
@@ -4136,6 +4523,12 @@ class AutoServiceApp:
         car_number = self.wh_car_number_entry.get().strip()
         if not car_number:
             self.wh_selected_car_id = None
+            # Госномер стёрли - телефон, подставленный по нему (если не правили), тоже убираем
+            plate_phone = getattr(self, "wh_plate_phone", None)
+            if plate_phone and self.wh_phone_entry.get() == plate_phone:
+                self.set_phone_value(self.wh_phone_entry, "")
+                self.wh_phone_fill = None
+            self.wh_plate_phone = None
             if getattr(self, "wh_form_by_phone", False):
                 # Форму новой машины открыл поиск по телефону - не закрываем, ждём госномер
                 return
@@ -4144,11 +4537,23 @@ class AutoServiceApp:
             return
 
         car_info = self.db.get_car_info_by_number(car_number)
+        # Телефон, подставленный по прошлому госномеру (если его не правили руками) - убираем
+        plate_phone = getattr(self, "wh_plate_phone", None)
+        if plate_phone and self.wh_phone_entry.get() == plate_phone:
+            self.set_phone_value(self.wh_phone_entry, "")
+        self.wh_plate_phone = None
         if car_info:
             self.wh_selected_car_id = car_info.get("car_id")
             info_text = f"{car_info.get('car_brand', '')} {car_info.get('car_model', '')} | {car_info.get('client_name') or self.tr('common.no_name')} | {car_info.get('client_phone', '')}"
             self.set_wh_car_status(info_text, "found")
             self.hide_new_car_form()
+            # Телефон владельца - в поле телефона (если там ещё ничего не набрано)
+            owner_phone = car_info.get("client_phone") or ""
+            if owner_phone and not phone_mask_digits(self.wh_phone_entry.get()):
+                self.set_phone_value(self.wh_phone_entry, owner_phone)
+                self.wh_plate_phone = self.wh_phone_entry.get()
+                # Номер уже "найден" - повторный поиск по нему ничего не подставит
+                self.wh_phone_fill = {"digits": phone_mask_digits(self.wh_plate_phone), "filled": {}}
         else:
             self.wh_selected_car_id = None
             self.set_wh_car_status(self.tr("warehouse.car_not_found"), "new")
@@ -6642,308 +7047,6 @@ class AutoServiceApp:
         if show_empty_message and total_visits == 0:
             messagebox.showinfo(self.tr("common.info"), self.tr("statistics.msg_no_data"))
 
-    # ===== QR-КОД С ТЕКСТОМ =====
-
-    def _generate_work_order(self, tree):
-        """Общая функция формирования листа наряда"""
-        selected = tree.selection()
-        if not selected:
-            messagebox.showwarning("Внимание", "Выберите запись для формирования листа наряда!")
-            return
-
-        # Получаем данные из выбранной строки
-        item = tree.item(selected[0])
-
-        # Если выбрана запчасть (дочерний элемент), получаем родительскую запись
-        parent = tree.parent(selected[0])
-        if parent:
-            # Это запчасть, берем данные из родительской записи
-            item = tree.item(parent)
-
-        values = item['values']
-        order_num = values[0]
-        worker_name = values[1]
-        car_info = values[2]
-        client_info = values[3]
-        description = values[4]
-        amount_str = values[5]
-        parts_str = values[6]
-        parts_price_str = values[7]
-        date_str = values[8]
-
-        # Находим работу в базе данных по этим параметрам
-        conn = self.db.get_connection()
-        cursor = conn.cursor()
-
-        # Преобразуем дату обратно в формат БД
-        work_date = datetime.strptime(date_str, '%d.%m.%Y').strftime('%Y-%m-%d')
-
-        # Извлекаем сумму из форматированной строки
-        amount = float(amount_str.replace(' руб.', '').replace('.', '').replace(',', '.'))
-
-        # Разбираем информацию о машине
-        car_parts = car_info.split() if car_info else []
-        car_brand = car_parts[0] if len(car_parts) > 0 else ""
-        car_model = car_parts[1] if len(car_parts) > 1 else ""
-        car_number = car_parts[2] if len(car_parts) > 2 else ""
-
-        cursor.execute('''
-            SELECT wk.id
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            WHERE w.full_name = %s AND wk.description = %s AND wk.amount = %s AND wk.work_date = %s
-            ORDER BY wk.created_at DESC
-            LIMIT 1
-        ''', (worker_name, description, amount, work_date))
-
-        result = cursor.fetchone()
-        conn.close()
-
-        if not result:
-            messagebox.showerror("Ошибка", "Не удалось найти работу в базе данных!")
-            return
-
-        work_id = result[0]
-
-        # Получаем полную информацию о работе
-        conn = self.db.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT w.full_name, wk.description, wk.amount, wk.work_date, wk.car_brand, wk.car_model, wk.car_number, wk.order_number, wk.client_name, wk.client_phone
-            FROM works wk
-            JOIN workers w ON wk.worker_id = w.id
-            WHERE wk.id = %s
-        ''', (work_id,))
-        work = cursor.fetchone()
-        conn.close()
-
-        if not work:
-            messagebox.showerror("Ошибка", "Запись не найдена!")
-            return
-
-        worker_name, description, work_amount, work_date, car_brand, car_model, car_number, order_number, client_name, client_phone = work
-        work_amount = float(work_amount)  # MariaDB возвращает Decimal
-        # MariaDB возвращает даты как объекты date, а не строки
-        if isinstance(work_date, str):
-            display_date = datetime.strptime(work_date, '%Y-%m-%d').strftime('%d.%m.%Y')
-        else:
-            display_date = work_date.strftime('%d.%m.%Y')
-
-        # Получаем запчасти
-        parts = self.db.get_parts_by_work_id(work_id)
-
-        # Формируем текст листа наряда
-        # Загружаем информацию о компании из настроек
-        settings = self.load_settings()
-        company_info = settings.get('company_info', '')
-
-        order_text = ""
-        if company_info:
-            order_text += company_info + "\n\n"
-        order_text += "=" * 60 + "\n"
-        order_num_str = f" № {order_number}" if order_number else ""
-        order_text += f"                      ЛИСТ НАРЯД{order_num_str}\n"
-        order_text += "=" * 60 + "\n\n"
-        order_text += f"Дата: {display_date}\n"
-        order_text += f"Автомобиль: {car_brand} {car_model} {car_number}\n"
-        # Данные клиента
-        if client_name or client_phone:
-            client_str = ""
-            if client_name:
-                client_str += client_name
-            if client_phone:
-                if client_str:
-                    client_str += f", тел.: {client_phone}"
-                else:
-                    client_str = f"тел.: {client_phone}"
-            order_text += f"Клиент: {client_str}\n"
-        order_text += f"Мастер: {worker_name}\n"
-        order_text += "\n" + "-" * 60 + "\n"
-        order_text += "ЗАПЧАСТИ:\n"
-        order_text += "-" * 60 + "\n"
-
-        parts_total = 0
-        if parts:
-            for part_name, part_price in parts:
-                part_price = float(part_price)
-                parts_total += part_price
-                # Разбиваем длинное название на строки
-                if len(part_name) <= 40:
-                    order_text += f"  {part_name:<40} {self.format_currency(part_price):>15}\n"
-                else:
-                    # Разбиваем название на части по 40 символов
-                    lines = []
-                    remaining = part_name
-                    while remaining:
-                        lines.append(remaining[:40])
-                        remaining = remaining[40:]
-
-                    # Выводим все строки кроме последней без цены
-                    for line in lines[:-1]:
-                        order_text += f"  {line:<40}\n"
-
-                    # Последняя строка с ценой
-                    order_text += f"  {lines[-1]:<40} {self.format_currency(part_price):>15}\n"
-        else:
-            order_text += "  Нет запчастей\n"
-
-        order_text += "\n" + "-" * 60 + "\n"
-        order_text += "РАБОТЫ:\n"
-        order_text += "-" * 60 + "\n"
-        # Разбиваем длинное название работы на строки
-        if len(description) <= 40:
-            order_text += f"  {description:<40} {self.format_currency(work_amount):>15}\n"
-        else:
-            # Разбиваем название на части по 40 символов
-            lines = []
-            remaining = description
-            while remaining:
-                lines.append(remaining[:40])
-                remaining = remaining[40:]
-
-            # Выводим все строки кроме последней без цены
-            for line in lines[:-1]:
-                order_text += f"  {line:<40}\n"
-
-            # Последняя строка с ценой
-            order_text += f"  {lines[-1]:<40} {self.format_currency(work_amount):>15}\n"
-
-        order_text += "\n" + "=" * 60 + "\n"
-        order_text += "ИТОГО:\n"
-        order_text += "=" * 60 + "\n"
-        order_text += f"  {'Работы:':<33} {self.format_currency(work_amount):>23}\n"
-        order_text += f"  {'Запчасти:':<33} {self.format_currency(parts_total):>23}\n"
-        order_text += "-" * 60 + "\n"
-        order_text += f"  {'ИТОГО:':<33} {self.format_currency(work_amount + parts_total):>23}\n"
-        order_text += "=" * 60 + "\n"
-
-        # Создаем QR-код с текстом листа наряда напрямую (минимальный размер)
-        # Используем UTF-8 кодировку для правильного отображения кириллицы
-        qr = qrcode.QRCode(version=1, box_size=2, border=1)
-        qr.add_data(order_text.encode('utf-8'))
-        qr.make(fit=True)
-        qr_image = qr.make_image(fill_color="black", back_color="white")
-
-        # Показываем QR-код в новом окне
-        self.show_qr_window(qr_image, order_text, car_number, order_number)
-
-    def save_work_order_to_pdf(self, qr_image, order_text, car_number="", order_number=""):
-        """Сохранить лист наряд в PDF файл"""
-        # Формируем имя файла по умолчанию из номера машины
-        default_filename = f"{car_number}.pdf" if car_number else "лист_наряд.pdf"
-
-        # Запрашиваем у пользователя где сохранить файл
-        file_path = filedialog.asksaveasfilename(
-            title="Сохранить лист наряд как PDF",
-            initialfile=default_filename,
-            defaultextension=".pdf",
-            filetypes=[("PDF файлы", "*.pdf"), ("Все файлы", "*.*")]
-        )
-
-        if not file_path:
-            return
-
-        try:
-            # Создаем PDF
-            c = canvas.Canvas(file_path, pagesize=A4)
-            width, height = A4
-
-            # Регистрируем шрифт с поддержкой кириллицы
-            try:
-                font_path = "C:\\Windows\\Fonts\\arial.ttf"
-                if os.path.exists(font_path):
-                    pdfmetrics.registerFont(TTFont('Arial', font_path))
-                    font_name = "Arial"
-                else:
-                    font_name = "Courier"
-            except:
-                font_name = "Courier"
-
-            # Сохраняем QR-код во временный файл
-            temp_qr_path = tempfile.mktemp(suffix=".png")
-            qr_image.save(temp_qr_path)
-
-            # Параметры форматирования
-            margin_left = 50
-            margin_right = 50
-            margin_top = 50
-            margin_bottom = 50
-
-            # Загружаем информацию о компании
-            settings = self.load_settings()
-            company_info = settings.get('company_info', '')
-
-            # Добавляем информацию о компании в начало
-            current_y = height - margin_top
-            if company_info:
-                c.setFont(font_name, 11)
-                for line in company_info.split('\n'):
-                    c.drawCentredString(width / 2, current_y, line)
-                    current_y -= 16
-                current_y -= 10  # Отступ после информации о компании
-
-            # Добавляем заголовок
-            c.setFont(font_name, 16)
-            title_y = current_y
-            title_text = f"ЛИСТ НАРЯД № {order_number}" if order_number else "ЛИСТ НАРЯД"
-            c.drawCentredString(width / 2, title_y, title_text)
-
-            # Добавляем QR-код
-            qr_size = 150
-            qr_x = (width - qr_size) / 2
-            qr_y = title_y - qr_size - 20
-            c.drawImage(temp_qr_path, qr_x, qr_y, qr_size, qr_size)
-
-            # Добавляем текст листа наряда с увеличенным шрифтом
-            c.setFont(font_name, 12)
-            text_y = qr_y - 30
-            line_height = 18
-            max_width = width - margin_left - margin_right
-
-            for line in order_text.split('\n'):
-                if text_y < margin_bottom:  # Если место заканчивается, создаем новую страницу
-                    c.showPage()
-                    c.setFont(font_name, 12)
-                    text_y = height - margin_top
-
-                # Если строка слишком длинная, разбиваем её
-                if c.stringWidth(line, font_name, 12) > max_width:
-                    words = line.split()
-                    current_line = ""
-                    for word in words:
-                        test_line = current_line + " " + word if current_line else word
-                        if c.stringWidth(test_line, font_name, 12) <= max_width:
-                            current_line = test_line
-                        else:
-                            if current_line:
-                                c.drawString(margin_left, text_y, current_line)
-                                text_y -= line_height
-                                if text_y < margin_bottom:
-                                    c.showPage()
-                                    c.setFont(font_name, 12)
-                                    text_y = height - margin_top
-                            current_line = word
-                    if current_line:
-                        c.drawString(margin_left, text_y, current_line)
-                        text_y -= line_height
-                else:
-                    c.drawString(margin_left, text_y, line)
-                    text_y -= line_height
-
-            # Сохраняем PDF
-            c.save()
-
-            # Удаляем временный файл QR-кода
-            try:
-                os.remove(temp_qr_path)
-            except:
-                pass
-
-            messagebox.showinfo("Успех", f"Лист наряд сохранён в:\n{file_path}")
-
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось создать PDF:\n{str(e)}")
-
     def save_booking_to_pdf(self, booking, works):
         """Сохранить все работы записи в PDF файл (формат А4)"""
         if not works:
@@ -7294,55 +7397,6 @@ class AutoServiceApp:
 
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось создать PDF:\n{str(e)}")
-
-    def show_qr_window(self, qr_image, order_text, car_number="", order_number=""):
-        """Показать окно с QR-кодом"""
-        qr_window = tk.Toplevel(self.root)
-        qr_window.title("QR-код листа наряда")
-        qr_window.geometry("600x700")
-
-        # Заголовок
-        title_label = ctk.CTkLabel(qr_window, text="Лист наряд сформирован!",
-                                font=("Arial", 14, "bold"))
-        title_label.pack(pady=10)
-
-        # Инструкция
-        info_label = ctk.CTkLabel(qr_window,
-                               text="Отсканируйте QR-код для просмотра текста листа наряда",
-                               justify=tk.CENTER)
-        info_label.pack(pady=5)
-
-        # QR-код
-        qr_frame = ctk.CTkFrame(qr_window)
-        qr_frame.pack(pady=10)
-
-        # Конвертируем QR-код в формат для Tkinter
-        qr_photo = ImageTk.PhotoImage(qr_image)
-        qr_label = ctk.CTkLabel(qr_frame, image=qr_photo)
-        qr_label.image = qr_photo  # Сохраняем ссылку
-        qr_label.pack()
-
-        # Предпросмотр текста
-        preview_frame = ctk.CTkFrame(qr_window)
-        preview_frame.pack(fill=tk.Y, expand=True, padx=10, pady=10)
-
-        # Вычисляем максимальную ширину строки в тексте
-        max_line_length = max(len(line) for line in order_text.split('\n'))
-        # Добавляем небольшой запас (2 символа)
-        text_width = max_line_length + 2
-
-        text_widget = tk.Text(preview_frame, height=15, width=text_width, font=("Courier New", 9), wrap=tk.NONE)
-        text_widget.pack(fill=tk.Y, expand=True)
-        text_widget.insert(1.0, order_text)
-        text_widget.config(state=tk.DISABLED)
-
-        # Кнопки
-        buttons_frame = ctk.CTkFrame(qr_window)
-        buttons_frame.pack(pady=10)
-
-        ctk.CTkButton(buttons_frame, text="Сохранить PDF",
-                   command=lambda: self.save_work_order_to_pdf(qr_image, order_text, car_number, order_number)).pack(side=tk.LEFT, padx=5)
-        ctk.CTkButton(buttons_frame, text="Закрыть", command=qr_window.destroy).pack(side=tk.LEFT, padx=5)
 
     # --- Методы для вкладки Записи ---
 
@@ -8497,17 +8551,49 @@ class AutoServiceApp:
                     tg_user_id = tg_data.get("user_id") or 0
                     tg_username = tg_data.get("username") or ""
 
-            # Создаём/находим клиента
-            client_id = self.db.get_or_create_client(
-                telegram_user_id=tg_user_id if tg_user_id else None,
-                full_name=name,
-                phone=phone,
-                car_number=number
-            )
+            # Машина уже есть в базе на другом человеке - спрашиваем, новый ли это владелец (машину продали).
+            # Иначе прежний владелец молча переименуется в нового (поиск клиента по госномеру)
+            car = self.db.get_car_owner_by_number(number)
+            new_owner = False
+            client_id = None
+            if car and car["client_id"] and not self.works_confirm_rename(
+                    phone_digits[-10:], name, car["owner_name"], car["owner_phone"], phone_entry, parent=add_window):
+                return
+            if car and car["client_id"] and not self.works_same_person(
+                    phone_digits[-10:], name, car["owner_phone"], car["owner_name"]):
+                old_person = car["owner_name"] or self.tr("common.no_name")
+                if car["owner_phone"]:
+                    old_person = f"{old_person} ({car['owner_phone']})"
+                answer = messagebox.askyesnocancel(
+                    self.tr("works.dialog_new_owner_title"),
+                    self.tr("works.dialog_new_owner_body", number=car["car_number"] or number, old=old_person,
+                            new=f"{name} ({phone})", old_name=car["owner_name"] or self.tr("common.no_name")),
+                    parent=add_window)
+                if answer is None:
+                    return
+                if answer:
+                    new_owner = True
+                else:
+                    # Тот же человек - обновим ему имя / телефон
+                    client_id = car["client_id"]
+                    self.db.update_client_contact(client_id, name, phone)
+
+            # Создаём/находим клиента (новый владелец - по его телефону, не по госномеру: там прежний)
+            if client_id is None:
+                client_id = self.db.get_or_create_client(
+                    telegram_user_id=tg_user_id if tg_user_id else None,
+                    full_name=name,
+                    phone=phone,
+                    car_number=None if new_owner else number
+                )
 
             # Создаём/находим машину
             car_id = existing_car_id  # Используем ID существующей машины если выбрана
-            if not car_id and client_id and brand and number:
+            if new_owner and client_id:
+                # Машину продали: она и вся история её работ и записей - у нового владельца
+                car_id = self.db.get_or_create_car(client_id, brand, model, number)
+                self.db.transfer_car_history(car_id, client_id)
+            elif not car_id and client_id and brand and number:
                 # Создаём новую машину только если не выбрана существующая
                 car_id = self.db.get_or_create_car(client_id, brand, model, number)
 
@@ -8721,6 +8807,8 @@ class AutoServiceApp:
         self.works_phone_fill = None
         self.works_number_fill = None
         self.works_clear_marks()
+        self.works_unlock_all()
+        self.works_record_number = None
         self.works_set_lookup_state(None)
         self.works_editing_title = ""
         self.works_edit_snapshot = None
@@ -8873,6 +8961,9 @@ class AutoServiceApp:
 
         # Как форма выглядит сразу после открытия - чтобы потом понять, есть ли несохранённые правки
         self.works_edit_snapshot = self.works_form_snapshot()
+        # Данные записи встали - поля закрыты; госномер записи запоминаем (сменят на чужой - спросим)
+        self.works_lock_filled()
+        self.works_record_number = self.car_number_entry.get().strip()
 
     def show_booking_info(self):
         """Показать окно с информацией о записи и работе"""

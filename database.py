@@ -87,6 +87,14 @@ class Database:
             except:
                 pass
 
+        # Первый запуск версии, где у нарядов появился клиент (works.client_id): прежде чем менять
+        # структуру уже работающей базы - полная копия в папку Backup (её видно и можно восстановить
+        # во вкладке "Резервное копирование"). Сами изменения ничего не удаляют: добавляется пустое поле
+        # и заполняется у старых нарядов
+        if not self._column_exists(cursor, "works", "client_id"):
+            conn.commit()
+            self._backup_before_migration()
+
         # Применяем миграции
         for migration_sql in MIGRATIONS:
             try:
@@ -94,8 +102,48 @@ class Database:
             except:
                 pass
 
+        # ADD COLUMN IF NOT EXISTS есть только в MariaDB - на MySQL добавляем поле обычной командой
+        if not self._column_exists(cursor, "works", "client_id"):
+            try:
+                cursor.execute("ALTER TABLE works ADD COLUMN client_id INT DEFAULT NULL")
+                cursor.execute("UPDATE works wk JOIN client_cars cc ON wk.car_id = cc.id "
+                               "SET wk.client_id = cc.client_id WHERE wk.client_id IS NULL AND cc.client_id IS NOT NULL")
+            except MySQLError as e:
+                messagebox.showerror(
+                    "Обновление базы данных",
+                    "Не удалось добавить в базу поле works.client_id (клиент наряда).\n"
+                    "Данные не изменены и не удалены, но отчёты и редактирование записей работать не будут.\n\n"
+                    f"Ошибка: {e}")
+
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _column_exists(cursor, table, column):
+        cursor.execute("""
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        """, (table, column))
+        return cursor.fetchone()[0] > 0
+
+    def _backup_before_migration(self):
+        """Полная копия базы перед изменением структуры. Не получилось - спрашиваем, продолжать ли"""
+        import backup as backup_module
+        base = get_base_path()
+        try:
+            path = backup_module.create_backup(
+                self, os.path.join(base, "Backup"),
+                os.path.join(base, "config", "settings.json"),
+                os.path.join(base, "config", "spare_parts.txt"))
+            print(f"Копия базы перед обновлением структуры: {path}")
+        except Exception as e:
+            if not messagebox.askyesno(
+                    "Обновление базы данных",
+                    "Перед обновлением структуры базы не удалось сделать её резервную копию.\n\n"
+                    f"Ошибка: {e}\n\n"
+                    "Обновление только добавляет новое поле и ничего не удаляет. Продолжить без копии?\n"
+                    "(Нет - программа закроется, базу можно сохранить вручную и запустить снова)"):
+                raise SystemExit(1)
 
     # --- Методы для работы с работниками ---
 
@@ -363,7 +411,8 @@ class Database:
                 conn.close()
                 return order_number
 
-    def add_work(self, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None, items_json=None):
+    def add_work(self, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None, items_json=None,
+                 client_id=None):
         """Добавить запись о работе и вернуть ID."""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -390,8 +439,8 @@ class Database:
             order_number = self.generate_order_number()
             try:
                 cursor.execute(
-                    "INSERT INTO works (worker_id, description, amount, work_date, completed_at, order_number, booking_id, car_id, mileage, items_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (worker_id, description, amount, work_date, completed_at, order_number, booking_id, car_id, mileage_int, items_json)
+                    "INSERT INTO works (worker_id, description, amount, work_date, completed_at, order_number, booking_id, car_id, mileage, items_json, client_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (worker_id, description, amount, work_date, completed_at, order_number, booking_id, car_id, mileage_int, items_json, client_id)
                 )
                 break
             except pymysql.err.IntegrityError:
@@ -412,7 +461,8 @@ class Database:
         conn.close()
         return work_id
 
-    def update_work(self, work_id, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None, items_json=None):
+    def update_work(self, work_id, worker_id, description, amount, work_date, mileage="", vin="", booking_id=None, car_id=None, items_json=None,
+                    client_id=None):
         """Обновить запись о работе."""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -426,9 +476,10 @@ class Database:
         cursor.execute('''
             UPDATE works
             SET worker_id = %s, description = %s, amount = %s, work_date = %s,
-                booking_id = %s, car_id = %s, mileage = %s, items_json = %s
+                booking_id = %s, car_id = %s, mileage = %s, items_json = %s,
+                client_id = COALESCE(%s, client_id)
             WHERE id = %s
-        ''', (worker_id, description, amount, work_date, booking_id, car_id, mileage_int, items_json, work_id))
+        ''', (worker_id, description, amount, work_date, booking_id, car_id, mileage_int, items_json, client_id, work_id))
         if car_id:
             if mileage:
                 # Также обновляем последний известный пробег авто
@@ -492,11 +543,11 @@ class Database:
                    cc.car_brand, cc.car_model, cc.car_number,
                    wk.mileage, cc.vin,
                    wk.booking_id, cl.full_name as client_name, cl.phone as client_phone,
-                   wk.car_id, cc.client_id
+                   wk.car_id, COALESCE(wk.client_id, cc.client_id)
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
+            LEFT JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
             WHERE wk.id = %s
         ''', (work_id,))
         work = cursor.fetchone()
@@ -519,7 +570,7 @@ class Database:
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
+            LEFT JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
             WHERE wk.booking_id = %s
             ORDER BY wk.id DESC
             LIMIT 1
@@ -544,7 +595,7 @@ class Database:
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
+            LEFT JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
             WHERE wk.booking_id = %s
             ORDER BY wk.id ASC
         ''', (booking_id,))
@@ -621,7 +672,7 @@ class Database:
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
+            LEFT JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
             WHERE wk.completed_at BETWEEN %s AND %s
             ORDER BY w.full_name, wk.completed_at
         ''', (date_from, date_to))
@@ -640,7 +691,7 @@ class Database:
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
+            LEFT JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
             WHERE UPPER(cc.car_number) LIKE %s
             ORDER BY wk.work_date DESC
         ''', (f'%{car_number.upper()}%',))
@@ -675,7 +726,7 @@ class Database:
                    cl.full_name, cl.phone
             FROM works wk
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
+            LEFT JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
             WHERE wk.worker_id = %s AND wk.completed_at BETWEEN %s AND %s
             ORDER BY wk.completed_at DESC, wk.id DESC
         ''', (worker_id, date_from, date_to))
@@ -906,8 +957,8 @@ class Database:
                    COUNT(wk.id) as visit_count,
                    COALESCE(SUM(wk.amount), 0) as total_amount
             FROM works wk
-            JOIN client_cars cc ON wk.car_id = cc.id
-            JOIN clients cl ON cc.client_id = cl.id
+            LEFT JOIN client_cars cc ON wk.car_id = cc.id
+            JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
             WHERE wk.work_date BETWEEN %s AND %s
             GROUP BY cl.id
             ORDER BY total_amount DESC
@@ -1571,6 +1622,78 @@ class Database:
             }
         return None
 
+    def get_car_owner_by_number(self, car_number):
+        """Машина по госномеру с текущим владельцем: dict(id, client_id, car_brand, car_model, car_number, vin,
+        owner_name, owner_phone) или None"""
+        if not car_number:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT cc.id, cc.client_id, cc.car_brand, cc.car_model, cc.car_number, cc.vin, cl.full_name, cl.phone
+            FROM client_cars cc
+            LEFT JOIN clients cl ON cc.client_id = cl.id
+            WHERE UPPER(cc.car_number) = UPPER(%s)
+            LIMIT 1
+        """, (car_number,))
+        row = cursor.fetchone()
+        conn.close()
+        return self._car_owner_row(row)
+
+    def get_car_by_vin(self, vin, exclude_number=None):
+        """Машина с таким VIN (кроме машины с госномером exclude_number) - тот же dict, что get_car_owner_by_number"""
+        vin = (vin or "").strip().upper()
+        if not vin:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT cc.id, cc.client_id, cc.car_brand, cc.car_model, cc.car_number, cc.vin, cl.full_name, cl.phone
+            FROM client_cars cc
+            LEFT JOIN clients cl ON cc.client_id = cl.id
+            WHERE UPPER(cc.vin) = %s AND UPPER(cc.car_number) <> UPPER(%s)
+            ORDER BY cc.id DESC
+            LIMIT 1
+        """, (vin, exclude_number or ""))
+        row = cursor.fetchone()
+        conn.close()
+        return self._car_owner_row(row)
+
+    @staticmethod
+    def _car_owner_row(row):
+        if not row:
+            return None
+        return {"id": row[0], "client_id": row[1], "car_brand": row[2] or "", "car_model": row[3] or "",
+                "car_number": row[4] or "", "vin": row[5] or "", "owner_name": row[6] or "", "owner_phone": row[7] or ""}
+
+    def transfer_car_history(self, car_id, client_id):
+        """Машину продали: все наряды и записи этой машины переходят новому владельцу"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE works SET client_id = %s WHERE car_id = %s", (client_id, car_id))
+        cursor.execute("UPDATE bookings SET client_id = %s WHERE car_id = %s", (client_id, car_id))
+        conn.commit()
+        conn.close()
+
+    def update_car_number(self, car_id, car_number):
+        """Сменить госномер машины (перерегистрация) - история машины остаётся с ней"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE client_cars SET car_number = %s WHERE id = %s", (car_number.upper(), car_id))
+        conn.commit()
+        conn.close()
+
+    def update_client_contact(self, client_id, full_name=None, phone=None):
+        """Обновить имя / телефон клиента (пустое - не трогать)"""
+        phone = normalize_phone(phone) if phone else None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE clients SET full_name = COALESCE(%s, full_name), phone = COALESCE(%s, phone) WHERE id = %s
+        """, (full_name or None, phone or None, client_id))
+        conn.commit()
+        conn.close()
+
     def get_car_by_number(self, car_number):
         """Получить авто по госномеру"""
         if not car_number:
@@ -1741,8 +1864,8 @@ class Database:
             FROM works wk
             JOIN workers w ON wk.worker_id = w.id
             JOIN client_cars cc ON wk.car_id = cc.id
-            JOIN clients cl ON cc.client_id = cl.id
-            WHERE cc.client_id = %s
+            JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
+            WHERE COALESCE(wk.client_id, cc.client_id) = %s
             ORDER BY wk.work_date DESC, wk.id DESC
         """, (client_id,))
 
@@ -1838,7 +1961,7 @@ class Database:
             FROM works w
             JOIN bookings b ON w.booking_id = b.id
             LEFT JOIN client_cars cc ON w.car_id = cc.id
-            LEFT JOIN clients cl ON cc.client_id = cl.id
+            LEFT JOIN clients cl ON cl.id = COALESCE(w.client_id, cc.client_id)
             WHERE UPPER(cc.car_number) = UPPER(%s)
               AND b.status = 'in_progress'
             ORDER BY w.id DESC

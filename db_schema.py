@@ -39,6 +39,7 @@ TABLES = {
             id INT AUTO_INCREMENT PRIMARY KEY,
             worker_id INT NOT NULL,
             car_id INT,
+            client_id INT DEFAULT NULL,
             booking_id INT,
             description TEXT NOT NULL,
             amount DECIMAL(12,2) NOT NULL,
@@ -270,4 +271,10 @@ MIGRATIONS = [
     # Telegram-аккаунт подтвердил номер клиента кнопкой «Поделиться номером» - только такому
     # аккаунту бот показывает историю авто, машины и записи (tgbot: link_verified_phone)
     "ALTER TABLE clients ADD COLUMN IF NOT EXISTS tg_verified TINYINT(1) NOT NULL DEFAULT 0",
+    # Клиент наряда - владелец машины на момент работы. Машину могут продать: тогда она переходит
+    # к новому владельцу, а прошлые наряды должны остаться за прежним. Раньше клиент наряда брался
+    # через машину (client_cars.client_id) - старым нарядам проставляем текущего владельца машины
+    "ALTER TABLE works ADD COLUMN IF NOT EXISTS client_id INT DEFAULT NULL",
+    "UPDATE works wk JOIN client_cars cc ON wk.car_id = cc.id SET wk.client_id = cc.client_id "
+    "WHERE wk.client_id IS NULL AND cc.client_id IS NOT NULL",
 ]
