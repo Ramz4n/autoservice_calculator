@@ -91,7 +91,7 @@ class Database:
         # структуру уже работающей базы - полная копия в папку Backup (её видно и можно восстановить
         # во вкладке "Резервное копирование"). Сами изменения ничего не удаляют: добавляется пустое поле
         # и заполняется у старых нарядов
-        if not self._column_exists(cursor, "works", "client_id"):
+        if not self._column_exists(cursor, "works", "client_id") or self._part_names_need_cleanup(cursor):
             conn.commit()
             self._backup_before_migration()
 
@@ -117,6 +117,18 @@ class Database:
 
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _part_names_need_cleanup(cursor):
+        """Есть названия запчастей с переносами строк / лишними пробелами (их почистит миграция)"""
+        try:
+            cursor.execute("""
+                SELECT 1 FROM parts
+                WHERE part_name <> TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' ')) LIMIT 1
+            """)
+            return cursor.fetchone() is not None
+        except MySQLError:
+            return False
 
     @staticmethod
     def _column_exists(cursor, table, column):
@@ -652,6 +664,37 @@ class Database:
 
         conn.close()
         return None
+
+    def get_parts_totals_by_work_ids(self, work_ids):
+        """{work_id: сумма запчастей} для многих нарядов одним запросом (история клиента)"""
+        work_ids = [int(w) for w in work_ids if w]
+        if not work_ids:
+            return {}
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        placeholders = ", ".join(["%s"] * len(work_ids))
+        cursor.execute(f"SELECT work_id, COALESCE(SUM(part_price), 0) FROM parts "
+                       f"WHERE work_id IN ({placeholders}) GROUP BY work_id", work_ids)
+        totals = {row[0]: float(row[1]) for row in cursor.fetchall()}
+        conn.close()
+        return totals
+
+    def get_warehouse_prices_by_work_ids(self, work_ids):
+        """Цены деталей склада, установленных в наряды: {work_id: {название: цена}} (любой статус - и "выдано").
+        Нужна, чтобы у запчасти "оплачено ранее" (в наряде она за 0) показать её настоящую цену зачёркнутой"""
+        work_ids = [int(w) for w in work_ids if w]
+        if not work_ids:
+            return {}
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        placeholders = ", ".join(["%s"] * len(work_ids))
+        cursor.execute(f"SELECT work_id, part_name, price FROM warehouse_parts "
+                       f"WHERE work_id IN ({placeholders}) AND price IS NOT NULL", work_ids)
+        prices = {}
+        for work_id, part_name, price in cursor.fetchall():
+            prices.setdefault(work_id, {})[" ".join(str(part_name or "").split())] = float(price)
+        conn.close()
+        return prices
 
     def delete_parts_by_work_id(self, work_id):
         """Удалить все запчасти для работы"""

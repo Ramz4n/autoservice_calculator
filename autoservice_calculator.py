@@ -459,13 +459,19 @@ class WorkItemsList(ctk.CTkFrame):
             ctk.CTkLabel(self, text=self.empty_text, text_color="gray", font=("Arial", 12),
                          anchor="w").pack(fill=tk.X, pady=4)
         for i, (item_id, values, tags) in enumerate(self._items):
-            name, price = (list(values) + ["", ""])[:2]
+            name, price, struck = (list(values) + ["", "", ""])[:3]
             row = ctk.CTkFrame(self, fg_color="#f7f9fa" if i % 2 == 0 else "white", corner_radius=6)
             row.pack(fill=tk.X, pady=1)
             ctk.CTkButton(row, text="✕", width=28, height=26, corner_radius=6, fg_color="transparent",
                           text_color="#c62828", hover_color="#ffebee", font=("Arial", 13, "bold"),
                           command=lambda item_id=item_id: self.on_remove(item_id)).pack(side=tk.RIGHT, padx=(4, 6))
-            ctk.CTkLabel(row, text=price, font=("Arial", 14), anchor="e").pack(side=tk.RIGHT)
+            prepaid = bool(struck) or (price and not any(ch.isdigit() for ch in str(price)))  # "оплачено ранее"
+            ctk.CTkLabel(row, text=price, font=("Arial", 14, "italic") if prepaid else ("Arial", 14),
+                         text_color="#2e7d32" if prepaid else None, anchor="e").pack(side=tk.RIGHT)
+            if struck:
+                # Оплачено ранее: настоящая цена - зачёркнутой
+                ctk.CTkLabel(row, text=struck, text_color="gray50", anchor="e",
+                             font=ctk.CTkFont(family="Arial", size=14, overstrike=True)).pack(side=tk.RIGHT, padx=(0, 6))
             ctk.CTkLabel(row, text=name, font=("Arial", 14), anchor="w", justify="left",
                          wraplength=420).pack(side=tk.LEFT, padx=10, pady=4)
             if "warehouse" in tags and self.tag_text:
@@ -3539,7 +3545,7 @@ class AutoServiceApp:
             index = children.index(item_id)
             if self.parts_list[index] != (name, price):
                 self.parts_list[index] = (name, price)
-                self.parts_tree.update_item(item_id, (name, self.format_currency(price)))
+                self.parts_tree.update_item(item_id, self.part_row_values(name, price, part["price"]))
         car_number = self.car_number_entry.get().strip()
         if car_number:
             self.check_warehouse_for_car(car_number)
@@ -3552,9 +3558,10 @@ class AutoServiceApp:
 
         # Уже оплаченные позиции (например, платное хранение шин) не добавляем
         # повторно в счёт -- клиент уже заплатил при сдаче на склад
+        original = price
         name, price = self.warehouse_part_list_entry(part_name, price, is_paid)
         self.parts_list.append((name, price))
-        item_id = self.parts_tree.insert("", tk.END, values=(name, self.format_currency(price)),
+        item_id = self.parts_tree.insert("", tk.END, values=self.part_row_values(name, price, original),
                                          tags=("warehouse",))
         self.warehouse_part_ids[item_id] = part_id
         # На складе деталь станет "установлена" только при сохранении наряда (save_warehouse_parts_for_work):
@@ -3645,7 +3652,7 @@ class AutoServiceApp:
         self.parts_list.append((part_name, part_price))
 
         # Обновляем таблицу
-        self.parts_tree.insert("", tk.END, values=(part_name, self.format_currency(part_price)))
+        self.parts_tree.insert("", tk.END, values=self.part_row_values(part_name, part_price))
 
         # Очищаем поля ввода
         self.part_name_entry.delete(0, tk.END)
@@ -3709,9 +3716,10 @@ class AutoServiceApp:
 
     def works_confirm_remove(self, kind, name, price):
         """✕ в строке работы / запчасти - переспрашиваем, чтобы не удалить случайным кликом"""
+        shown_name, price_text, _ = self.part_row_values(name, price)
         return messagebox.askyesno(
             self.tr("works.confirm_remove_title"),
-            self.tr(f"works.confirm_remove_{kind}", name=name, price=self.format_currency(price)))
+            self.tr(f"works.confirm_remove_{kind}", name=shown_name, price=price_text))
 
     def remove_work_from_list(self, item_id):
         """Удалить работу из списка (✕ в строке)"""
@@ -7540,6 +7548,7 @@ class AutoServiceApp:
 
                 # Запчасти
                 parts = self.db.get_parts_by_work_id(work_id)
+                wh_prices = self.db.get_warehouse_prices_by_work_ids([work_id]) if parts else {}
                 parts_total = 0
 
                 if parts:
@@ -7551,9 +7560,15 @@ class AutoServiceApp:
                     for part_name, part_price in parts:
                         part_price = float(part_price)
                         parts_total += part_price
+                        # Оплаченная заранее: без пометки в названии, вместо "0 руб." - "оплачено ранее",
+                        # настоящая цена (со склада) - зачёркнутой
+                        original = self.prepaid_original_price(wh_prices, work_id, part_name)
+                        shown_name, price_text, struck = self.part_row_values(part_name, part_price, original)
+                        if struck:
+                            price_text = f"<strike>{struck}</strike> {price_text}"
                         parts_table_data.append([
-                            Paragraph(f"• {part_name}", style_normal),
-                            Paragraph(self.format_currency(part_price), style_normal)
+                            Paragraph(f"• {shown_name}", style_normal),
+                            Paragraph(price_text, style_normal)
                         ])
 
                     # Строка "Сумма запчастей" — последняя строка той же таблицы,
@@ -9276,7 +9291,9 @@ class AutoServiceApp:
                             match = wh_part
                             break
                     self.parts_list.append((part_name, float(part_price)))
-                    item_id = self.parts_tree.insert("", tk.END, values=(part_name, self.format_currency(float(part_price))),
+                    item_id = self.parts_tree.insert("", tk.END,
+                                                     values=self.part_row_values(part_name, part_price,
+                                                                                 match[3] if match else None),
                                                      tags=("warehouse",) if match else ())
                     if match:
                         linked.remove(match)
@@ -9314,319 +9331,449 @@ class AutoServiceApp:
         self.works_lock_filled()
         self.works_record_number = self.car_number_entry.get().strip()
 
+    # ===== Окна "Информация" (наряд) и "О клиенте" =====
+
+    _prepaid_markers = None
+
+    def split_prepaid(self, name):
+        """Запчасть, оплаченная заранее, хранится в наряде за 0 с пометкой в названии: "Амортизатор (оплачено ранее)".
+        Возвращает (название без пометки, оплачено_ли). Пометку узнаём на любом языке интерфейса"""
+        if AutoServiceApp._prepaid_markers is None:
+            markers = {self.tr("warehouse.already_paid_marker")}
+            locales_dir = os.path.join(BASE_PATH, "config", "locales")
+            try:
+                for file_name in os.listdir(locales_dir):
+                    if file_name.endswith(".json"):
+                        with open(os.path.join(locales_dir, file_name), encoding="utf-8") as f:
+                            marker = json.load(f).get("warehouse.already_paid_marker")
+                        if marker:
+                            markers.add(marker)
+            except OSError:
+                pass
+            AutoServiceApp._prepaid_markers = markers
+        text = self.clean_item_name(name)
+        for marker in AutoServiceApp._prepaid_markers:
+            suffix = f"({marker})"
+            if text.endswith(suffix):
+                return text[:-len(suffix)].rstrip(), True
+        return text, False
+
+    def part_row_values(self, name, price, original_price=None):
+        """Как запчасть показывать: (название, цена, зачёркнутая цена).
+        Оплаченная заранее - без пометки в названии, вместо "0 руб." - "оплачено ранее",
+        а её настоящая цена (со склада, если известна) - зачёркнутой"""
+        clean, prepaid = self.split_prepaid(name)
+        if prepaid:
+            struck = self.format_currency(float(original_price)) if original_price else ""
+            return clean, self.tr("warehouse.already_paid_marker"), struck
+        return clean, self.format_currency(float(price or 0)), ""
+
+    def prepaid_original_price(self, prices_by_work, work_id, name):
+        """Настоящая цена запчасти "оплачено ранее" по данным склада (или None)"""
+        clean, prepaid = self.split_prepaid(name)
+        if not prepaid:
+            return None
+        return (prices_by_work or {}).get(work_id, {}).get(clean)
+
+    @staticmethod
+    def clean_item_name(name):
+        """Название работы / запчасти в одну строку (из сайтов поставщиков копируют с переносами)"""
+        return " ".join(str(name or "").split())
+
+    def info_item_rows(self, parent, items, wrap=400):
+        """Строки "название ... цена" (полосками, как в "Добавить работу"); items: [(название, цена)]"""
+        for i, item in enumerate(items):
+            name, price = item[0], item[1]
+            original = item[2] if len(item) > 2 else None
+            row = ctk.CTkFrame(parent, fg_color="#f7f9fa" if i % 2 == 0 else "white", corner_radius=6)
+            row.pack(fill=tk.X, pady=1)
+            shown_name, price_text, struck = self.part_row_values(name, price, original)
+            prepaid = price_text == self.tr("warehouse.already_paid_marker")
+            ctk.CTkLabel(row, text=price_text, font=("Arial", 13, "italic") if prepaid else ("Arial", 13),
+                         text_color="#2e7d32" if prepaid else None, anchor="e").pack(side=tk.RIGHT, padx=(6, 10), pady=4)
+            if struck:
+                ctk.CTkLabel(row, text=struck, text_color="gray50", anchor="e",
+                             font=ctk.CTkFont(family="Arial", size=13, overstrike=True)).pack(side=tk.RIGHT, pady=4)
+            ctk.CTkLabel(row, text=shown_name, font=("Arial", 13), anchor="w", justify="left",
+                         wraplength=wrap).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0), pady=4)
+
+    def info_summary_tiles(self, parent, tiles):
+        """Плитки сводки в строку: [(подпись, значение, выделить)]"""
+        bar = ctk.CTkFrame(parent, fg_color="transparent")
+        bar.pack(fill=tk.X, pady=(0, 8))
+        for i, (label, value, accent) in enumerate(tiles):
+            bar.grid_columnconfigure(i, weight=1, uniform="tile")
+            tile = ctk.CTkFrame(bar, corner_radius=10, border_width=1,
+                                fg_color="#e8f5e9" if accent else "white",
+                                border_color="#a5d6a7" if accent else self.FORM_CARD_BORDER)
+            tile.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 8, 0))
+            ctk.CTkLabel(tile, text=label, font=("Arial", 12), text_color="#607d8b", anchor="w").pack(
+                fill=tk.X, padx=12, pady=(8, 0))
+            ctk.CTkLabel(tile, text=value, font=("Arial", 17, "bold"), anchor="w",
+                         text_color="#2e7d32" if accent else "#263238").pack(fill=tk.X, padx=12, pady=(0, 8))
+
+    def info_window(self, title, width):
+        """Окно-карточка (наряд / клиент): светлый фон, прокрутка, кнопки снизу"""
+        window = ctk.CTkToplevel(self.root)
+        window.withdraw()
+        window.title(title)
+        window.transient(self.root)
+        window.configure(fg_color="#eef1f4")
+        buttons = ctk.CTkFrame(window, fg_color="transparent")
+        buttons.pack(side=tk.BOTTOM, fill=tk.X, padx=18, pady=(6, 14))
+        body = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+        width_guard = tk.Frame(body, width=width - 60, height=0)
+        width_guard.pack()
+        return window, body, buttons
+
+    def info_window_show(self, window, width, body):
+        """Высота окна - по содержимому, но не выше 85% экрана; по центру экрана"""
+        window.update_idletasks()
+        inner_h = max(body.winfo_reqheight(), 200)
+        buttons_h = max((w.winfo_reqheight() for w in window.winfo_children() if w is not body.master), default=60)
+        height = min(inner_h + buttons_h + 70, int(window.winfo_screenheight() * 0.85))
+        x = (window.winfo_screenwidth() - width) // 2
+        y = max(0, (window.winfo_screenheight() - height) // 2 - 20)
+        tk.Wm.wm_geometry(window, f"{width}x{height}+{x}+{y}")
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+        window.grab_set()
+        window.bind("<Escape>", lambda e: window.destroy())
+
     def show_booking_info(self):
         """Показать окно с информацией о записи и работе"""
         selection = self.bookings_tree.selection()
         if not selection:
             messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
             return
-
         values = self.bookings_tree.item(selection[0], "values")
-        if not values:
-            return
+        if values and values[0]:
+            self.show_booking_info_window(int(values[0]))
 
-        booking_id = values[0]
-        if not booking_id:
-            return
-
-        # Получаем данные записи
+    def show_booking_info_window(self, booking_id, parent_window=None):
+        """Наряд: шапка (дата, мастер, клиент, машина), сводка сумм, работы и запчасти списком"""
         booking = self.db.get_booking_by_id(int(booking_id))
         if not booking:
             messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_booking_not_found"))
             return
-
-        # Ищем ВСЕ связанные работы
         works = self.db.get_all_works_by_booking_id(int(booking_id))
 
-        # Мастер, пробег и № наряда - берём из наряда по этой записи
-        primary_work = works[0] if works else None
-        primary_worker_name = primary_work[2] if primary_work else None
-        primary_mileage = primary_work[9] if primary_work else None
-        primary_order_number = primary_work[14] if primary_work else None
-        primary_vin = (primary_work[10] if primary_work else None) or booking.get("car_vin")
+        primary = works[0] if works else None
+        worker_name = primary[2] if primary else None
+        mileage = primary[9] if primary else None
+        order_number = primary[14] if primary else None
+        vin = (primary[10] if primary else None) or booking.get("car_vin")
+        title = self.tr("bookings.order_number_label", order_number=order_number) if order_number \
+            else self.tr("bookings.info_window_title")
 
-        window_title = self.tr("bookings.order_number_label", order_number=primary_order_number) if primary_order_number else self.tr("bookings.info_window_title")
+        width = 640
+        window, body, buttons = self.info_window(title, width)
+        if parent_window is not None:
+            window.transient(parent_window)
 
-        # Создаём окно информации
-        info_window = ctk.CTkToplevel(self.root)
-        info_window.title(window_title)
-        info_window.geometry("600x700")
-        info_window.transient(self.root)
-        info_window.grab_set()
+        # --- шапка: номер, статус, когда и кто ---
+        status = booking.get("status", "waiting")
+        status_style = {"waiting": ("#f59e0b", "⏳ " + self.tr("bookings.filter_waiting")),
+                        "in_progress": ("#3b82f6", "🔧 " + self.tr("bookings.filter_in_progress")),
+                        "completed": ("#22c55e", "✅ " + self.tr("bookings.info_status_completed")),
+                        "cancelled": ("#ef4444", "❌ " + self.tr("bookings.status_cancelled"))}
+        badge_color, badge_text = status_style.get(status, ("#6b7280", status))
+        head = ctk.CTkFrame(body, fg_color="transparent")
+        head.pack(fill=tk.X, padx=4, pady=(4, 0))
+        ctk.CTkLabel(head, text=title, font=("Segoe UI", 20, "bold"), anchor="w").pack(side=tk.LEFT)
+        ctk.CTkLabel(head, text=f"  {badge_text}  ", font=("Arial", 13, "bold"), fg_color=badge_color,
+                     text_color="white", corner_radius=8).pack(side=tk.RIGHT)
 
-        # Цвета для статусов
-        status_colors = {
-            "waiting": ("#f59e0b", "#78350f"),      # Оранжевый
-            "in_progress": ("#3b82f6", "#1e3a8a"),  # Синий
-            "completed": ("#22c55e", "#14532d"),    # Зелёный
-            "cancelled": ("#ef4444", "#7f1d1d")     # Красный
-        }
-        status_map = {
-            "waiting": "⏳ " + self.tr("bookings.filter_waiting"),
-            "in_progress": "🔧 " + self.tr("bookings.filter_in_progress"),
-            "completed": "✅ " + self.tr("bookings.info_status_completed"),
-            "cancelled": "❌ " + self.tr("bookings.status_cancelled"),
-        }
-
-        booking_status = booking.get("status", "waiting")
-        status_bg, status_fg = status_colors.get(booking_status, ("#6b7280", "#1f2937"))
-        status_text = status_map.get(booking_status, booking_status)
-
-        # Основной фрейм с прокруткой
-        main_frame = ctk.CTkScrollableFrame(info_window, fg_color="transparent")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-
-        # ═══════════════════════════════════════════════════════
-        # КАРТОЧКА: Информация о записи
-        # ═══════════════════════════════════════════════════════
-        booking_card = ctk.CTkFrame(main_frame, corner_radius=12)
-        booking_card.pack(fill="x", pady=(0, 15))
-
-        # Заголовок карточки с иконкой
-        header_frame = ctk.CTkFrame(booking_card, fg_color="transparent")
-        header_frame.pack(fill="x", padx=15, pady=(15, 10))
-
-        ctk.CTkLabel(
-            header_frame,
-            text="📋  " + window_title,
-            font=("Arial", 18, "bold")
-        ).pack(side="left")
-
-        # Бейдж статуса
-        status_badge = ctk.CTkLabel(
-            header_frame,
-            text=f"  {status_text}  ",
-            font=("Arial", 13, "bold"),
-            fg_color=status_bg,
-            text_color="white",
-            corner_radius=8
-        )
-        status_badge.pack(side="right")
-
-        # Разделитель
-        ctk.CTkFrame(booking_card, height=1, fg_color="gray70").pack(fill="x", padx=15)
-
-        # Контент карточки
-        content_frame = ctk.CTkFrame(booking_card, fg_color="transparent")
-        content_frame.pack(fill="x", padx=15, pady=15)
-
-        # Форматируем дату
         booking_date = booking.get("booking_date")
-        if hasattr(booking_date, 'strftime'):
-            date_str = booking_date.strftime('%d.%m.%Y')
-        else:
-            date_str = str(booking_date)
+        date_str = booking_date.strftime('%d.%m.%Y') if hasattr(booking_date, "strftime") else str(booking_date or "")
+        when = f"{date_str}, {booking.get('booking_time') or ''}".strip(", ")
+        if worker_name:
+            when += " · " + self.tr("bookings.info_master", name=worker_name)
+        ctk.CTkLabel(body, text=when, font=("Arial", 13), text_color="#607d8b", anchor="w").pack(
+            fill=tk.X, padx=4, pady=(0, 8))
 
-        # Telegram info
-        tg_username = booking.get('username') or '-'
-        tg_user_id = booking.get('user_id') or 0
-        car_info = booking.get('car_info') or '-'
+        # --- клиент и машина ---
+        _, card = self.form_section(body, self.tr("works.section_client_car"))
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill=tk.X)
+        ctk.CTkLabel(row, text=booking.get("full_name") or self.tr("bookings.name_not_specified"),
+                     font=("Arial", 15, "bold"), anchor="w").pack(side=tk.LEFT)
+        phone = booking.get("phone")
+        if phone:
+            self.add_copy_button(row, phone).pack(side=tk.RIGHT)
+            ctk.CTkLabel(row, text=format_phone_ru(phone_mask_digits(phone)) if len(phone_mask_digits(phone)) == 10
+                         else phone, font=("Arial", 14), anchor="e").pack(side=tk.RIGHT, padx=(0, 4))
+        car_line = booking.get("car_info") or ""
+        if mileage:
+            car_line += ("  ·  " if car_line else "") + self.tr("bookings.info_mileage", mileage=mileage)
+        if car_line:
+            ctk.CTkLabel(card, text=car_line, font=("Arial", 14), anchor="w").pack(fill=tk.X, pady=(4, 0))
+        if vin:
+            vin_row = ctk.CTkFrame(card, fg_color="transparent")
+            vin_row.pack(fill=tk.X, pady=(2, 0))
+            ctk.CTkLabel(vin_row, text=f"VIN {vin}", font=("Consolas", 13), text_color="#455a64").pack(side=tk.LEFT)
+            self.add_copy_button(vin_row, vin).pack(side=tk.LEFT, padx=(6, 0))
+        if booking.get("username"):
+            ctk.CTkLabel(card, text=f"Telegram: @{booking['username']}", font=("Arial", 12),
+                         text_color="#607d8b", anchor="w").pack(fill=tk.X, pady=(2, 0))
+        if booking.get("notes"):
+            ctk.CTkLabel(card, text="📝 " + booking["notes"], font=("Arial", 13), anchor="w", justify="left",
+                         wraplength=width - 100).pack(fill=tk.X, pady=(4, 0))
 
-        # Двухколоночная раскладка
-        info_data = [
-            ("📅 " + self.tr("bookings.add_window_date"), date_str),
-            ("🕐 " + self.tr("bookings.add_window_time"), booking.get('booking_time', '-')),
-            ("👤 " + self.tr("bookings.info_label_client") + ":", booking.get('full_name') or self.tr("bookings.name_not_specified")),
-            ("📞 " + self.tr("bookings.col_phone") + ":", booking.get('phone') or self.tr("bookings.phone_not_specified")),
-            ("💬 Telegram:", f"@{tg_username}" if tg_username != '-' else '-'),
-            ("🚗 " + self.tr("bookings.col_car") + ":", car_info),
-            ("🔑 " + self.tr("works.vin"), primary_vin or "-"),
-        ]
-        if primary_worker_name:
-            info_data.append(("🔧 " + self.tr("bookings.info_label_master"), primary_worker_name))
-        if primary_mileage:
-            info_data.append(("📊 " + self.tr("works.mileage"), str(primary_mileage)))
-        booking_notes = booking.get('notes')
-        if booking_notes:
-            info_data.append(("📝 " + self.tr("bookings.info_label_notes"), booking_notes))
-
-        for i, (label, value) in enumerate(info_data):
-            row = ctk.CTkFrame(content_frame, fg_color="transparent")
-            row.pack(fill="x", pady=4)
-
-            ctk.CTkLabel(
-                row,
-                text=label,
-                font=("Arial", 14),
-                text_color=("gray30", "gray70"),
-                width=140,
-                anchor="w"
-            ).pack(side="left")
-
-            value_label = ctk.CTkLabel(
-                row,
-                text=value,
-                font=("Arial", 14),
-                anchor="w"
-            )
-            if label.startswith("🔑") and primary_vin:
-                # VIN: значок копирования сразу после номера
-                value_label.pack(side="left")
-                self.add_copy_button(row, primary_vin).pack(side="left", padx=(6, 0))
-            else:
-                value_label.pack(side="left", fill="x", expand=True)
-
-        # ═══════════════════════════════════════════════════════
-        # КАРТОЧКА: Работы
-        # ═══════════════════════════════════════════════════════
-
-        # Заголовок в зависимости от статуса
-        if booking_status == "completed":
-            works_icon = "✅"
-            works_title = self.tr("bookings.works_completed_title")
-        elif booking_status == "in_progress":
-            works_icon = "🔧"
-            works_title = self.tr("bookings.works_in_progress_title")
-        else:
-            works_icon = "📝"
-            works_title = self.tr("bookings.works_default_title")
-
-        works_card = ctk.CTkFrame(main_frame, corner_radius=12)
-        works_card.pack(fill="x", pady=(0, 15))
-
-        # Заголовок
-        works_header = ctk.CTkFrame(works_card, fg_color="transparent")
-        works_header.pack(fill="x", padx=15, pady=(15, 10))
-
-        ctk.CTkLabel(
-            works_header,
-            text=f"{works_icon}  {works_title}",
-            font=("Arial", 18, "bold")
-        ).pack(side="left")
-
-        # Разделитель
-        ctk.CTkFrame(works_card, height=1, fg_color="gray70").pack(fill="x", padx=15)
-
-        # Контент работ
-        works_content = ctk.CTkFrame(works_card, fg_color="transparent")
-        works_content.pack(fill="x", padx=15, pady=15)
+        # --- работы и запчасти ---
+        work_items, part_items = [], []
+        multiple = len(works) > 1
+        wh_prices = self.db.get_warehouse_prices_by_work_ids([w[0] for w in works])
+        for work in works:
+            work_id, description, amount = work[0], work[3], float(work[4] or 0)
+            items = self.get_work_line_items(work_id, description, amount)
+            parts = self.db.get_parts_by_work_id(work_id) or []
+            if multiple:
+                label = self.tr("bookings.order_number_label", order_number=work[14]) if work[14] else ""
+                work_items.append((label, None))
+                if parts:
+                    part_items.append((label, None))
+            work_items += [(n, p) for n, p in items]
+            part_items += [(n, float(p), self.prepaid_original_price(wh_prices, work_id, n)) for n, p in parts]
+        works_sum = sum(item[1] for item in work_items if item[1] is not None)
+        parts_sum = sum(item[1] for item in part_items if item[1] is not None)
 
         if not works:
-            ctk.CTkLabel(
-                works_content,
-                text=self.tr("bookings.no_works_yet"),
-                text_color=("gray40", "gray60"),
-                font=("Arial", 14)
-            ).pack(anchor="w")
+            _, card = self.form_section(body, self.tr("works.section_works"))
+            ctk.CTkLabel(card, text=self.tr("bookings.no_works_yet"), text_color="gray45",
+                         font=("Arial", 13), anchor="w").pack(fill=tk.X)
         else:
-            grand_total = 0
+            self.info_summary_tiles(body, [(self.tr("works.section_works"), self.format_currency(works_sum), False),
+                                           (self.tr("works.section_parts"), self.format_currency(parts_sum), False),
+                                           (self.tr("bookings.sum_total"), self.format_currency(works_sum + parts_sum), True)])
+            for title_key, items in (("works.section_works", work_items), ("works.section_parts", part_items)):
+                if not items:
+                    continue
+                _, card = self.form_section(body, self.tr(title_key))
+                for chunk_title, chunk in self._split_by_headers(items):
+                    if chunk_title:
+                        ctk.CTkLabel(card, text=chunk_title, font=("Arial", 12, "bold"), text_color="#607d8b",
+                                     anchor="w").pack(fill=tk.X, pady=(4, 2))
+                    self.info_item_rows(card, chunk, wrap=width - 230)
 
-            for i, work in enumerate(works, 1):
-                work_id, _, worker_name, description, amount, work_date, car_brand, car_model, car_number, mileage, vin, _, client_name, client_phone, order_number, car_id = work
+        # --- кнопки ---
+        def edit():
+            window.destroy()
+            if parent_window is not None and parent_window.winfo_exists():
+                parent_window.destroy()
+            self.open_booking_in_add_work(int(booking_id))
 
-                # Карточка отдельной работы
-                work_frame = ctk.CTkFrame(works_content, corner_radius=8, fg_color=("gray90", "gray20"))
-                work_frame.pack(fill="x", pady=(0, 10) if i < len(works) else 0)
-
-                work_inner = ctk.CTkFrame(work_frame, fg_color="transparent")
-                work_inner.pack(fill="x", padx=12, pady=12)
-
-                # Считаем суммы
-                work_amount = float(amount or 0)
-                work_parts = self.db.get_parts_by_work_id(work_id)
-                parts_total = sum(float(p[1]) for p in work_parts) if work_parts else 0
-                work_total = work_amount + parts_total
-                grand_total += work_total
-
-                # Описание работ
-                if description:
-                    desc_frame = ctk.CTkFrame(work_inner, fg_color="transparent")
-                    desc_frame.pack(fill="x", pady=(0, 5))
-
-                    ctk.CTkLabel(
-                        desc_frame,
-                        text=self.tr("bookings.services_label", amount=self.format_currency(work_amount)),
-                        font=("Arial", 14, "bold")
-                    ).pack(anchor="w")
-
-                    work_items = self.get_work_line_items(work_id, description, work_amount)
-                    for work_item, item_price in work_items:
-                        ctk.CTkLabel(
-                            desc_frame,
-                            text=f"   • {work_item} — {self.format_currency(item_price)}",
-                            font=("Arial", 13),
-                            anchor="w"
-                        ).pack(anchor="w")
-
-                # Запчасти
-                if work_parts:
-                    parts_frame = ctk.CTkFrame(work_inner, fg_color="transparent")
-                    parts_frame.pack(fill="x", pady=(5, 0))
-
-                    ctk.CTkLabel(
-                        parts_frame,
-                        text=self.tr("bookings.parts_label", amount=self.format_currency(parts_total)),
-                        font=("Arial", 14, "bold")
-                    ).pack(anchor="w")
-
-                    for part_name, part_price in work_parts:
-                        ctk.CTkLabel(
-                            parts_frame,
-                            text=f"   • {part_name} — {self.format_currency(float(part_price))}",
-                            font=("Arial", 13),
-                            anchor="w"
-                        ).pack(anchor="w")
-
-                # Итог по работе
-                work_total_row = ctk.CTkFrame(work_inner, fg_color="transparent")
-                work_total_row.pack(fill="x", pady=(8, 0))
-
-                ctk.CTkLabel(
-                    work_total_row,
-                    text=self.tr("bookings.work_total_label", amount=self.format_currency(work_total)),
-                    font=("Arial", 14, "bold"),
-                    text_color="#3b82f6"
-                ).pack(side="right")
-
-            # ═══════════════════════════════════════════════════════
-            # КАРТОЧКА: Общий итог
-            # ═══════════════════════════════════════════════════════
-            total_card = ctk.CTkFrame(main_frame, corner_radius=12, fg_color=("#d1fae5", "#064e3b"))
-            total_card.pack(fill="x", pady=(0, 10))
-
-            total_inner = ctk.CTkFrame(total_card, fg_color="transparent")
-            total_inner.pack(fill="x", padx=20, pady=15)
-
-            ctk.CTkLabel(
-                total_inner,
-                text="💰  " + self.tr("bookings.grand_total_label"),
-                font=("Arial", 16, "bold"),
-                text_color=("#065f46", "#a7f3d0")
-            ).pack(side="left")
-
-            ctk.CTkLabel(
-                total_inner,
-                text=self.format_currency(grand_total),
-                font=("Arial", 24, "bold"),
-                text_color=("#065f46", "#a7f3d0")
-            ).pack(side="right")
-
-        # ═══════════════════════════════════════════════════════
-        # Кнопки внизу
-        # ═══════════════════════════════════════════════════════
-        buttons_frame = ctk.CTkFrame(info_window, fg_color="transparent")
-        buttons_frame.pack(pady=15)
-
+        ctk.CTkButton(buttons, text="✎  " + self.tr("bookings.ctx_edit"), command=edit, height=40, width=170,
+                      corner_radius=8, font=("Arial", 14, "bold"), fg_color="#1565c0",
+                      hover_color="#0d47a1").pack(side=tk.LEFT)
         if works:
-            ctk.CTkButton(
-                buttons_frame,
-                text="📄  " + self.tr("bookings.save_pdf_btn"),
-                command=lambda: self.save_booking_to_pdf(booking, works),
-                width=160,
-                height=40,
-                font=("Arial", 13)
-            ).pack(side=tk.LEFT, padx=5)
+            ctk.CTkButton(buttons, text="📄  PDF", command=lambda: self.save_booking_to_pdf(booking, works),
+                          height=40, width=110, corner_radius=8, font=("Arial", 14),
+                          fg_color="#e3f2fd", text_color="#0d47a1", hover_color="#bbdefb").pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(buttons, text=self.tr("common.close"), command=window.destroy, height=40, width=120,
+                      corner_radius=8, font=("Arial", 14), fg_color="transparent", border_width=1,
+                      border_color="#9e9e9e", text_color="#424242", hover_color="#e0e0e0").pack(side=tk.RIGHT)
+        self.info_window_show(window, width, body)
 
-        ctk.CTkButton(
-            buttons_frame,
-            text=self.tr("common.close"),
-            command=info_window.destroy,
-            width=120,
-            height=40,
-            font=("Arial", 13),
-            fg_color="gray50",
-            hover_color="gray40"
-        ).pack(side=tk.LEFT, padx=5)
+    @staticmethod
+    def _split_by_headers(items):
+        """[(заголовок, None), (название, цена)...] -> [(заголовок, [(название, цена)...])]"""
+        chunks = [("", [])]
+        for item in items:
+            if item[1] is None:
+                chunks.append((item[0], []))
+            else:
+                chunks[-1][1].append(item)
+        return [(t, c) for t, c in chunks if c]
+
+    def show_client_info(self):
+        """Показать окно с информацией о клиенте: машины и история"""
+        selection = self.bookings_tree.selection()
+        if not selection:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
+            return
+        values = self.bookings_tree.item(selection[0], "values")
+        if not values:
+            return
+
+        # values: (id, order_number, date, time, name, phone, username, car_info, notes, status)
+        booking_id = values[0] if len(values) > 0 else None
+        client_name = values[4] if len(values) > 4 and values[4] != "-" else None
+        client_phone = values[5] if len(values) > 5 and values[5] != "-" else None
+        client_telegram = values[6] if len(values) > 6 and values[6] != "-" else None
+
+        telegram_user_id = None
+        if booking_id:
+            booking = self.db.get_booking_by_id(int(booking_id))
+            if booking:
+                telegram_user_id = booking.get("user_id")
+        if not telegram_user_id and not client_phone and not client_name:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_client_data"))
+            return
+
+        cars, history = [], []
+        if telegram_user_id:
+            cars = self.db.get_client_cars_by_telegram_user_id(telegram_user_id)
+            history = self.db.get_client_history(telegram_user_id=telegram_user_id)
+        if not cars and client_phone:
+            cars = self.db.get_client_cars_by_phone(client_phone)
+        if not cars and client_name:
+            cars = self.db.get_client_cars_by_name(client_name)
+        if not history:
+            history = self.db.get_client_history(phone=client_phone, name=client_name)
+
+        # Суммы запчастей по всем визитам - одним запросом
+        parts_totals = self.db.get_parts_totals_by_work_ids([w[0] for w in history])
+        visits = []
+        for work in history:
+            work_id, work_date, order_number, worker, brand, model, number, mileage, description, amount = work[:10]
+            total = float(amount or 0) + parts_totals.get(work_id, 0.0)
+            visits.append({"id": work_id, "date": work_date, "order": order_number, "worker": worker,
+                           "car": " ".join(x for x in (brand, model) if x), "number": number or "",
+                           "mileage": mileage, "description": description, "amount": float(amount or 0), "total": total})
+
+        width = 700
+        window, body, buttons = self.info_window(
+            self.tr("bookings.client_window_title", name=client_name or client_phone), width)
+
+        # --- шапка: имя, телефон ---
+        head = ctk.CTkFrame(body, fg_color="transparent")
+        head.pack(fill=tk.X, padx=4, pady=(4, 2))
+        ctk.CTkLabel(head, text=client_name or self.tr("bookings.name_not_specified"),
+                     font=("Segoe UI", 20, "bold"), anchor="w").pack(side=tk.LEFT)
+        if client_phone:
+            self.add_copy_button(head, client_phone).pack(side=tk.RIGHT)
+            digits = phone_mask_digits(client_phone)
+            ctk.CTkLabel(head, text=format_phone_ru(digits) if len(digits) == 10 else client_phone,
+                         font=("Arial", 15), anchor="e").pack(side=tk.RIGHT, padx=(0, 4))
+        if client_telegram:
+            ctk.CTkLabel(body, text=f"Telegram: {client_telegram}", font=("Arial", 12), text_color="#607d8b",
+                         anchor="w").pack(fill=tk.X, padx=4)
+
+        # --- сводка ---
+        def fmt_date(d):
+            return d.strftime('%d.%m.%Y') if hasattr(d, "strftime") else (str(d) if d else "—")
+
+        last_visit = max((v["date"] for v in visits if v["date"]), default=None)
+        ctk.CTkFrame(body, fg_color="transparent", height=6).pack()
+        self.info_summary_tiles(body, [(self.tr("bookings.client_visits"), str(len(visits)), False),
+                                       (self.tr("bookings.client_total"),
+                                        self.format_currency(sum(v["total"] for v in visits)), True),
+                                       (self.tr("bookings.client_last_visit"), fmt_date(last_visit), False)])
+
+        # --- машины: плашки, клик - фильтр истории ---
+        car_filter = [None]
+        chips_row = None
+        if cars:
+            _, card = self.form_section(body, self.tr("bookings.client_cars_section"))
+            chips_row = ctk.CTkFrame(card, fg_color="transparent")
+            chips_row.pack(fill=tk.X)
+            vins = [(f"{(b or '')} {(m or '')}".strip(), n, v) for b, m, n, v in cars]
+            for title, number, vin in vins:
+                if vin:
+                    vin_row = ctk.CTkFrame(card, fg_color="transparent")
+                    vin_row.pack(fill=tk.X, pady=(4, 0))
+                    ctk.CTkLabel(vin_row, text=f"{title} {number or ''} — VIN {vin}", font=("Consolas", 12),
+                                 text_color="#455a64").pack(side=tk.LEFT)
+                    self.add_copy_button(vin_row, vin).pack(side=tk.LEFT, padx=(6, 0))
+
+        # --- история: строка на визит, клик - раскрыть, двойной клик - открыть наряд ---
+        _, history_card = self.form_section(body, self.tr("bookings.client_history_section"))
+        if visits:
+            ctk.CTkLabel(history_card, text=self.tr("bookings.client_history_hint"), font=("Arial", 11),
+                         text_color="gray50", anchor="w").pack(fill=tk.X, pady=(0, 4))
+        history_list = ctk.CTkFrame(history_card, fg_color="transparent")
+        history_list.pack(fill=tk.X)
+
+        def open_visit(visit):
+            work = self.db.get_work_by_id(visit["id"])
+            if work and work[11]:
+                self.show_booking_info_window(int(work[11]), parent_window=window)
+
+        def draw_history():
+            for w in history_list.winfo_children():
+                w.destroy()
+            shown = [v for v in visits if car_filter[0] is None or v["number"] == car_filter[0]]
+            if not shown:
+                ctk.CTkLabel(history_list, text=self.tr("bookings.history_empty"), text_color="gray45",
+                             font=("Arial", 13), anchor="w").pack(fill=tk.X)
+            for i, visit in enumerate(shown):
+                item = ctk.CTkFrame(history_list, fg_color="#f7f9fa" if i % 2 == 0 else "white", corner_radius=6)
+                item.pack(fill=tk.X, pady=1)
+                line = ctk.CTkFrame(item, fg_color="transparent", cursor="hand2")
+                line.pack(fill=tk.X)
+                arrow = ctk.CTkLabel(line, text="▸", width=16, font=("Arial", 13), cursor="hand2")
+                arrow.pack(side=tk.LEFT, padx=(8, 2), pady=5)
+                parts_txt = [fmt_date(visit["date"]), f"{visit['car']} {visit['number']}".strip()]
+                if visit["worker"]:
+                    parts_txt.append(visit["worker"])
+                text = ctk.CTkLabel(line, text="   ".join(parts_txt), font=("Arial", 13), anchor="w", cursor="hand2")
+                text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                total = ctk.CTkLabel(line, text=self.format_currency(visit["total"]), font=("Arial", 13, "bold"),
+                                     cursor="hand2")
+                total.pack(side=tk.RIGHT, padx=10)
+                details = ctk.CTkFrame(item, fg_color="transparent")
+                opened = [False]
+
+                def toggle(event=None, visit=visit, details=details, arrow=arrow, opened=opened):
+                    if opened[0]:
+                        details.pack_forget()
+                        arrow.configure(text="▸")
+                    else:
+                        if not details.winfo_children():
+                            items = self.get_work_line_items(visit["id"], visit["description"], visit["amount"])
+                            parts = self.db.get_parts_by_work_id(visit["id"]) or []
+                            wh_prices = self.db.get_warehouse_prices_by_work_ids([visit["id"]]) if parts else {}
+                            if visit["order"]:
+                                ctk.CTkLabel(details, text=self.tr("bookings.order_number_label", order_number=visit["order"])
+                                             + (f"  ·  {self.tr('bookings.info_mileage', mileage=visit['mileage'])}"
+                                                if visit["mileage"] else ""),
+                                             font=("Arial", 11), text_color="#607d8b", anchor="w").pack(fill=tk.X, padx=26)
+                            self.info_item_rows(details, items + [
+                                (n, float(p), self.prepaid_original_price(wh_prices, visit["id"], n)) for n, p in parts],
+                                wrap=width - 260)
+                        details.pack(fill=tk.X, padx=(20, 8), pady=(0, 6))
+                        arrow.configure(text="▾")
+                    opened[0] = not opened[0]
+
+                for w in (line, arrow, text, total):
+                    w.bind("<Button-1>", toggle)
+                    w.bind("<Double-Button-1>", lambda e, v=visit: open_visit(v))
+
+        def set_filter(number):
+            car_filter[0] = number
+            draw_chips()
+            draw_history()
+
+        def draw_chips():
+            if chips_row is None:
+                return
+            for w in chips_row.winfo_children():
+                w.destroy()
+            options = [(self.tr("bookings.client_all_cars"), None)] + \
+                      [(f"{(b or '')} {(m or '')}  {n or ''}".strip(), n) for b, m, n, _ in cars]
+            if len(cars) < 2:
+                options = options[1:]   # одна машина - фильтр не нужен
+            for label, number in options:
+                selected = number == car_filter[0] and len(cars) > 1
+                ctk.CTkButton(chips_row, text=label, width=10, height=28, corner_radius=14,
+                              font=("Arial", 13, "bold" if selected else "normal"),
+                              fg_color="#1565c0" if selected else "transparent",
+                              hover_color="#0d47a1" if selected else "#e3f2fd",
+                              text_color="white" if selected else "#0d47a1", border_width=0 if selected else 1,
+                              border_color="#90caf9",
+                              command=(lambda n=number: set_filter(n)) if len(cars) > 1 else None).pack(
+                    side=tk.LEFT, padx=(0, 6), pady=2)
+
+        draw_chips()
+        draw_history()
+
+        ctk.CTkButton(buttons, text=self.tr("common.close"), command=window.destroy, height=40, width=120,
+                      corner_radius=8, font=("Arial", 14), fg_color="transparent", border_width=1,
+                      border_color="#9e9e9e", text_color="#424242", hover_color="#e0e0e0").pack(side=tk.RIGHT)
+        self.info_window_show(window, width, body)
 
     def edit_client_info(self):
         """Открыть окно редактирования имени/телефона клиента — исправление
@@ -9689,369 +9836,6 @@ class AutoServiceApp:
                       fg_color="#4caf50", hover_color="#388e3c", width=130).pack(side=tk.LEFT, padx=(0, 10))
         ctk.CTkButton(btn_row, text=self.tr("common.cancel"), command=dialog.destroy,
                       fg_color="gray", width=130).pack(side=tk.LEFT)
-
-    def show_client_info(self):
-        """Показать окно с информацией о клиенте: машины и история"""
-        selection = self.bookings_tree.selection()
-        if not selection:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
-            return
-
-        values = self.bookings_tree.item(selection[0], "values")
-        if not values:
-            return
-
-        # values: (id, order_number, date, time, name, phone, username, car_info, status)
-        booking_id = values[0] if len(values) > 0 else None
-        client_name = values[4] if len(values) > 4 else None
-        client_phone = values[5] if len(values) > 5 else None
-        client_telegram = values[6] if len(values) > 6 else None
-
-        # Получаем user_id (telegram_user_id) из записи
-        telegram_user_id = None
-        if booking_id:
-            booking = self.db.get_booking_by_id(int(booking_id))
-            if booking:
-                telegram_user_id = booking.get("user_id")
-
-        if not telegram_user_id and not client_phone and not client_name:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_client_data"))
-            return
-
-        # Получаем машины и историю клиента (приоритет по telegram_user_id)
-        cars = []
-        history = []
-
-        if telegram_user_id:
-            cars = self.db.get_client_cars_by_telegram_user_id(telegram_user_id)
-            history = self.db.get_client_history(telegram_user_id=telegram_user_id)
-
-        # Если по telegram_user_id ничего не нашли — ищем по телефону/имени
-        if not cars and client_phone:
-            cars = self.db.get_client_cars_by_phone(client_phone)
-        if not cars and client_name:
-            cars = self.db.get_client_cars_by_name(client_name)
-
-        if not history:
-            history = self.db.get_client_history(phone=client_phone, name=client_name)
-
-        # Создаём окно
-        client_window = ctk.CTkToplevel(self.root)
-        client_window.title(self.tr("bookings.client_window_title", name=client_name or client_phone))
-        client_window.geometry("700x700")
-        client_window.transient(self.root)
-        client_window.grab_set()
-
-        # Основной фрейм с прокруткой
-        main_frame = ctk.CTkScrollableFrame(client_window, fg_color="transparent")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-
-        # ═══════════════════════════════════════════════════════
-        # КАРТОЧКА: Информация о клиенте
-        # ═══════════════════════════════════════════════════════
-        client_card = ctk.CTkFrame(main_frame, corner_radius=12)
-        client_card.pack(fill="x", pady=(0, 15))
-
-        # Заголовок
-        header_frame = ctk.CTkFrame(client_card, fg_color="transparent")
-        header_frame.pack(fill="x", padx=15, pady=(15, 10))
-
-        ctk.CTkLabel(
-            header_frame,
-            text="👤  " + self.tr("bookings.client_info_header"),
-            font=("Arial", 18, "bold")
-        ).pack(side="left")
-
-        # Разделитель
-        ctk.CTkFrame(client_card, height=1, fg_color="gray70").pack(fill="x", padx=15)
-
-        # Контент
-        content_frame = ctk.CTkFrame(client_card, fg_color="transparent")
-        content_frame.pack(fill="x", padx=15, pady=15)
-
-        client_data = [
-            ("👤 " + self.tr("bookings.client_name_label") + ":", client_name or self.tr("bookings.name_not_specified")),
-            ("📞 " + self.tr("bookings.col_phone") + ":", client_phone or self.tr("bookings.phone_not_specified")),
-            ("💬 Telegram:", client_telegram if client_telegram and client_telegram != '-' else self.tr("bookings.phone_not_specified")),
-        ]
-
-        for label, value in client_data:
-            row = ctk.CTkFrame(content_frame, fg_color="transparent")
-            row.pack(fill="x", pady=4)
-
-            ctk.CTkLabel(
-                row,
-                text=label,
-                font=("Arial", 14),
-                text_color=("gray30", "gray70"),
-                width=120,
-                anchor="w"
-            ).pack(side="left")
-
-            ctk.CTkLabel(
-                row,
-                text=value,
-                font=("Arial", 14),
-                anchor="w"
-            ).pack(side="left", fill="x", expand=True)
-
-        # ═══════════════════════════════════════════════════════
-        # КАРТОЧКА: Автомобили
-        # ═══════════════════════════════════════════════════════
-        cars_card = ctk.CTkFrame(main_frame, corner_radius=12)
-        cars_card.pack(fill="x", pady=(0, 15))
-
-        # Заголовок
-        cars_header = ctk.CTkFrame(cars_card, fg_color="transparent")
-        cars_header.pack(fill="x", padx=15, pady=(15, 10))
-
-        ctk.CTkLabel(
-            cars_header,
-            text=self.tr("bookings.cars_header", count=len(cars)),
-            font=("Arial", 18, "bold")
-        ).pack(side="left")
-
-        # Разделитель
-        ctk.CTkFrame(cars_card, height=1, fg_color="gray70").pack(fill="x", padx=15)
-
-        # Контент
-        cars_content = ctk.CTkFrame(cars_card, fg_color="transparent")
-        cars_content.pack(fill="x", padx=15, pady=15)
-
-        if not cars:
-            ctk.CTkLabel(
-                cars_content,
-                text=self.tr("bookings.no_cars_data"),
-                text_color=("gray40", "gray60"),
-                font=("Arial", 14)
-            ).pack(anchor="w")
-        else:
-            for i, (car_brand, car_model, car_number, car_vin) in enumerate(cars):
-                car_frame = ctk.CTkFrame(cars_content, corner_radius=8, fg_color=("gray90", "gray20"))
-                car_frame.pack(fill="x", pady=(0, 8) if i < len(cars) - 1 else 0)
-
-                car_inner = ctk.CTkFrame(car_frame, fg_color="transparent")
-                car_inner.pack(fill="x", padx=12, pady=10)
-
-                car_text = f"{car_brand or ''} {car_model or ''}".strip()
-                ctk.CTkLabel(
-                    car_inner,
-                    text=f"🚗  {car_text}" if car_text else "🚗  " + self.tr("bookings.name_not_specified"),
-                    font=("Arial", 14, "bold"),
-                    anchor="w"
-                ).pack(side="left")
-
-                if car_number:
-                    ctk.CTkLabel(
-                        car_inner,
-                        text=car_number,
-                        font=("Arial", 13),
-                        text_color=("gray30", "gray70"),
-                        anchor="e"
-                    ).pack(side="right")
-
-                vin_row = ctk.CTkFrame(car_frame, fg_color="transparent")
-                vin_row.pack(fill="x", padx=12, pady=(0, 10))
-                ctk.CTkLabel(
-                    vin_row,
-                    text=f"{self.tr('works.vin')} {car_vin or '-'}",
-                    font=("Arial", 12),
-                    text_color=("gray30", "gray70"),
-                    anchor="w"
-                ).pack(side="left")
-                if car_vin:
-                    self.add_copy_button(vin_row, car_vin).pack(side="left", padx=(6, 0))
-
-        # ═══════════════════════════════════════════════════════
-        # КАРТОЧКА: История работ
-        # ═══════════════════════════════════════════════════════
-        history_card = ctk.CTkFrame(main_frame, corner_radius=12)
-        history_card.pack(fill="x", pady=(0, 15))
-
-        # Заголовок
-        history_header = ctk.CTkFrame(history_card, fg_color="transparent")
-        history_header.pack(fill="x", padx=15, pady=(15, 10))
-
-        ctk.CTkLabel(
-            history_header,
-            text=self.tr("bookings.history_header", count=len(history)),
-            font=("Arial", 18, "bold")
-        ).pack(side="left")
-
-        # Разделитель
-        ctk.CTkFrame(history_card, height=1, fg_color="gray70").pack(fill="x", padx=15)
-
-        # Контент
-        history_content = ctk.CTkFrame(history_card, fg_color="transparent")
-        history_content.pack(fill="x", padx=15, pady=15)
-
-        if not history:
-            ctk.CTkLabel(
-                history_content,
-                text=self.tr("bookings.history_empty"),
-                text_color=("gray40", "gray60"),
-                font=("Arial", 14)
-            ).pack(anchor="w")
-        else:
-            total_spent = 0
-
-            for i, work in enumerate(history):
-                # work: (id, work_date, order_number, worker, car_brand, car_model, car_number, mileage, description, amount, client_name, client_phone)
-                work_id, work_date, order_number, worker, car_brand, car_model, car_number, mileage, description, amount, work_client_name, work_client_phone = work
-
-                # Получаем запчасти
-                work_parts = self.db.get_parts_by_work_id(work_id)
-                parts_total = sum(float(p[1]) for p in work_parts) if work_parts else 0
-                work_total = float(amount or 0) + parts_total
-                total_spent += work_total
-
-                # Форматируем дату
-                if hasattr(work_date, 'strftime'):
-                    date_str = work_date.strftime('%d.%m.%Y')
-                else:
-                    date_str = str(work_date) if work_date else "-"
-
-                # Карточка работы
-                work_frame = ctk.CTkFrame(history_content, corner_radius=8, fg_color=("gray90", "gray20"))
-                work_frame.pack(fill="x", pady=(0, 10) if i < len(history) - 1 else 0)
-
-                work_inner = ctk.CTkFrame(work_frame, fg_color="transparent")
-                work_inner.pack(fill="x", padx=12, pady=12)
-
-                # Заголовок работы
-                work_header_row = ctk.CTkFrame(work_inner, fg_color="transparent")
-                work_header_row.pack(fill="x", pady=(0, 8))
-
-                ctk.CTkLabel(
-                    work_header_row,
-                    text=f"📅 {date_str}",
-                    font=("Arial", 15, "bold")
-                ).pack(side="left")
-
-                if order_number:
-                    ctk.CTkLabel(
-                        work_header_row,
-                        text=self.tr("bookings.order_number_label", order_number=order_number),
-                        font=("Arial", 13),
-                        text_color=("gray40", "gray60")
-                    ).pack(side="right")
-
-                # Информация о работе (каждый пункт на отдельной строке для читаемости)
-                work_info_col = ctk.CTkFrame(work_inner, fg_color="transparent")
-                work_info_col.pack(fill="x", pady=(0, 8))
-
-                info_items = []
-                if worker:
-                    info_items.append(f"🔧  {worker}")
-                car_info = " ".join(filter(None, [car_brand, car_model])).strip()
-                if car_info or car_number:
-                    car_line = f"{car_info} ({car_number})" if car_number else car_info
-                    info_items.append(f"🚗  {car_line}")
-                if mileage:
-                    info_items.append(self.tr("bookings.mileage_suffix", mileage=mileage))
-
-                for info_text in info_items:
-                    ctk.CTkLabel(
-                        work_info_col,
-                        text=info_text,
-                        font=("Arial", 13),
-                        text_color=("gray30", "gray70"),
-                        anchor="w",
-                        justify="left",
-                        wraplength=580
-                    ).pack(anchor="w", pady=(0, 3))
-
-                # Описание работ
-                if description:
-                    work_amount = float(amount or 0)
-                    desc_frame = ctk.CTkFrame(work_inner, fg_color="transparent")
-                    desc_frame.pack(fill="x", pady=(0, 5))
-
-                    ctk.CTkLabel(
-                        desc_frame,
-                        text=self.tr("bookings.services_label", amount=self.format_currency(work_amount)),
-                        font=("Arial", 14, "bold")
-                    ).pack(anchor="w")
-
-                    work_items = self.get_work_line_items(work_id, description, work_amount)
-                    for work_item, item_price in work_items:
-                        ctk.CTkLabel(
-                            desc_frame,
-                            text=f"   • {work_item} — {self.format_currency(item_price)}",
-                            font=("Arial", 13),
-                            anchor="w",
-                            wraplength=580
-                        ).pack(anchor="w")
-
-                # Запчасти
-                if work_parts:
-                    parts_frame = ctk.CTkFrame(work_inner, fg_color="transparent")
-                    parts_frame.pack(fill="x", pady=(5, 0))
-
-                    ctk.CTkLabel(
-                        parts_frame,
-                        text=self.tr("bookings.parts_label", amount=self.format_currency(parts_total)),
-                        font=("Arial", 14, "bold")
-                    ).pack(anchor="w")
-
-                    for part_name, part_price in work_parts:
-                        ctk.CTkLabel(
-                            parts_frame,
-                            text=f"   • {part_name} — {self.format_currency(float(part_price))}",
-                            font=("Arial", 13),
-                            anchor="w"
-                        ).pack(anchor="w")
-
-                # Итого по работе
-                work_total_row = ctk.CTkFrame(work_inner, fg_color="transparent")
-                work_total_row.pack(fill="x", pady=(8, 0))
-
-                ctk.CTkLabel(
-                    work_total_row,
-                    text=self.tr("bookings.work_total_label", amount=self.format_currency(work_total)),
-                    font=("Arial", 14, "bold"),
-                    text_color="#3b82f6"
-                ).pack(side="right")
-
-            # ═══════════════════════════════════════════════════════
-            # КАРТОЧКА: Общий итог
-            # ═══════════════════════════════════════════════════════
-            total_card = ctk.CTkFrame(main_frame, corner_radius=12, fg_color=("#dbeafe", "#1e3a8a"))
-            total_card.pack(fill="x", pady=(0, 10))
-
-            total_inner = ctk.CTkFrame(total_card, fg_color="transparent")
-            total_inner.pack(fill="x", padx=20, pady=15)
-
-            ctk.CTkLabel(
-                total_inner,
-                text="💳  " + self.tr("bookings.total_paid_label"),
-                font=("Arial", 16, "bold"),
-                text_color=("#1e40af", "#93c5fd")
-            ).pack(side="left")
-
-            ctk.CTkLabel(
-                total_inner,
-                text=self.format_currency(total_spent),
-                font=("Arial", 24, "bold"),
-                text_color=("#1e40af", "#93c5fd")
-            ).pack(side="right")
-
-        # ═══════════════════════════════════════════════════════
-        # Кнопка закрыть
-        # ═══════════════════════════════════════════════════════
-        buttons_frame = ctk.CTkFrame(client_window, fg_color="transparent")
-        buttons_frame.pack(pady=15)
-
-        ctk.CTkButton(
-            buttons_frame,
-            text=self.tr("common.close"),
-            command=client_window.destroy,
-            width=120,
-            height=40,
-            font=("Arial", 13),
-            fg_color="gray50",
-            hover_color="gray40"
-        ).pack()
 
 
 _SINGLE_INSTANCE_MUTEX_NAME = "AutoService_Alexan_SingleInstance_Mutex"

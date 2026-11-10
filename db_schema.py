@@ -277,4 +277,11 @@ MIGRATIONS = [
     "ALTER TABLE works ADD COLUMN IF NOT EXISTS client_id INT DEFAULT NULL",
     "UPDATE works wk JOIN client_cars cc ON wk.car_id = cc.id SET wk.client_id = cc.client_id "
     "WHERE wk.client_id IS NULL AND cc.client_id IS NOT NULL",
+    # Названия запчастей - в одну строку: с сайтов поставщиков их копируют с переносами строк
+    # ("SB Nagamochi\nBP10436\nаналог\nКолодки...") - в окнах и PDF они разъезжались. Переносы и
+    # лишние пробелы -> один пробел. Повторный запуск ничего не меняет (такие названия уже чистые)
+    "UPDATE parts SET part_name = TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' ')) "
+    "WHERE part_name <> TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' '))",
+    "UPDATE warehouse_parts SET part_name = TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' ')) "
+    "WHERE part_name <> TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' '))",
 ]
