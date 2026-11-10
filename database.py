@@ -2029,6 +2029,28 @@ class Database:
         conn.commit()
         conn.close()
 
+    def unlink_warehouse_part_from_work(self, part_id):
+        """Отвязать складскую позицию от наряда (деталь убрали из наряда и вернули на склад)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE warehouse_parts SET work_id = NULL WHERE id = %s", (part_id,))
+        conn.commit()
+        conn.close()
+
+    def get_warehouse_parts_by_work_id(self, work_id):
+        """Складские позиции, установленные в наряд: (id, part_name, quantity, price, notes, is_paid)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, part_name, quantity, price, notes, is_paid
+            FROM warehouse_parts
+            WHERE work_id = %s AND status = 'установлена'
+            ORDER BY id
+        """, (work_id,))
+        parts = cursor.fetchall()
+        conn.close()
+        return parts
+
     # ──────────────────────────────────────────────────────
     # --- Методы авторизации и управления пользователями ---
     # ──────────────────────────────────────────────────────
