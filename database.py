@@ -1151,8 +1151,19 @@ class Database:
 
     # --- Методы для работы с записями из Telegram ---
 
-    def get_all_bookings(self, status=None):
-        """Получить все записи."""
+    def count_bookings(self):
+        """Сколько всего записей в базе"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM bookings")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+
+    def get_all_bookings(self, status=None, date_from=None, search=None):
+        """Записи для вкладки "Записи".
+        date_from - показывать с этой даты, но незавершённые ("ожидает", "в работе") - за любую дату;
+        search - поиск по телефону / госномеру / машине по всей базе (период тогда не учитывается)"""
         conn = self.get_connection()
         cursor = conn.cursor()
 
@@ -1164,17 +1175,32 @@ class Database:
                    b.booking_date, b.booking_time, b.status,
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
                    b.client_id, b.car_id,
-                   w.order_number, b.notes
+                   (SELECT w.order_number FROM works w WHERE w.booking_id = b.id
+                    ORDER BY w.id DESC LIMIT 1) AS order_number, b.notes
                    FROM bookings b
                    LEFT JOIN clients c ON b.client_id = c.id
                    LEFT JOIN client_cars cc ON b.car_id = cc.id
-                   LEFT JOIN works w ON w.booking_id = b.id
                    WHERE 1=1"""
         params = []
 
         if status:
             query += " AND b.status = %s"
             params.append(status)
+
+        search = (search or "").strip().lower()
+        if search:
+            like = f"%{search}%"
+            conditions = ["LOWER(COALESCE(c.phone, '')) LIKE %s", "LOWER(COALESCE(cc.car_number, '')) LIKE %s",
+                          "LOWER(CONCAT_WS(' ', cc.car_brand, cc.car_model, cc.car_number)) LIKE %s"]
+            params += [like, like, like]
+            digits = re.sub(r"\D", "", search)
+            if digits:
+                conditions.append("REGEXP_REPLACE(COALESCE(c.phone, ''), '[^0-9]', '') LIKE %s")
+                params.append(f"%{digits}%")
+            query += " AND (" + " OR ".join(conditions) + ")"
+        elif date_from:
+            query += " AND (b.booking_date >= %s OR b.status IN ('waiting', 'in_progress'))"
+            params.append(date_from)
 
         query += " ORDER BY b.booking_date ASC, b.booking_time ASC"
 
@@ -1210,11 +1236,11 @@ class Database:
                    b.booking_date, b.booking_time, b.status,
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
                    b.client_id, b.car_id,
-                   w.order_number, b.notes
+                   (SELECT w.order_number FROM works w WHERE w.booking_id = b.id
+                    ORDER BY w.id DESC LIMIT 1) AS order_number, b.notes
             FROM bookings b
             LEFT JOIN clients c ON b.client_id = c.id
             LEFT JOIN client_cars cc ON b.car_id = cc.id
-            LEFT JOIN works w ON w.booking_id = b.id
             WHERE b.booking_date = CURDATE()
             ORDER BY b.booking_time
         """)

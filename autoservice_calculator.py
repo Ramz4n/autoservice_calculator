@@ -5032,6 +5032,8 @@ class AutoServiceApp:
         self.switch_tab("bookings")
         if hasattr(self, "bookings_status_var"):
             self.bookings_status_var.set(self.tr("bookings.filter_all"))
+        if hasattr(self, "bookings_period_var"):
+            self.bookings_period_var.set(self.tr("bookings.period_all"))
         if hasattr(self, "bookings_search_entry"):
             self.bookings_search_entry.delete(0, tk.END)
         self.refresh_bookings()
@@ -7417,6 +7419,16 @@ class AutoServiceApp:
                                         width=140)
         status_combo.pack(side=tk.LEFT, padx=5)
 
+        # Период: по умолчанию последний месяц (+ будущие и незавершённые за любую дату). Выбор запоминается
+        self.bookings_periods = {self.tr("bookings.period_month"): 31, self.tr("bookings.period_3months"): 92,
+                                 self.tr("bookings.period_year"): 366, self.tr("bookings.period_all"): None}
+        saved_days = self.load_settings().get("bookings_period_days", 31)
+        saved_label = next((k for k, v in self.bookings_periods.items() if v == saved_days),
+                           self.tr("bookings.period_month"))
+        self.bookings_period_var = tk.StringVar(value=saved_label)
+        ctk.CTkComboBox(filter_frame, variable=self.bookings_period_var, values=list(self.bookings_periods),
+                        command=self.on_bookings_period_change, width=120, state="readonly").pack(side=tk.LEFT, padx=5)
+
         # Кнопки
         ctk.CTkButton(filter_frame, text=self.tr("works.refresh"), command=self.refresh_bookings,
                      width=100).pack(side=tk.LEFT, padx=10)
@@ -7437,6 +7449,11 @@ class AutoServiceApp:
         self.bookings_columns_btn = ctk.CTkButton(filter_frame, text="☰ " + self.tr("bookings.columns_btn"),
                                                   command=lambda: self.show_columns_menu_under("bookings_hidden_columns", self.bookings_columns_btn), width=110)
         self.bookings_columns_btn.pack(side=tk.LEFT, padx=5)
+
+        # "Показано N из M" - под таблицей (часть записей может скрывать период)
+        self.bookings_count_label = ctk.CTkLabel(self.bookings_frame, text="", font=("Arial", 12),
+                                                 text_color="gray45", anchor="e")
+        self.bookings_count_label.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 6))
 
         # Таблица записей
         table_frame = ctk.CTkFrame(self.bookings_frame)
@@ -7591,30 +7608,17 @@ class AutoServiceApp:
         # Получение поискового запроса
         search_query = self.bookings_search_entry.get().strip().lower() if hasattr(self, 'bookings_search_entry') else ""
 
-        # Получение данных (от сегодня и далее)
-        bookings = self.db.get_all_bookings(status=status)
+        # Период (поиск ищет по всей базе - период тогда не учитывается)
+        days = getattr(self, "bookings_periods", {}).get(self.bookings_period_var.get()) \
+            if hasattr(self, "bookings_period_var") else None
+        date_from = date.today() - timedelta(days=days) if days else None
+
+        # Отбор делает база: дата / статус / поиск по телефону и госномеру
+        bookings = self.db.get_all_bookings(status=status, date_from=date_from, search=search_query)
 
         # Заполнение таблицы
         for booking in bookings:
             booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number, notes = booking
-
-            # Фильтрация по поисковому запросу (телефон или госномер)
-            if search_query:
-                phone_str = (phone or "").lower()
-                car_str = (car_info or "").lower()
-                # Убираем лишние символы из телефона для поиска
-                phone_digits = ''.join(c for c in phone_str if c.isdigit())
-                search_digits = ''.join(c for c in search_query if c.isdigit())
-
-                # Проверяем совпадение
-                match = False
-                if search_digits and search_digits in phone_digits:
-                    match = True
-                elif search_query in phone_str or search_query in car_str:
-                    match = True
-
-                if not match:
-                    continue
 
             # Форматирование даты
             if isinstance(booking_date, date):
@@ -7638,6 +7642,29 @@ class AutoServiceApp:
             ), tags=(status,))
 
         self.sort_bookings_tree()
+        self.update_bookings_count()
+
+    def update_bookings_count(self):
+        """Подпись "Показано N из M" под таблицей записей"""
+        if not hasattr(self, "bookings_count_label"):
+            return
+        try:
+            total = self.db.count_bookings()
+        except Exception:
+            total = None
+        shown = len(self.bookings_tree.get_children())
+        if total is None or shown == total:
+            text = self.tr("bookings.count_all", shown=shown)
+        else:
+            text = self.tr("bookings.count_shown", shown=shown, total=total)
+        self.bookings_count_label.configure(text=text)
+
+    def on_bookings_period_change(self, choice=None):
+        """Сменили период - запоминаем и обновляем список"""
+        settings = self.load_settings()
+        settings["bookings_period_days"] = self.bookings_periods.get(self.bookings_period_var.get())
+        self.save_settings(settings)
+        self.refresh_bookings()
 
     def show_today_bookings(self):
         """Показать записи на сегодня"""
@@ -7646,6 +7673,7 @@ class AutoServiceApp:
             self.bookings_tree.delete(item)
 
         bookings = self.db.get_today_bookings()
+        self.root.after_idle(self.update_bookings_count)
 
         for booking in bookings:
             booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number, notes = booking
