@@ -330,12 +330,36 @@ class Database:
         conn.close()
         return result[0] if result else None
 
+    @staticmethod
+    def _like_escape(text):
+        """Текст для LIKE: % и _ из ввода - как обычные символы"""
+        return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @classmethod
+    def _name_search(cls, column, text):
+        """Условие и порядок для подсказки по названию (марки, модели).
+        Одна буква - только названия, которые с неё начинаются (или их второе слово: "Land Rover" на "R").
+        Больше - сначала начинающиеся с введённого, потом совпадение в начале слова, потом где угодно"""
+        text = cls._like_escape(text.strip().lower())
+        starts, word, anywhere = f"{text}%", f"% {text}%", f"%{text}%"
+        if len(text) <= 1:
+            where = f"(LOWER({column}) LIKE %s OR LOWER({column}) LIKE %s)"
+            params = [starts, word]
+        else:
+            where = f"LOWER({column}) LIKE %s"
+            params = [anywhere]
+        order = (f"CASE WHEN LOWER({column}) LIKE %s THEN 0 WHEN LOWER({column}) LIKE %s THEN 1 ELSE 2 END, {column}")
+        return where, params, order, [starts, word]
+
     def search_car_brands(self, search_text):
-        """Поиск марок машин по любой части названия (без учёта регистра)"""
+        """Подсказка марок: на одну букву - начинающиеся с неё; дальше - сначала начинающиеся с введённого"""
+        if not (search_text or "").strip():
+            return []
+        where, params, order, order_params = self._name_search("brand_name", search_text)
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT brand_name FROM car_brands WHERE LOWER(brand_name) LIKE LOWER(%s) ORDER BY brand_name LIMIT 10",
-                      (f"%{search_text}%",))
+        cursor.execute(f"SELECT brand_name FROM car_brands WHERE {where} ORDER BY {order} LIMIT 30",
+                       params + order_params)
         brands = [row[0] for row in cursor.fetchall()]
         conn.close()
         return brands
@@ -354,11 +378,18 @@ class Database:
                 (brand_id,)
             )
         else:
-            pattern = "%" + "%".join(search_text.lower()) + "%"
+            # Сначала начинающиеся с введённого, потом совпадение в начале слова, потом где угодно;
+            # если ничего - буквы по порядку с пропусками ("rio" найдёт и "R-io")
+            where, params, order, order_params = self._name_search("model_name", search_text)
             cursor.execute(
-                "SELECT model_name FROM car_models WHERE brand_id = %s AND LOWER(model_name) LIKE %s ORDER BY model_name LIMIT 20",
-                (brand_id, pattern)
+                f"SELECT model_name FROM car_models WHERE brand_id = %s AND {where} ORDER BY {order} LIMIT 50",
+                [brand_id] + params + order_params
             )
+            if not cursor.rowcount:
+                pattern = "%" + "%".join(self._like_escape(ch) for ch in search_text.lower()) + "%"
+                cursor.execute(
+                    "SELECT model_name FROM car_models WHERE brand_id = %s AND LOWER(model_name) LIKE %s "
+                    "ORDER BY model_name LIMIT 50", (brand_id, pattern))
 
         models = [row[0] for row in cursor.fetchall()]
         conn.close()
@@ -1194,6 +1225,20 @@ class Database:
 
     # --- Методы для работы с записями из Telegram ---
 
+    def count_bookings_soon(self, today):
+        """Сколько записей (кроме отменённых) на сегодня, завтра и ближайшую неделю - одним запросом"""
+        from datetime import timedelta as _td
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COALESCE(SUM(booking_date = %s), 0), COALESCE(SUM(booking_date = %s), 0), COUNT(*)
+            FROM bookings
+            WHERE booking_date BETWEEN %s AND %s AND status <> 'cancelled'
+        """, (today, today + _td(days=1), today, today + _td(days=6)))
+        row = cursor.fetchone()
+        conn.close()
+        return {"today": int(row[0]), "tomorrow": int(row[1]), "week": int(row[2])}
+
     def count_bookings(self):
         """Сколько всего записей в базе"""
         conn = self.get_connection()
@@ -1203,7 +1248,7 @@ class Database:
         conn.close()
         return count
 
-    def get_all_bookings(self, status=None, date_from=None, search=None):
+    def get_all_bookings(self, status=None, date_from=None, search=None, date_range=None):
         """Записи для вкладки "Записи".
         date_from - показывать с этой даты, но незавершённые ("ожидает", "в работе") - за любую дату;
         search - поиск по телефону / госномеру / машине по всей базе (период тогда не учитывается)"""
@@ -1241,6 +1286,10 @@ class Database:
                 conditions.append("REGEXP_REPLACE(COALESCE(c.phone, ''), '[^0-9]', '') LIKE %s")
                 params.append(f"%{digits}%")
             query += " AND (" + " OR ".join(conditions) + ")"
+        elif date_range:
+            # Быстрый фильтр (сегодня / завтра / неделя) - ровно эти даты
+            query += " AND b.booking_date BETWEEN %s AND %s"
+            params += [date_range[0], date_range[1]]
         elif date_from:
             query += " AND (b.booking_date >= %s OR b.status IN ('waiting', 'in_progress'))"
             params.append(date_from)

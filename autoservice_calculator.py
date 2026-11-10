@@ -2163,9 +2163,9 @@ class AutoServiceApp:
             entry.configure(height=40, font=("Arial", 17, "bold"))
         return entry
 
-    def works_combo(self, parent, width=140, command=None):
+    def works_combo(self, parent, width=140, command=None, variable=None):
         return ctk.CTkComboBox(parent, values=[""], width=width, height=34, font=("Arial", 14), corner_radius=8,
-                               state="readonly", command=command)
+                               state="readonly", command=command, variable=variable)
 
     def setup_works_tab(self):
         """Вкладка "Добавить работу": одна колонка по центру.
@@ -2212,7 +2212,7 @@ class AutoServiceApp:
         self.works_editing_title = ""
 
         # ===== Запись и мастер - одна строка =====
-        _, body = self.form_section(col, self.tr("works.section_booking_master"))
+        self.works_master_card, body = self.form_section(col, self.tr("works.section_booking_master"))
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill=tk.X, pady=(0, 6))
         booking_box = ctk.CTkFrame(row, fg_color="transparent")
@@ -2223,7 +2223,10 @@ class AutoServiceApp:
         ctk.CTkButton(booking_box, text="⟳", width=36, height=34, corner_radius=8, font=("Arial", 16),
                       command=self.refresh_bookings_combo).pack(side=tk.LEFT, padx=(6, 0))
         self.works_cell(row, 0, self.tr("works.booking"), booking_box)
-        self.worker_combo = self.works_combo(row, width=220)
+        # Мастер выбран - рамка карточки зелёная, нет - оранжевая (следим за значением при любом способе выбора)
+        self.worker_var = tk.StringVar()
+        self.worker_combo = self.works_combo(row, width=220, variable=self.worker_var)
+        self.worker_var.trace_add("write", lambda *a: self.works_update_card_marks())
         self.works_cell(row, 1, self.tr("works.master"), self.worker_combo, width=220, required=True)
 
         # ===== Клиент и автомобиль =====
@@ -2281,6 +2284,9 @@ class AutoServiceApp:
         self.car_number_entry.bind("<Return>", self.on_car_number_change)
         self.attach_phone_mask(self.client_phone_entry)
         self.client_phone_entry.bind("<KeyRelease>", self.on_client_phone_keyrelease)
+        # Начали вводить госномер / телефон - запись начата: рамки карточек получают цвет
+        for entry in (self.car_number_entry, self.client_phone_entry):
+            entry.bind("<KeyRelease>", lambda e: self.works_update_card_marks(), add="+")
         # Подсказка имён - список под полем, поверх строк ниже
         self.attach_name_autocomplete(self.client_name_entry, col, position="below")
 
@@ -2292,6 +2298,10 @@ class AutoServiceApp:
         self.brand_listbox.bind('<<ListboxSelect>>', self.on_brand_select)
         self.car_model_entry.bind('<KeyRelease>', self.on_model_keyrelease)
         self.car_model_entry.bind('<FocusOut>', self.on_model_focus_out)
+        # Вписали марку / модель (или выбрали из подсказки) - пересчитать цвет карточки
+        for entry in (self.car_brand_entry, self.car_model_entry):
+            entry.bind("<KeyRelease>", lambda e: self.works_update_card_marks(), add="+")
+            entry.bind("<FocusOut>", lambda e: self.root.after(250, self.works_update_card_marks), add="+")
         self.model_listbox = self.works_popup_listbox(col)
         self.model_listbox_visible = False
         self.model_listbox.bind('<<ListboxSelect>>', self.on_model_select)
@@ -2321,6 +2331,7 @@ class AutoServiceApp:
         self.works_tree, self.works_sum_label, self.work_name_entry, self.work_price_entry, _ = \
             self.works_items_section(col, self.tr("works.section_works"), self.add_work_to_list,
                                      self.remove_work_from_list)
+        self.works_card = self.works_tree.master.master   # карточка "Работы" - для цвета рамки
         self.work_name_entry.bind('<KeyRelease>', self.on_work_name_keyrelease)
         self.work_name_entry.bind('<FocusOut>', self.on_work_name_focus_out)
         self.work_keyword_listbox = self.works_popup_listbox(col)
@@ -2361,6 +2372,66 @@ class AutoServiceApp:
         self.works_scroll.bind("<Configure>", self.works_relayout, add="+")
         self.works_column.bind("<Configure>", lambda e: self.root.after_idle(self._works_align_bottom), add="+")
         self.works_frame.bind("<Configure>", lambda e: self.root.after_idle(self._works_align_bottom), add="+")
+
+    def works_form_started(self):
+        """Запись начата: введён госномер или телефон, выбрана запись, открыт наряд, есть работы или запчасти.
+        Пока не начата - рамки карточек без цвета (пустая форма не должна выглядеть как "везде ошибки")"""
+        if not hasattr(self, "car_number_entry"):
+            return False
+        return bool(self.car_number_entry.get().strip()
+                    or phone_mask_digits(self.client_phone_entry.get())
+                    or getattr(self, "selected_booking_id", None)
+                    or getattr(self, "editing_work_id", None)
+                    or getattr(self, "works_list", None)
+                    or getattr(self, "parts_list", None))
+
+    def works_update_card_marks(self):
+        """Рамки карточек, когда запись начата: что заполнено - зелёным, чего не хватает - оранжевым.
+        "Работы" - есть ли работы; "Запись и мастер" - выбран ли мастер. Пустая форма - без цвета"""
+        started = self.works_form_started()
+        works_card = getattr(self, "works_card", None)
+        if works_card is not None:
+            state = ("found" if getattr(self, "works_list", None) else "new") if started else None
+            self.form_set_card_state(works_card, state)
+        # "Запись и мастер": нужен только мастер - цветом подсвечиваем и поле "Мастер", и карточку
+        if hasattr(self, "worker_combo"):
+            if not hasattr(self, "_worker_combo_border"):
+                self._worker_combo_border = self.worker_combo.cget("border_color")
+            chosen = self.worker_combo.get() in getattr(self, "workers_data", {})
+            color = (self.FORM_STATE_BORDERS["found" if chosen else "new"] if started else self._worker_combo_border)
+            if self.worker_combo.cget("border_color") != color:
+                self.worker_combo.configure(border_color=color)
+            # И рамка карточки - тем же цветом (по мастеру; запись из списка необязательна)
+            master_card = getattr(self, "works_master_card", None)
+            if master_card is not None:
+                self.form_set_card_state(master_card, ("found" if chosen else "new") if started else None)
+
+        owner_card = getattr(self, "works_owner_card", None)
+        if owner_card is not None:
+            lookup = getattr(self, "works_lookup_state", None)
+            ready = self.works_car_data_ready()
+            ready_texts = {self.tr("works.lookup_new_car"): "works.lookup_new_car_ready",
+                           self.tr("works.lookup_new_client"): "works.lookup_new_client_ready"}
+            text = getattr(self, "works_lookup_text", "")
+            # Предупреждение (машина записана на другого - смена владельца) - рамка остаётся оранжевой
+            warning = lookup in ("new", "pick") and text not in ready_texts
+            if not started or (lookup is None and not ready):
+                owner_state = None   # госномер / телефон ещё вводят
+            elif self.works_phone_incomplete():
+                owner_state = "new"   # телефона нет / недописан - сохранить не получится
+            elif not warning and (lookup == "found" or ready):
+                owner_state = "found"
+            else:
+                owner_state = "new"
+            self.form_set_card_state(owner_card, owner_state)
+            # "Новая машина" / "Новый клиент", а всё нужное уже вписано - надпись тоже зелёная
+            # (надпись о смене владельца и другие не трогаем)
+            if lookup == "new" and text in ready_texts and self.works_lookup_status.winfo_manager():
+                if owner_state == "found":
+                    self.works_lookup_status.configure(text=self.tr(ready_texts[text]),
+                                                       text_color=self.FORM_STATE_COLORS["found"])
+                else:
+                    self.works_lookup_status.configure(text=text, text_color=self.FORM_STATE_COLORS["new"])
 
     def works_items_section(self, parent, title, on_add, on_remove):
         """Карточка "Работы" / "Запчасти": строка ввода "название | цена | +" над списком, сумма под списком.
@@ -2666,6 +2737,8 @@ class AutoServiceApp:
         """Результат поиска: строка под госномером и рамка карточки.
         state: "found" - зелёная, "new" - оранжевая, "pick" - красный текст (выбрать машину), None - обычная"""
         colors = {"found": self.FORM_STATE_COLORS["found"], "new": self.FORM_STATE_COLORS["new"], "pick": "#c62828"}
+        self.works_lookup_state = state
+        self.works_lookup_text = text
         if state and text:
             self.works_lookup_status.configure(text=text, text_color=colors[state])
             self.works_lookup_status.pack(fill=tk.X, pady=(0, 6), after=self.works_search_row)
@@ -2674,7 +2747,15 @@ class AutoServiceApp:
             self.works_lookup_status.configure(text="")
             self.works_lookup_status.pack_forget()
             self.works_lookup_hint.pack(fill=tk.X, pady=(0, 4), before=self.works_search_row)
-        self.form_set_card_state(self.works_owner_card, state if state in ("found", "new") else None)
+        self.works_update_card_marks()
+
+    def works_car_data_ready(self):
+        """Для сохранения хватает данных о машине: госномер, марка и модель (VIN и пробег - по желанию)"""
+        return all(e.get().strip() for e in (self.car_number_entry, self.car_brand_entry, self.car_model_entry))
+
+    def works_phone_incomplete(self):
+        """Телефона нет или он недописан - сохранить не получится (телефон обязателен)"""
+        return len(phone_mask_digits(self.client_phone_entry.get())) != 10
 
     # Обработчики автокомплита для марки
     def on_brand_keyrelease(self, event):
@@ -2904,6 +2985,16 @@ class AutoServiceApp:
                 self._works_booking_choice = self.booking_combo.get()
                 self.works_show_info_banner(self.tr("works.record_reopened", car=self.works_car_title() or choice))
                 return
+            # Запись без наряда, а в форме - другая запись (её работы, режим редактирования):
+            # сначала уходим из неё (несохранённое - с вопросом), иначе её работы попадут в новую запись,
+            # а "Добавить запись" перезапишет старый наряд
+            other_open = getattr(self, "editing_work_id", None) or self.works_list or self.parts_list                 or (self.selected_booking_id and self.selected_booking_id != booking_id)
+            if other_open:
+                previous = getattr(self, "_works_booking_choice", "")
+                if not self.works_leave_current_record():
+                    self.booking_combo.set(previous)   # остались в текущей записи
+                    return
+                self.booking_combo.set(choice)   # очистка формы сбросила выбор в списке
         self._works_booking_choice = choice or ""
 
         self.works_phone_fill = None
@@ -2923,6 +3014,7 @@ class AutoServiceApp:
                 self.works_set_lookup_state("found", self.tr("works.lookup_booking", name=booking_info['name']))
             self.works_lock_filled()
             self.works_record_number = self.car_number_entry.get().strip()
+            self.works_update_card_marks()
 
             # Если по записи уже есть наряд - подставляем мастера, который его ведёт
             existing_work = self.db.get_work_by_booking_id(booking_info['id'])
@@ -3818,6 +3910,7 @@ class AutoServiceApp:
 
     def update_total_cost(self):
         """Суммы под списками работ и запчастей и "Итого" внизу вкладки"""
+        self.works_update_card_marks()
         if not hasattr(self, "parts_sum_label"):
             return  # вкладка ещё строится
         works_sum = sum(price for _, price in getattr(self, "works_list", []))
@@ -4072,9 +4165,14 @@ class AutoServiceApp:
         # Данные клиента
         booking_id = getattr(self, 'selected_booking_id', None)
         client_name = self.client_name_entry.get().strip()
-        # Телефон из маски -> +7XXXXXXXXXX; неполный номер не сохраняем
+        # Телефон желателен: без него - вопрос (клиент мог оставить машину и уйти, номер допишут позже);
+        # недописанный номер - почти всегда опечатка, не сохраняем
         phone_digits = phone_mask_digits(self.client_phone_entry.get())
-        if phone_digits and len(phone_digits) != 10:
+        if not phone_digits:
+            if not messagebox.askyesno(self.tr("common.attention"), self.tr("works.ask_save_without_phone")):
+                self.client_phone_entry.focus_set()
+                return
+        elif len(phone_digits) != 10:
             messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_enter_phone_after_plus7"))
             self.client_phone_entry.focus_set()
             return
@@ -4202,20 +4300,7 @@ class AutoServiceApp:
 
                 else:
                     # Машина не в работе - создаём новую запись
-                    current_hour = now.hour
-                    TIME_SLOTS = booking_time_slots()
-                    booking_time = None
-
-                    # Ищем ближайший слот к текущему времени
-                    for slot in TIME_SLOTS:
-                        slot_hour = int(slot.split(":")[0])
-                        if slot_hour >= current_hour:
-                            booking_time = slot
-                            break
-
-                    # Если не нашли подходящий слот сегодня - берём первый
-                    if not booking_time:
-                        booking_time = TIME_SLOTS[0]
+                    booking_time = now.strftime("%H:%M")   # во сколько создали запись - то время и ставим
 
                     # Ищем telegram данные по телефону
                     tg_user_id = telegram_user_id or 0
@@ -4308,155 +4393,158 @@ class AutoServiceApp:
 
     # ===== ВКЛАДКА СКЛАДА =====
 
+    WAREHOUSE_STATUS_COLORS = {"в пути": "#3b82f6", "на складе": "#22c55e", "установлена": "#f59e0b",
+                               "выдано": "#9e9e9e"}
+    WAREHOUSE_RECENT_DAYS = 92   # "Все" и "Выдано" по умолчанию - за 3 месяца
+
+    def warehouse_status_label(self, status):
+        """Статус детали для показа (в базе хранится по-русски)"""
+        return {"в пути": self.tr("warehouse.status_in_transit"), "на складе": self.tr("warehouse.status_in_stock"),
+                "установлена": self.tr("warehouse.status_installed"),
+                "выдано": self.tr("warehouse.status_issued")}.get(status, status)
+
     def setup_warehouse_tab(self):
-        """Настройка вкладки склада запчастей"""
-        # Верхняя панель с кнопками
-        top_frame = ctk.CTkFrame(self.warehouse_frame)
-        top_frame.pack(fill=tk.X, padx=10, pady=10)
+        """Вкладка "Склад" - как "Записи": один ряд (статусы с количеством, поиск по мере ввода, кнопки),
+        таблица со статусом полоской слева, светлое меню, двойной клик - редактирование"""
+        top = ctk.CTkFrame(self.warehouse_frame, fg_color="transparent")
+        top.pack(fill=tk.X, padx=10, pady=(10, 6))
 
-        # Заголовок
-        ctk.CTkLabel(top_frame, text=self.tr("warehouse.title"), font=ctk.CTkFont(size=20, weight="bold")).pack(side=tk.LEFT, padx=10)
-
-        # Кнопка заказать запчасть
-        ctk.CTkButton(top_frame, text=self.tr("warehouse.order_part"), command=self.show_add_part_form,
-                     fg_color="#1565c0", hover_color="#0d47a1", width=160).pack(side=tk.RIGHT, padx=10)
-
-        # Кнопка обновить
-        ctk.CTkButton(top_frame, text=self.tr("works.refresh"), command=self.refresh_warehouse,
-                     width=100).pack(side=tk.RIGHT, padx=5)
-
-        # Кнопка выбора колонок
-        self.warehouse_columns_btn = ctk.CTkButton(top_frame, text="☰ " + self.tr("bookings.columns_btn"),
-                                                   command=lambda: self.show_columns_menu_under("warehouse_hidden_columns", self.warehouse_columns_btn),
-                                                   width=110)
-        self.warehouse_columns_btn.pack(side=tk.RIGHT, padx=5)
-
-        # Фильтр по статусу
-        filter_frame = ctk.CTkFrame(self.warehouse_frame)
-        filter_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        ctk.CTkLabel(filter_frame, text=self.tr("bookings.status_label")).pack(side=tk.LEFT, padx=5)
+        # Статусы - фишками с количеством (слева)
         self.warehouse_status_var = tk.StringVar(value=self.tr("bookings.filter_all"))
-        status_combo = ctk.CTkComboBox(filter_frame, variable=self.warehouse_status_var,
-                                        values=[self.tr("bookings.filter_all"), self.tr("warehouse.status_in_transit"),
-                                                self.tr("warehouse.status_in_stock"), self.tr("warehouse.status_issued")],
-                                        width=140, command=lambda x: self.refresh_warehouse())
-        status_combo.pack(side=tk.LEFT, padx=5)
+        self.warehouse_show_all_time = False
+        self.warehouse_status_bar = ctk.CTkFrame(top, fg_color="transparent")
+        self.warehouse_status_bar.pack(side=tk.LEFT)
 
-        # Поиск по госномеру
-        ctk.CTkLabel(filter_frame, text=self.tr("works.car_number")).pack(side=tk.LEFT, padx=(20, 5))
-        self.warehouse_search_entry = ctk.CTkEntry(filter_frame, width=150, placeholder_text=self.tr("warehouse.search_placeholder"))
-        self.warehouse_search_entry.pack(side=tk.LEFT, padx=5)
+        # Справа: столбцы, заказать запчасть, поиск
+        self.warehouse_columns_btn = ctk.CTkButton(
+            top, text="☰", width=34, height=34, corner_radius=8, font=("Arial", 15),
+            fg_color="transparent", border_width=1, border_color="#9e9e9e", text_color="#424242", hover_color="#e0e0e0",
+            command=lambda: self.show_columns_menu_under("warehouse_hidden_columns", self.warehouse_columns_btn))
+        self.warehouse_columns_btn.pack(side=tk.RIGHT)
+        self.attach_hover_tip(self.warehouse_columns_btn, self.tr("bookings.columns_btn"))
+        ctk.CTkButton(top, text="+  " + self.tr("warehouse.order_part"), command=self.show_add_part_form,
+                      height=34, corner_radius=8, font=("Arial", 13, "bold"),
+                      fg_color="#1565c0", hover_color="#0d47a1", width=170).pack(side=tk.RIGHT, padx=8)
+        search_box = ctk.CTkFrame(top, fg_color="transparent")
+        search_box.pack(side=tk.RIGHT, padx=(8, 0))
+        self.warehouse_search_entry = ctk.CTkEntry(search_box, placeholder_text="🔍  " + self.tr("warehouse.search_any"),
+                                                   placeholder_text_color="gray", width=230, height=34, corner_radius=8)
+        self.warehouse_search_entry.pack(side=tk.LEFT)
         self.warehouse_search_entry.bind("<Return>", lambda e: self.refresh_warehouse())
-        ctk.CTkButton(filter_frame, text="✕", command=self.clear_warehouse_search,
-                     width=30, fg_color="#c62828", hover_color="#b71c1c").pack(side=tk.LEFT, padx=2)
+        self.warehouse_search_entry.bind("<KeyRelease>", self._warehouse_search_keyrelease, add="+")
+        ctk.CTkButton(search_box, text="✕", command=self.clear_warehouse_search, width=30, height=34, corner_radius=8,
+                      fg_color="transparent", text_color="gray45", hover_color="#e0e0e0").pack(side=tk.LEFT, padx=(2, 0))
 
-        # Таблица запчастей
-        table_frame = ctk.CTkFrame(self.warehouse_frame)
-        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Низ: "Показано N из M" и "за 3 месяца / за всё время"
+        bottom = ctk.CTkFrame(self.warehouse_frame, fg_color="transparent")
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 6))
+        self.warehouse_range_btn = ctk.CTkButton(bottom, text="", width=10, height=24, fg_color="transparent",
+                                                 text_color="#1565c0", hover_color="#e3f2fd",
+                                                 font=("Arial", 12, "underline"), command=self._warehouse_toggle_all_time)
+        self.warehouse_count_label = ctk.CTkLabel(bottom, text="", font=("Arial", 12), text_color="gray45", anchor="e")
+        self.warehouse_count_label.pack(side=tk.RIGHT)
 
+        # Таблица
+        table_frame = ctk.CTkFrame(self.warehouse_frame, fg_color="white", corner_radius=10, border_width=1,
+                                   border_color=self.FORM_CARD_BORDER)
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
+
+        # Порядок значений в строке не меняется (его читают другие функции); порядок показа - displaycolumns
         columns = ("id", "car_info", "client", "part_name", "quantity", "price", "paid", "status", "order_date", "received_date", "notes")
-        self.warehouse_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
+        style = ttk.Style()
+        style.configure("Warehouse.Treeview", rowheight=28, font=("Arial", 11), background="white",
+                        fieldbackground="white", foreground="#263238", borderwidth=0, indent=0)
+        style.configure("Warehouse.Treeview.Heading", font=("Arial", 11, "bold"), foreground="#455a64",
+                        background="#f5f7f9", relief="flat", padding=(6, 6))
+        style.map("Warehouse.Treeview", background=[("selected", "#d6e8fb")], foreground=[("selected", "#0d1b2a")])
+        style.layout("Warehouse.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
+            ("Treeitem.image", {"side": "left", "sticky": ""}), ("Treeitem.text", {"sticky": "nswe"})]})])
+        self.warehouse_tree = ttk.Treeview(table_frame, columns=columns, show="tree headings", height=15,
+                                           style="Warehouse.Treeview")
+        self.warehouse_tree.column("#0", width=12, minwidth=12, stretch=False, anchor="w")   # полоска статуса
 
         self.warehouse_tree.heading("id", text="ID")
         self.warehouse_tree.heading("car_info", text=self.tr("bookings.col_car"))
         self.warehouse_tree.heading("client", text=self.tr("bookings.info_label_client"))
         self.warehouse_tree.heading("part_name", text=self.tr("warehouse.col_part_name"))
-        self.warehouse_tree.heading("quantity", text=self.tr("warehouse.col_quantity"))
+        self.warehouse_tree.heading("quantity", text=self.tr("warehouse.quantity_short"))
         self.warehouse_tree.heading("price", text=self.tr("works.col_price"))
         self.warehouse_tree.heading("paid", text=self.tr("warehouse.col_paid"))
         self.warehouse_tree.heading("status", text=self.tr("bookings.col_status"))
-        self.warehouse_tree.heading("order_date", text=self.tr("warehouse.col_order_date"))
-        self.warehouse_tree.heading("received_date", text=self.tr("warehouse.col_received_date"))
+        self.warehouse_tree.heading("order_date", text=self.tr("warehouse.col_order_short"))
+        self.warehouse_tree.heading("received_date", text=self.tr("warehouse.col_received_short"))
         self.warehouse_tree.heading("notes", text=self.tr("warehouse.col_notes"))
 
         self.warehouse_tree.column("id", width=0, stretch=False, minwidth=0)
-        self.warehouse_tree.column("car_info", width=180)
+        self.warehouse_tree.column("car_info", width=210)
         self.warehouse_tree.column("client", width=130)
-        self.warehouse_tree.column("part_name", width=200)
-        self.warehouse_tree.column("quantity", width=50)
-        self.warehouse_tree.column("price", width=90)
-        self.warehouse_tree.column("paid", width=80)
-        self.warehouse_tree.column("status", width=90)
-        self.warehouse_tree.column("order_date", width=90)
-        self.warehouse_tree.column("received_date", width=90)
-        self.warehouse_tree.column("notes", width=120)
+        self.warehouse_tree.column("part_name", width=230)
+        self.warehouse_tree.column("quantity", width=80, anchor="center")
+        self.warehouse_tree.column("price", width=115, anchor="e")
+        self.warehouse_tree.column("paid", width=105, anchor="center")
+        self.warehouse_tree.column("status", width=115)
+        self.warehouse_tree.column("order_date", width=95)
+        self.warehouse_tree.column("received_date", width=95)
+        self.warehouse_tree.column("notes", width=110)
 
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.warehouse_tree.yview)
         self.warehouse_tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.warehouse_tree.pack(fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=6)
+        self.warehouse_tree.pack(fill=tk.BOTH, expand=True, padx=(6, 0), pady=6)
 
         # Видимость колонок (сохраняется в settings.json); id скрыт всегда
         self.setup_toggleable_columns(self.warehouse_tree, "warehouse_hidden_columns", columns[1:])
 
-        # Настройка цветов для статусов
-        self.warehouse_tree.tag_configure("в пути", background="#e3f2fd", foreground="#1565c0")
-        self.warehouse_tree.tag_configure("на складе", background="#e8f5e9", foreground="#2e7d32")
-        self.warehouse_tree.tag_configure("выдано", background="#f3e5f5", foreground="#7b1fa2")
+        # Статус - цветной полоской слева; выданные - серым текстом
+        self.warehouse_status_images = {}
+        for status, color in self.WAREHOUSE_STATUS_COLORS.items():
+            image = tk.PhotoImage(master=self.warehouse_tree, width=6, height=26)
+            image.put(color, to=(0, 0, 6, 26))
+            self.warehouse_status_images[status] = image
+        self.warehouse_tree.tag_configure("выдано", foreground="#9e9e9e")
+        self.warehouse_tree.tag_configure("odd", background="#fafbfc")
 
-        # Добавляем tooltip для запчастей
+        # Подсказка с полным текстом детали / примечания
         TreeviewTooltip(self.warehouse_tree, columns=["part_name", "notes"])
 
-        # Контекстное меню для редактирования
-        self.warehouse_context_menu = tk.Menu(
-            self.warehouse_tree, tearoff=0,
-            bg="#1e1e1e", fg="white", bd=0,
-            activebackground="#2d2d2d", activeforeground="white",
-            font=("Segoe UI", 11)
-        )
-        self.warehouse_context_menu.add_command(
-            label="  ✏  " + self.tr("bookings.ctx_edit"), command=self.edit_warehouse_part,
-            foreground="#64b5f6", activeforeground="#90caf9",
-            background="#1e1e1e", activebackground="#1976d2"
-        )
-        self.warehouse_context_menu.add_separator()
-        self.warehouse_context_menu.add_command(
-            label="  📦  " + self.tr("warehouse.status_in_stock"), command=lambda: self.update_part_status("на складе"),
-            foreground="#81c784", activeforeground="#a5d6a7",
-            background="#1e1e1e", activebackground="#2e7d32"
-        )
-        self.warehouse_context_menu.add_command(
-            label="  ✅  " + self.tr("warehouse.status_issued"), command=lambda: self.update_part_status("выдано"),
-            foreground="#ffb74d", activeforeground="#ffcc80",
-            background="#1e1e1e", activebackground="#e65100"
-        )
-        self.warehouse_context_menu.add_separator()
-        self.warehouse_context_menu.add_command(
-            label="  💰  " + self.tr("warehouse.ctx_mark_paid"), command=lambda: self.set_warehouse_part_paid(True),
-            foreground="#81c784", activeforeground="#a5d6a7",
-            background="#1e1e1e", activebackground="#2e7d32"
-        )
-        self.warehouse_context_menu.add_command(
-            label="  🚫  " + self.tr("warehouse.ctx_mark_unpaid"), command=lambda: self.set_warehouse_part_paid(False),
-            foreground="#e0e0e0", activeforeground="#ffffff",
-            background="#1e1e1e", activebackground="#616161"
-        )
-        self.warehouse_context_menu.add_separator()
-        self.warehouse_context_menu.add_command(
-            label="  🔗  " + self.tr("warehouse.ctx_goto_booking"), command=self.goto_booking_from_warehouse,
-            foreground="#64b5f6", activeforeground="#90caf9",
-            background="#1e1e1e", activebackground="#1976d2"
-        )
-        self.warehouse_context_menu.add_separator()
-        self.warehouse_context_menu.add_command(
-            label="  🗑  " + self.tr("bookings.ctx_delete"), command=self.delete_warehouse_part,
-            foreground="#ef5350", activeforeground="#ef9a9a",
-            background="#1e1e1e", activebackground="#c62828"
-        )
+        # Меню по правому клику - светлое; удаление отдельно внизу
+        menu = self.warehouse_context_menu = tk.Menu(
+            self.warehouse_tree, tearoff=0, bg="white", fg="#263238", bd=1, relief="solid",
+            activebackground="#e3f2fd", activeforeground="#0d1b2a", font=("Segoe UI", 11), disabledforeground="#b0b7bf")
+        menu.add_command(label="  ✎  " + self.tr("bookings.ctx_edit"), command=self.edit_warehouse_part)
+        menu.add_separator()
+        menu.add_command(label="  📦  " + self.tr("warehouse.status_in_stock"), command=lambda: self.update_part_status("на складе"))
+        menu.add_command(label="  ✅  " + self.tr("warehouse.status_issued"), command=lambda: self.update_part_status("выдано"))
+        menu.add_separator()
+        menu.add_command(label="  💰  " + self.tr("warehouse.ctx_mark_paid"), command=lambda: self.set_warehouse_part_paid(True))
+        menu.add_command(label="  ✖  " + self.tr("warehouse.ctx_mark_unpaid"), command=lambda: self.set_warehouse_part_paid(False))
+        menu.add_separator()
+        menu.add_command(label="  🔗  " + self.tr("warehouse.ctx_goto_booking"), command=self.goto_booking_from_warehouse)
+        menu.add_separator()
+        menu.add_command(label="  🗑  " + self.tr("bookings.ctx_delete"), command=self.delete_warehouse_part,
+                         foreground="#c62828", activeforeground="white", activebackground="#c62828")
 
         def show_warehouse_context_menu(event):
             # ПКМ по заголовку - меню колонок
             if self.warehouse_tree.identify_region(event.x, event.y) == "heading":
                 self.show_columns_menu("warehouse_hidden_columns", event.x_root, event.y_root)
                 return
-            # Выбираем строку под курсором
             item = self.warehouse_tree.identify_row(event.y)
             if item:
                 self.warehouse_tree.selection_set(item)
                 self.warehouse_context_menu.tk_popup(event.x_root, event.y_root)
 
+        def on_double_click(event):
+            # Двойной клик по детали - редактирование
+            if self.warehouse_tree.identify_region(event.x, event.y) == "heading":
+                return
+            item = self.warehouse_tree.identify_row(event.y)
+            if item:
+                self.warehouse_tree.selection_set(item)
+                self.edit_warehouse_part()
+
         self.warehouse_tree.bind("<Button-3>", show_warehouse_context_menu)
+        self.warehouse_tree.bind("<Double-1>", on_double_click)
 
         # Форма добавления запчасти (скрыта по умолчанию)
         self.add_part_form_frame = ctk.CTkFrame(self.warehouse_frame)
@@ -5114,78 +5202,117 @@ class AutoServiceApp:
         self.hide_add_part_form()
         self.refresh_warehouse()
 
+    def _warehouse_search_keyrelease(self, event=None):
+        """Поиск по мере ввода - с паузой"""
+        if event is not None and event.keysym in ("Return", "Tab", "Shift_L", "Shift_R", "Control_L", "Control_R"):
+            return
+        job = getattr(self, "_warehouse_search_job", None)
+        if job:
+            self.root.after_cancel(job)
+        self._warehouse_search_job = self.root.after(400, self.refresh_warehouse)
+
+    def _warehouse_toggle_all_time(self):
+        self.warehouse_show_all_time = not self.warehouse_show_all_time
+        self.refresh_warehouse()
+
+    def _warehouse_set_status(self, label):
+        self.warehouse_status_var.set(label)
+        self.refresh_warehouse()
+
+    def _warehouse_draw_statuses(self, counts):
+        """Статусы фишками с количеством; статусы без деталей скрыты"""
+        for widget in self.warehouse_status_bar.winfo_children():
+            widget.destroy()
+        current = self.warehouse_status_var.get()
+        options = [("all", self.tr("bookings.filter_all"), "#455a64")] + \
+                  [(st, self.warehouse_status_label(st), color) for st, color in self.WAREHOUSE_STATUS_COLORS.items()]
+        for key, label, color in options:
+            count = counts.get(key, 0)
+            if key != "all" and not count and current != label:
+                continue
+            selected = current == label
+            ctk.CTkButton(self.warehouse_status_bar, text=f"●  {label}  {count}", width=10, height=28, corner_radius=14,
+                          font=("Arial", 12, "bold" if selected else "normal"),
+                          fg_color=color if selected else "white", text_color="white" if selected else color,
+                          hover_color=color if selected else "#f0f3f6", border_width=1, border_color=color,
+                          command=lambda l=label: self._warehouse_set_status(l)).pack(side=tk.LEFT, padx=(0, 6))
+
     def refresh_warehouse(self):
-        """Обновить список запчастей на складе"""
-        # Очистка таблицы
+        """Обновить список запчастей на складе: статус - фишками, поиск по госномеру / клиенту / детали.
+        "Все" и "Выдано" - за последние 3 месяца (если не включено "за всё время"); поиск - по всему складу"""
+        self._warehouse_search_job = None
         for item in self.warehouse_tree.get_children():
             self.warehouse_tree.delete(item)
 
-        # Получение фильтра по статусу
-        status_filter = self.warehouse_status_var.get() if hasattr(self, 'warehouse_status_var') else self.tr("bookings.filter_all")
-        status_map = {
-            self.tr("bookings.filter_all"): None,
-            self.tr("warehouse.status_in_transit"): "в пути",
-            self.tr("warehouse.status_in_stock"): "на складе",
-            self.tr("warehouse.status_issued"): "выдано",
-        }
-        status = status_map.get(status_filter, None)
+        search = " ".join(self.warehouse_search_entry.get().split()).lower() if hasattr(self, "warehouse_search_entry") else ""
+        status_keys = {self.warehouse_status_label(st): st for st in self.WAREHOUSE_STATUS_COLORS}
+        wanted = status_keys.get(self.warehouse_status_var.get()) if hasattr(self, "warehouse_status_var") else None
+        limited = not getattr(self, "warehouse_show_all_time", False) and not search and wanted in (None, "выдано")
+        cutoff = date.today() - timedelta(days=self.WAREHOUSE_RECENT_DAYS)
 
-        # Поиск по госномеру
-        search_query = self.warehouse_search_entry.get().strip().upper() if hasattr(self, 'warehouse_search_entry') else ""
-
-        # Получение данных (новая структура с JOIN)
-        parts = self.db.get_all_warehouse_parts(status=status)
-
+        parts = self.db.get_all_warehouse_parts()
+        rows, counts = [], {"all": 0}
         for part in parts:
-            # Новая структура: id, car_number, car_brand, car_model, client_name, client_phone,
-            #                  part_name, quantity, price, status, order_date, received_date, notes, car_id, is_paid
+            # id, car_number, car_brand, car_model, client_name, client_phone,
+            # part_name, quantity, price, status, order_date, received_date, notes, car_id, is_paid
             part_id, car_number, car_brand, car_model, client_name, client_phone, \
                 part_name, quantity, price, part_status, order_date, received_date, notes, car_id, is_paid = part
-
-            # Фильтрация по госномеру
-            if search_query and (not car_number or search_query not in car_number.upper()):
+            car_info = " ".join(x for x in (car_brand, car_model, car_number) if x)
+            if search:
+                haystack = " ".join(str(x or "") for x in (car_number, car_info, client_name, client_phone, part_name)).lower()
+                digits = re.sub(r"\D", "", search)
+                if search not in haystack and not (digits and digits in re.sub(r"\D", "", str(client_phone or ""))):
+                    continue
+            # Выданные давно - только "за всё время" (их со временем много); в пути / на складе - всегда
+            last_date = received_date or order_date
+            if part_status == "выдано" and not getattr(self, "warehouse_show_all_time", False) and not search \
+                    and isinstance(last_date, date) and last_date < cutoff:
                 continue
+            counts["all"] += 1
+            counts[part_status] = counts.get(part_status, 0) + 1
+            if wanted and part_status != wanted:
+                continue
+            rows.append((part_id, car_info, client_name, part_name, quantity, price, is_paid, part_status,
+                         order_date, received_date, notes))
 
-            # Форматирование информации о машине
-            car_info = f"{car_number or ''} {car_brand or ''} {car_model or ''}".strip() or "-"
-
-            # Форматирование информации о клиенте
-            client_info = client_name or "-"
-
-            # Форматирование дат
-            order_date_str = order_date.strftime("%d.%m.%Y") if order_date else "-"
-            received_date_str = received_date.strftime("%d.%m.%Y") if received_date else "-"
-
-            # Форматирование цены
-            price_str = self.format_currency(float(price)) if price else "-"
-
-            # Статус для отображения (в БД статус всегда хранится по-русски)
-            status_display = {
-                "в пути": self.tr("warehouse.status_in_transit"),
-                "на складе": self.tr("warehouse.status_in_stock"),
-                "выдано": self.tr("warehouse.status_issued"),
-            }.get(part_status, part_status)
-
-            paid_str = self.tr("common.yes") if is_paid else self.tr("common.no")
-
-            self.warehouse_tree.insert("", tk.END, values=(
+        for index, (part_id, car_info, client_name, part_name, quantity, price, is_paid, part_status,
+                    order_date, received_date, notes) in enumerate(rows):
+            tags = [part_status] + (["odd"] if index % 2 else [])
+            self.warehouse_tree.insert("", tk.END, image=self.warehouse_status_images.get(part_status), values=(
                 part_id,
                 car_info,
-                client_info,
-                part_name,
-                quantity,
-                price_str,
-                paid_str,
-                status_display,
-                order_date_str,
-                received_date_str,
-                notes or "-"
-            ), tags=(part_status,))
+                self.display_name(client_name),
+                self.clean_item_name(part_name),
+                quantity or "",
+                self.format_currency(float(price)) if price else "",
+                "✓" if is_paid else "",
+                self.warehouse_status_label(part_status),
+                order_date.strftime("%d.%m.%Y") if order_date else "",
+                received_date.strftime("%d.%m.%Y") if received_date else "",
+                " ".join(str(notes or "").split()),
+            ), tags=tags)
+
+        self._warehouse_draw_statuses(counts)
+        total = len(parts)
+        shown = len(rows)
+        self.warehouse_count_label.configure(
+            text=self.tr("bookings.count_all", shown=shown) if shown == total
+            else self.tr("bookings.count_shown", shown=shown, total=total))
+        # "за всё время" - только если что-то скрыто сроком
+        hidden_by_date = sum(1 for p in parts if p[9] == "выдано" and isinstance(p[11] or p[10], date)
+                             and (p[11] or p[10]) < cutoff)
+        if wanted in (None, "выдано") and not search and (hidden_by_date or getattr(self, "warehouse_show_all_time", False)):
+            self.warehouse_range_btn.configure(text=self.tr("bookings.recent_only") if self.warehouse_show_all_time
+                                               else self.tr("bookings.show_all_time"))
+            self.warehouse_range_btn.pack(side=tk.LEFT)
+        else:
+            self.warehouse_range_btn.pack_forget()
 
     def clear_warehouse_search(self):
         """Очистить поиск по складу"""
         self.warehouse_search_entry.delete(0, tk.END)
         self.refresh_warehouse()
+        self.restore_placeholder(self.warehouse_search_entry)
 
     def update_part_status(self, new_status):
         """Обновить статус выбранной запчасти"""
@@ -5267,8 +5394,7 @@ class AutoServiceApp:
         self.switch_tab("bookings")
         if hasattr(self, "bookings_status_var"):
             self.bookings_status_var.set(self.tr("bookings.filter_all"))
-        if hasattr(self, "bookings_period_var"):
-            self.bookings_period_var.set(self.tr("bookings.period_all"))
+        self.bookings_show_all_time = True
         if hasattr(self, "bookings_search_entry"):
             self.bookings_search_entry.delete(0, tk.END)
         self.refresh_bookings()
@@ -7604,67 +7730,75 @@ class AutoServiceApp:
 
     # --- Методы для вкладки Записи ---
 
+    BOOKING_STATUS_COLORS = {"waiting": "#f59e0b", "in_progress": "#3b82f6", "completed": "#22c55e",
+                             "cancelled": "#9e9e9e", "overdue": "#e53935"}
+
     def setup_bookings_tab(self):
-        """Настройка вкладки записей из Telegram"""
-        # Верхняя панель с фильтрами
-        filter_frame = ctk.CTkFrame(self.bookings_frame)
-        filter_frame.pack(fill=tk.X, padx=10, pady=10)
+        """Вкладка "Записи": быстрые фильтры (сегодня / завтра / неделя / все), статусы с количеством,
+        поиск по мере ввода, таблица со статусом полоской слева, меню по правому клику, двойной клик - информация"""
+        # --- верхняя панель: быстрые фильтры, период, поиск, кнопки ---
+        top = ctk.CTkFrame(self.bookings_frame, fg_color="transparent")
+        top.pack(fill=tk.X, padx=10, pady=(10, 4))
 
-        # Фильтр по статусу
-        ctk.CTkLabel(filter_frame, text=self.tr("bookings.status_label")).pack(side=tk.LEFT, padx=5)
+        # Статусы - фишками с количеством (слева); поиск и кнопки - справа.
+        # "В ожидании", "Просрочена", "В работе" - за любую дату; "Все", "Выполненные", "Отменённые" -
+        # за последние 3 месяца (внизу - "Показать за всё время"). Поиск - по всей базе
         self.bookings_status_var = tk.StringVar(value=self.tr("bookings.filter_all"))
-        status_combo = ctk.CTkComboBox(filter_frame, variable=self.bookings_status_var,
-                                        values=[self.tr("bookings.filter_all"), self.tr("bookings.filter_waiting"),
-                                                self.tr("bookings.filter_in_progress"), self.tr("bookings.filter_completed"),
-                                                self.tr("bookings.filter_cancelled")],
-                                        command=lambda _: self.refresh_bookings(),  # фильтр применяется сразу при выборе
-                                        width=140)
-        status_combo.pack(side=tk.LEFT, padx=5)
+        self.bookings_show_all_time = False
+        self.bookings_status_bar = ctk.CTkFrame(top, fg_color="transparent")
+        self.bookings_status_bar.pack(side=tk.LEFT)
 
-        # Период: по умолчанию последний месяц (+ будущие и незавершённые за любую дату). Выбор запоминается
-        self.bookings_periods = {self.tr("bookings.period_month"): 31, self.tr("bookings.period_3months"): 92,
-                                 self.tr("bookings.period_year"): 366, self.tr("bookings.period_all"): None}
-        saved_days = self.load_settings().get("bookings_period_days", 31)
-        saved_label = next((k for k, v in self.bookings_periods.items() if v == saved_days),
-                           self.tr("bookings.period_month"))
-        self.bookings_period_var = tk.StringVar(value=saved_label)
-        ctk.CTkComboBox(filter_frame, variable=self.bookings_period_var, values=list(self.bookings_periods),
-                        command=self.on_bookings_period_change, width=120, state="readonly").pack(side=tk.LEFT, padx=5)
+        # Справа: столбцы, записать клиента
+        self.bookings_columns_btn = ctk.CTkButton(
+            top, text="☰", width=34, height=34, corner_radius=8, font=("Arial", 15),
+            fg_color="transparent", border_width=1, border_color="#9e9e9e", text_color="#424242", hover_color="#e0e0e0",
+            command=lambda: self.show_columns_menu_under("bookings_hidden_columns", self.bookings_columns_btn))
+        self.bookings_columns_btn.pack(side=tk.RIGHT)
+        self.attach_hover_tip(self.bookings_columns_btn, self.tr("bookings.columns_btn"))
+        ctk.CTkButton(top, text="+  " + self.tr("bookings.add_client"), command=self.show_add_booking_window,
+                      height=34, corner_radius=8, font=("Arial", 13, "bold"),
+                      fg_color="#1565c0", hover_color="#0d47a1", width=170).pack(side=tk.RIGHT, padx=8)
 
-        # Кнопки
-        ctk.CTkButton(filter_frame, text=self.tr("works.refresh"), command=self.refresh_bookings,
-                     width=100).pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(filter_frame, text=self.tr("bookings.today_only"), command=self.show_today_bookings,
-                     width=120).pack(side=tk.LEFT, padx=5)
-
-        # Поле поиска
-        ctk.CTkLabel(filter_frame, text=self.tr("bookings.search_label")).pack(side=tk.LEFT, padx=(20, 0))
-        self.bookings_search_entry = ctk.CTkEntry(filter_frame,
-                                                   placeholder_text=self.tr("bookings.search_placeholder"),
-                                                   placeholder_text_color="gray", width=180)
-        self.bookings_search_entry.pack(side=tk.LEFT, padx=5)
+        # Поиск: по мере ввода (с паузой), по всей базе; ✕ - очистить
+        search_box = ctk.CTkFrame(top, fg_color="transparent")
+        search_box.pack(side=tk.RIGHT, padx=(8, 0))
+        self.bookings_search_entry = ctk.CTkEntry(search_box, placeholder_text="🔍  " + self.tr("bookings.search_placeholder"),
+                                                  placeholder_text_color="gray", width=230, height=34, corner_radius=8)
+        self.bookings_search_entry.pack(side=tk.LEFT)
         self.bookings_search_entry.bind("<Return>", lambda e: self.refresh_bookings())
-        ctk.CTkButton(filter_frame, text="✕", command=self.clear_bookings_search,
-                     width=30, fg_color="#c62828", hover_color="#b71c1c").pack(side=tk.LEFT, padx=2)
-        ctk.CTkButton(filter_frame, text=self.tr("bookings.add_client"), command=self.show_add_booking_window,
-                     fg_color="#1565c0", hover_color="#0d47a1", width=140).pack(side=tk.LEFT, padx=(15, 5))
-        self.bookings_columns_btn = ctk.CTkButton(filter_frame, text="☰ " + self.tr("bookings.columns_btn"),
-                                                  command=lambda: self.show_columns_menu_under("bookings_hidden_columns", self.bookings_columns_btn), width=110)
-        self.bookings_columns_btn.pack(side=tk.LEFT, padx=5)
+        self.bookings_search_entry.bind("<KeyRelease>", self._bookings_search_keyrelease, add="+")
+        ctk.CTkButton(search_box, text="✕", command=self.clear_bookings_search, width=30, height=34, corner_radius=8,
+                      fg_color="transparent", text_color="gray45", hover_color="#e0e0e0").pack(side=tk.LEFT, padx=(2, 0))
 
-        # "Показано N из M" - под таблицей (часть записей может скрывать период)
-        self.bookings_count_label = ctk.CTkLabel(self.bookings_frame, text="", font=("Arial", 12),
-                                                 text_color="gray45", anchor="e")
-        self.bookings_count_label.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 6))
+        # Низ: "Показано N из M" и переключатель "за 3 месяца / за всё время"
+        bottom = ctk.CTkFrame(self.bookings_frame, fg_color="transparent")
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 6))
+        self.bookings_range_btn = ctk.CTkButton(bottom, text="", width=10, height=24, fg_color="transparent",
+                                                text_color="#1565c0", hover_color="#e3f2fd", font=("Arial", 12, "underline"),
+                                                command=self._bookings_toggle_all_time)
+        self.bookings_count_label = ctk.CTkLabel(bottom, text="", font=("Arial", 12), text_color="gray45", anchor="e")
+        self.bookings_count_label.pack(side=tk.RIGHT)
 
-        # Таблица записей
-        table_frame = ctk.CTkFrame(self.bookings_frame)
-        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # --- таблица ---
+        table_frame = ctk.CTkFrame(self.bookings_frame, fg_color="white", corner_radius=10, border_width=1,
+                                   border_color=self.FORM_CARD_BORDER)
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
 
+        # Порядок значений в строке не меняется (его читают другие функции); порядок показа - displaycolumns
         columns = ("id", "order_number", "date", "time", "name", "phone", "username", "car", "notes", "status")
-        self.bookings_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
+        style = ttk.Style()
+        style.configure("Bookings.Treeview", rowheight=28, font=("Arial", 11), background="white",
+                        fieldbackground="white", foreground="#263238", borderwidth=0, indent=0)
+        style.configure("Bookings.Treeview.Heading", font=("Arial", 11, "bold"), foreground="#455a64",
+                        background="#f5f7f9", relief="flat", padding=(6, 6))
+        style.map("Bookings.Treeview", background=[("selected", "#d6e8fb")], foreground=[("selected", "#0d1b2a")])
+        # В первой колонке - только цветная полоска статуса: без значка раскрытия дерева (он занимает место)
+        style.layout("Bookings.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
+            ("Treeitem.image", {"side": "left", "sticky": ""}), ("Treeitem.text", {"sticky": "nswe"})]})])
+        self.bookings_tree = ttk.Treeview(table_frame, columns=columns, show="tree headings", height=15,
+                                          style="Bookings.Treeview")
+        self.bookings_tree.column("#0", width=12, minwidth=12, stretch=False, anchor="w")   # цветная полоска статуса
 
-        # Настройка колонок
         self.bookings_tree.heading("id", text="ID")
         self.bookings_tree.heading("order_number", text=self.tr("bookings.col_order_number"))
         self.bookings_tree.heading("date", text=self.tr("bookings.col_date") + " ▼",
@@ -7679,85 +7813,110 @@ class AutoServiceApp:
         self.bookings_tree.heading("status", text=self.tr("bookings.col_status"))
 
         self.bookings_tree.column("id", width=0, stretch=False, minwidth=0)
-        self.bookings_tree.column("order_number", width=80)
-        self.bookings_tree.column("date", width=100)
-        self.bookings_tree.column("time", width=70)
+        self.bookings_tree.column("order_number", width=90)
+        self.bookings_tree.column("date", width=95)
+        self.bookings_tree.column("time", width=75)
         self.bookings_tree.column("name", width=150)
-        self.bookings_tree.column("phone", width=120)
-        self.bookings_tree.column("username", width=120)
-        self.bookings_tree.column("car", width=180)
-        self.bookings_tree.column("notes", width=150)
-        self.bookings_tree.column("status", width=100)
+        self.bookings_tree.column("phone", width=150)
+        self.bookings_tree.column("username", width=110)
+        self.bookings_tree.column("car", width=230)
+        self.bookings_tree.column("notes", width=170)
+        self.bookings_tree.column("status", width=110)
 
-        # Видимость колонок (сохраняется в settings.json); id скрыт всегда
-        self.setup_toggleable_columns(self.bookings_tree, "bookings_hidden_columns", columns[1:])
+        # Видимость колонок (сохраняется в settings.json); id скрыт всегда; № наряда - в конце
+        self.setup_toggleable_columns(self.bookings_tree, "bookings_hidden_columns",
+                                      ("date", "time", "name", "phone", "username", "car", "notes", "status",
+                                       "order_number"))
 
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.bookings_tree.yview)
         self.bookings_tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.bookings_tree.pack(fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=6)
+        self.bookings_tree.pack(fill=tk.BOTH, expand=True, padx=(6, 0), pady=6)
 
         # Tooltip с полным текстом примечания при наведении (если текст обрезан)
         TreeviewTooltip(self.bookings_tree, columns=["notes"])
 
-        # Настройка цветов для статусов
-        self.bookings_tree.tag_configure("waiting", background="#fff3e0", foreground="#e65100")      # Оранжевый - В ожидании
-        self.bookings_tree.tag_configure("in_progress", background="#e3f2fd", foreground="#1565c0")  # Синий - В работе
-        self.bookings_tree.tag_configure("completed", background="#e8f5e9", foreground="#2e7d32")    # Зелёный - Выполнена
-        self.bookings_tree.tag_configure("cancelled", background="#ffebee", foreground="#c62828")   # Красный - Отменена
+        # Статус - цветной полоской слева; текст строки обычный, сегодня - жирным, отменённые - серым
+        self.bookings_status_images = {}
+        for status, color in self.BOOKING_STATUS_COLORS.items():
+            image = tk.PhotoImage(master=self.bookings_tree, width=6, height=26)
+            image.put(color, to=(0, 0, 6, 26))
+            self.bookings_status_images[status] = image
+        self.bookings_tree.tag_configure("today", font=("Arial", 11, "bold"))
+        self.bookings_tree.tag_configure("overdue", background="#fff4f4")   # просрочена: светлый фон + красная полоска
+        self.bookings_tree.tag_configure("cancelled", foreground="#9e9e9e")
+        self.bookings_tree.tag_configure("odd", background="#fafbfc")
+        self.bookings_raw = {}   # строка -> настоящие (не отформатированные) имя, телефон, Telegram
 
-        # Контекстное меню для записей
-        self.bookings_context_menu = tk.Menu(
-            self.bookings_tree, tearoff=0,
-            bg="#1e1e1e", fg="white", bd=0,
-            activebackground="#2d2d2d", activeforeground="white",
-            font=("Segoe UI", 11)
-        )
-        self.bookings_context_menu.add_command(
-            label="  🔧  " + self.tr("bookings.ctx_start_work"), command=self.start_work_from_booking,
-            foreground="#81c784", activeforeground="#a5d6a7",
-            background="#1e1e1e", activebackground="#2e7d32"
-        )
-        self.bookings_context_menu.add_command(
-            label="  ✏  " + self.tr("bookings.ctx_edit"), command=self.edit_booking_in_add_work,
-            foreground="#64b5f6", activeforeground="#90caf9",
-            background="#1e1e1e", activebackground="#1976d2"
-        )
-        self.bookings_context_menu.add_separator()
-        self.bookings_context_menu.add_command(
-            label="  📋  " + self.tr("bookings.ctx_info"), command=self.show_booking_info,
-            foreground="#ce93d8", activeforeground="#e1bee7",
-            background="#1e1e1e", activebackground="#6a1b9a"
-        )
-        self.bookings_context_menu.add_command(
-            label="  👤  " + self.tr("bookings.ctx_client_info"), command=self.show_client_info,
-            foreground="#80deea", activeforeground="#b2ebf2",
-            background="#1e1e1e", activebackground="#00838f"
-        )
-        self.bookings_context_menu.add_command(
-            label="  ✏  " + self.tr("bookings.ctx_edit_client"), command=self.edit_client_info,
-            foreground="#fff59d", activeforeground="#fffde7",
-            background="#1e1e1e", activebackground="#f9a825"
-        )
-        self.bookings_context_menu.add_separator()
-        self.bookings_context_menu.add_command(
-            label="  ✅  " + self.tr("bookings.ctx_completed"), command=self.mark_booking_completed,
-            foreground="#81c784", activeforeground="#a5d6a7",
-            background="#1e1e1e", activebackground="#2e7d32"
-        )
-        self.bookings_context_menu.add_command(
-            label="  ❌  " + self.tr("bookings.ctx_cancelled"), command=self.mark_booking_cancelled,
-            foreground="#ffb74d", activeforeground="#ffe0b2",
-            background="#1e1e1e", activebackground="#e65100"
-        )
-        self.bookings_context_menu.add_command(
-            label="  🗑  " + self.tr("bookings.ctx_delete"), command=self.delete_selected_booking,
-            foreground="#ef9a9a", activeforeground="#ffcdd2",
-            background="#1e1e1e", activebackground="#c62828"
-        )
+        # Меню по правому клику - светлое, как программа; удаление отдельно внизу
+        menu_style = dict(tearoff=0, bg="white", fg="#263238", bd=1, relief="solid", activebackground="#e3f2fd",
+                          activeforeground="#0d1b2a", font=("Segoe UI", 11), disabledforeground="#b0b7bf")
+        self.bookings_context_menu = tk.Menu(self.bookings_tree, **menu_style)
+        menu = self.bookings_context_menu
+        menu.add_command(label="  🔧  " + self.tr("bookings.ctx_start_work"), command=self.start_work_from_booking)
+        menu.add_command(label="  ✎  " + self.tr("bookings.ctx_edit_order"), command=self.edit_booking_in_add_work)
+        menu.add_separator()
+        menu.add_command(label="  📋  " + self.tr("bookings.ctx_info"), command=self.show_booking_info)
+        menu.add_command(label="  👤  " + self.tr("bookings.ctx_client_info"), command=self.show_client_info)
+        menu.add_command(label="  ✎  " + self.tr("bookings.ctx_edit_client_data"), command=self.edit_client_info)
+        menu.add_separator()
+        menu.add_command(label="  ✅  " + self.tr("bookings.ctx_completed"), command=self.mark_booking_completed)
+        menu.add_command(label="  ✖  " + self.tr("bookings.ctx_cancelled"), command=self.mark_booking_cancelled)
+        menu.add_separator()
+        menu.add_command(label="  🗑  " + self.tr("bookings.ctx_delete"), command=self.delete_selected_booking,
+                         foreground="#c62828", activeforeground="white", activebackground="#c62828")
         self.bookings_tree.bind("<Button-3>", self.show_bookings_context_menu)
+        self.bookings_tree.bind("<Double-1>", self._bookings_double_click)
 
+    def _bookings_double_click(self, event):
+        """Двойной клик по записи - окно "Информация" """
+        if self.bookings_tree.identify_region(event.x, event.y) == "heading":
+            return
+        item = self.bookings_tree.identify_row(event.y)
+        if item:
+            self.bookings_tree.selection_set(item)
+            self.show_booking_info()
 
+    def _bookings_search_keyrelease(self, event=None):
+        """Поиск по мере ввода - с паузой, чтобы не обращаться к базе на каждую букву"""
+        if event is not None and event.keysym in ("Return", "Tab", "Shift_L", "Shift_R", "Control_L", "Control_R"):
+            return
+        job = getattr(self, "_bookings_search_job", None)
+        if job:
+            self.root.after_cancel(job)
+        self._bookings_search_job = self.root.after(400, self.refresh_bookings)
+
+    BOOKINGS_RECENT_DAYS = 92   # "Все", "Выполненные", "Отменённые" по умолчанию - за 3 месяца
+
+    def _bookings_toggle_all_time(self):
+        self.bookings_show_all_time = not self.bookings_show_all_time
+        self.refresh_bookings()
+
+    def _bookings_draw_statuses(self, counts):
+        """Статусы фишками с количеством; выбранный - залит цветом"""
+        for widget in self.bookings_status_bar.winfo_children():
+            widget.destroy()
+        current = self.bookings_status_var.get()
+        options = [("all", self.tr("bookings.filter_all"), "#455a64"),
+                   ("waiting", self.tr("bookings.filter_waiting"), self.BOOKING_STATUS_COLORS["waiting"]),
+                   ("overdue", self.tr("bookings.status_overdue"), self.BOOKING_STATUS_COLORS["overdue"]),
+                   ("in_progress", self.tr("bookings.filter_in_progress"), self.BOOKING_STATUS_COLORS["in_progress"]),
+                   ("completed", self.tr("bookings.filter_completed"), self.BOOKING_STATUS_COLORS["completed"]),
+                   ("cancelled", self.tr("bookings.filter_cancelled"), self.BOOKING_STATUS_COLORS["cancelled"])]
+        for key, label, color in options:
+            count = counts.get(key, 0)
+            if key != "all" and not count and not current == label:
+                continue   # статус без записей - фишку не показываем (место - поиску)
+            selected = current == label
+            ctk.CTkButton(self.bookings_status_bar, text=f"●  {label}  {count}", width=10, height=28, corner_radius=14,
+                          font=("Arial", 12, "bold" if selected else "normal"),
+                          fg_color=color if selected else "white", text_color="white" if selected else color,
+                          hover_color=color if selected else "#f0f3f6", border_width=1, border_color=color,
+                          command=lambda l=label: self._bookings_set_status(l)).pack(side=tk.LEFT, padx=(0, 6))
+
+    def _bookings_set_status(self, label):
+        self.bookings_status_var.set(label)
+        self.refresh_bookings()
 
     def toggle_bookings_date_sort(self):
         """Клик по заголовку "Дата" - сменить направление сортировки"""
@@ -7780,6 +7939,11 @@ class AutoServiceApp:
         items = sorted(self.bookings_tree.get_children(), key=sort_key, reverse=self.bookings_sort_desc)
         for index, item in enumerate(items):
             self.bookings_tree.move(item, "", index)
+            # Полоски через строку - читать длинный список легче
+            tags = [t for t in self.bookings_tree.item(item, "tags") if t != "odd"]
+            if index % 2 and "overdue" not in tags:
+                tags.append("odd")
+            self.bookings_tree.item(item, tags=tags)
 
         arrow = " ▼" if self.bookings_sort_desc else " ▲"
         self.bookings_tree.heading("date", text=self.tr("bookings.col_date") + arrow)
@@ -7788,63 +7952,89 @@ class AutoServiceApp:
         """Очистить поле поиска и обновить список"""
         self.bookings_search_entry.delete(0, tk.END)
         self.refresh_bookings()
+        self.restore_placeholder(self.bookings_search_entry)
+
+    @staticmethod
+    def display_name(name):
+        """Имя для показа: набранное КАПСОМ или строчными - как обычно (РОМАН -> Роман). В базе не меняется"""
+        name = " ".join(str(name or "").split())
+        if name and (name.isupper() or name.islower()):
+            return " ".join(part[:1].upper() + part[1:].lower() for part in name.split(" "))
+        return name
+
+    @staticmethod
+    def display_phone(phone):
+        """Телефон для показа: +7 (977) 263-64-17"""
+        digits = phone_mask_digits(phone or "")
+        if len(digits) == 10:
+            return f"+7 ({digits[:3]}) {digits[3:6]}-{digits[6:8]}-{digits[8:]}"
+        return phone or ""
 
     def refresh_bookings(self):
-        """Обновить список записей (от сегодня и далее)"""
-        # Очистка таблицы
+        """Обновить список записей: быстрый фильтр / период, поиск - в базе; статус - здесь (ради количества)"""
+        self._bookings_search_job = None
         for item in self.bookings_tree.get_children():
             self.bookings_tree.delete(item)
+        self.bookings_raw = {}
 
-        # Получение фильтра по статусу
-        status_filter = self.bookings_status_var.get() if hasattr(self, 'bookings_status_var') else None
-        # Преобразование русского названия в код статуса
-        status_map = {
-            self.tr("bookings.filter_all"): None,
-            self.tr("bookings.filter_waiting"): "waiting",
-            self.tr("bookings.filter_in_progress"): "in_progress",
-            self.tr("bookings.filter_completed"): "completed",
-            self.tr("bookings.filter_cancelled"): "cancelled",
-        }
-        status = status_map.get(status_filter, None)
-
-        # Получение поискового запроса
         search_query = self.bookings_search_entry.get().strip().lower() if hasattr(self, 'bookings_search_entry') else ""
+        today = date.today()
+        # Незавершённые записи (в ожидании, в работе) база отдаёт за любую дату; выполненные и отменённые -
+        # за последние 3 месяца, если не включено "за всё время". Поиск - по всей базе
+        limited = not getattr(self, "bookings_show_all_time", False)
+        date_from = today - timedelta(days=self.BOOKINGS_RECENT_DAYS) if limited else None
 
-        # Период (поиск ищет по всей базе - период тогда не учитывается)
-        days = getattr(self, "bookings_periods", {}).get(self.bookings_period_var.get()) \
-            if hasattr(self, "bookings_period_var") else None
-        date_from = date.today() - timedelta(days=days) if days else None
+        # Отбор по дате и поиску делает база; статус считаем здесь - чтобы показать количество по каждому
+        bookings = self.db.get_all_bookings(date_from=date_from, search=search_query)
 
-        # Отбор делает база: дата / статус / поиск по телефону и госномеру
-        bookings = self.db.get_all_bookings(status=status, date_from=date_from, search=search_query)
+        def effective_status(status, booking_date):
+            if status == "waiting" and isinstance(booking_date, date) and booking_date < today:
+                return "overdue"   # "в ожидании", а дата уже прошла - забыли закрыть или отменить
+            return status
 
-        # Заполнение таблицы
+        counts = {"all": len(bookings)}
+        for b in bookings:
+            st = effective_status(b[7], b[5])
+            counts[st] = counts.get(st, 0) + 1
+
+        status_keys = {self.tr("bookings.filter_waiting"): "waiting", self.tr("bookings.status_overdue"): "overdue",
+                       self.tr("bookings.filter_in_progress"): "in_progress",
+                       self.tr("bookings.filter_completed"): "completed",
+                       self.tr("bookings.filter_cancelled"): "cancelled"}
+        wanted = status_keys.get(self.bookings_status_var.get()) if hasattr(self, "bookings_status_var") else None
+
+        status_text = {"waiting": self.tr("bookings.filter_waiting"), "overdue": self.tr("bookings.status_overdue"),
+                       "in_progress": self.tr("bookings.filter_in_progress"),
+                       "completed": self.tr("bookings.status_completed"),
+                       "cancelled": self.tr("bookings.status_cancelled")}
         for booking in bookings:
             booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number, notes = booking
-
-            # Форматирование даты
-            if isinstance(booking_date, date):
-                date_str = booking_date.strftime("%d.%m.%Y")
-            else:
-                date_str = str(booking_date)
-
-            # Статус на русском
-            status_ru = {
-                "waiting": self.tr("bookings.filter_waiting"),
-                "in_progress": self.tr("bookings.filter_in_progress"),
-                "completed": self.tr("bookings.status_completed"),
-                "cancelled": self.tr("bookings.status_cancelled"),
-            }.get(status, status)
-
-            # Вставка с тегом для цвета
-            self.bookings_tree.insert("", tk.END, values=(
-                booking_id, order_number or "-", date_str, booking_time, full_name or "-",
-                phone or "-", f"@{username}" if username else "-",
-                car_info or "-", notes or "-", status_ru
-            ), tags=(status,))
+            st = effective_status(status, booking_date)
+            if wanted and st != wanted:
+                continue
+            date_str = booking_date.strftime("%d.%m.%Y") if isinstance(booking_date, date) else str(booking_date)
+            tags = [st]
+            if booking_date == today and st not in ("cancelled",):
+                tags.append("today")
+            item = self.bookings_tree.insert("", tk.END, image=self.bookings_status_images.get(st), values=(
+                booking_id, order_number or "", date_str, booking_time or "", self.display_name(full_name),
+                self.display_phone(phone) or "⚠ " + self.tr("bookings.no_phone"),
+                f"@{username}" if username else "", car_info or "",
+                " ".join(str(notes or "").split()), status_text.get(st, st)
+            ), tags=tags)
+            self.bookings_raw[item] = {"name": full_name or "", "phone": phone or "", "username": username or ""}
 
         self.sort_bookings_tree()
+        self._bookings_draw_statuses(counts)
         self.update_bookings_count()
+
+        # "Показать за всё время" - только там, где ограничение действует (не для незавершённых и не при поиске)
+        if wanted in ("waiting", "overdue", "in_progress") or search_query:
+            self.bookings_range_btn.pack_forget()
+        else:
+            self.bookings_range_btn.configure(text=self.tr("bookings.recent_only") if not limited
+                                              else self.tr("bookings.show_all_time"))
+            self.bookings_range_btn.pack(side=tk.LEFT)
 
     def update_bookings_count(self):
         """Подпись "Показано N из M" под таблицей записей"""
@@ -7861,45 +8051,9 @@ class AutoServiceApp:
             text = self.tr("bookings.count_shown", shown=shown, total=total)
         self.bookings_count_label.configure(text=text)
 
-    def on_bookings_period_change(self, choice=None):
-        """Сменили период - запоминаем и обновляем список"""
-        settings = self.load_settings()
-        settings["bookings_period_days"] = self.bookings_periods.get(self.bookings_period_var.get())
-        self.save_settings(settings)
-        self.refresh_bookings()
-
     def show_today_bookings(self):
-        """Показать записи на сегодня"""
-        # Очистка таблицы
-        for item in self.bookings_tree.get_children():
-            self.bookings_tree.delete(item)
-
-        bookings = self.db.get_today_bookings()
-        self.root.after_idle(self.update_bookings_count)
-
-        for booking in bookings:
-            booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number, notes = booking
-
-            if isinstance(booking_date, date):
-                date_str = booking_date.strftime("%d.%m.%Y")
-            else:
-                date_str = str(booking_date)
-
-            status_ru = {
-                "waiting": self.tr("bookings.filter_waiting"),
-                "in_progress": self.tr("bookings.filter_in_progress"),
-                "completed": self.tr("bookings.status_completed"),
-                "cancelled": self.tr("bookings.status_cancelled"),
-            }.get(status, status)
-
-            # Вставка с тегом для цвета
-            self.bookings_tree.insert("", tk.END, values=(
-                booking_id, order_number or "-", date_str, booking_time, full_name or "-",
-                phone or "-", f"@{username}" if username else "-",
-                car_info or "-", notes or "-", status_ru
-            ), tags=(status,))
-
-        self.sort_bookings_tree()
+        """Показать все записи (быстрых фильтров по дате больше нет: сегодняшние - сверху и жирным)"""
+        self._bookings_set_status(self.tr("bookings.filter_all"))
 
     def get_selected_booking_id(self):
         """Получить ID выбранной записи"""
@@ -9128,6 +9282,10 @@ class AutoServiceApp:
     def open_booking_in_add_work(self, booking_id):
         """Открыть запись на вкладке "Добавить работу": клиент, машина, работы, запчасти, мастер.
         Если по записи уже есть наряд - форма в режиме редактирования этого наряда"""
+        # Сначала уходим из того, что открыто в форме (несохранённое - с вопросом) и очищаем её целиком:
+        # иначе работы / запчасти / режим редактирования прошлой записи останутся в новой
+        if not self.works_leave_current_record():
+            return False
         self.works_phone_fill = None
         self.works_number_fill = None
         self.works_clear_marks()
@@ -9290,6 +9448,7 @@ class AutoServiceApp:
         # Данные записи встали - поля закрыты; госномер записи запоминаем (сменят на чужой - спросим)
         self.works_lock_filled()
         self.works_record_number = self.car_number_entry.get().strip()
+        self.works_update_card_marks()
 
     # ===== Окна "Информация" (наряд) и "О клиенте" =====
 
@@ -9558,11 +9717,13 @@ class AutoServiceApp:
         if not values:
             return
 
-        # values: (id, order_number, date, time, name, phone, username, car_info, notes, status)
+        # values: (id, order_number, date, time, name, phone, username, car_info, notes, status);
+        # имя и телефон в таблице отформатированы для показа - для поиска берём настоящие
         booking_id = values[0] if len(values) > 0 else None
-        client_name = values[4] if len(values) > 4 and values[4] != "-" else None
-        client_phone = values[5] if len(values) > 5 and values[5] != "-" else None
-        client_telegram = values[6] if len(values) > 6 and values[6] != "-" else None
+        raw = getattr(self, "bookings_raw", {}).get(selection[0], {})
+        client_name = raw.get("name") or None
+        client_phone = raw.get("phone") or None
+        client_telegram = f"@{raw['username']}" if raw.get("username") else None
 
         telegram_user_id = None
         if booking_id:
