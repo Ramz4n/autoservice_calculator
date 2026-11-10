@@ -769,6 +769,10 @@ class AutoServiceApp:
         self.about_frame = self.add_notebook.tab(self.tr("settings.about_tab"))
         self.setup_about_tab()
 
+        # Окно "Записать клиента" строим заранее, когда программа уже открылась - потом оно открывается сразу
+        self.root.after(2500, self._prebuild_booking_window)
+        self.root.after(3500, self._prebuild_part_window)
+
         # Загрузка данных
         self.refresh_workers_list()
         self.refresh_workers_combo()
@@ -1062,9 +1066,9 @@ class AutoServiceApp:
         return ctk.CTkEntry(parent, height=34, font=("Arial", 14), corner_radius=8, **kwargs)
 
     def form_popup_listbox(self, parent, **kwargs):
-        """Список подсказок (марки, модели...) - показывается поверх формы через place_popup"""
-        return tk.Listbox(parent, height=5, width=25, font=("Arial", 12), bd=1, relief="solid",
-                          highlightthickness=0, **kwargs)
+        """Список подсказок (марки, модели...) - поверх формы через place_popup, прячется hide_popup.
+        С полосой прокрутки и "▼ ещё N" - видно, что список можно листать (как во вкладке "Добавить работу")"""
+        return self.works_popup_listbox(parent)
 
     POPUP_MAX_ROWS = 8   # строк в списке подсказок с прокруткой (works_popup_listbox)
 
@@ -1130,6 +1134,82 @@ class AutoServiceApp:
                                 max(0, (window.winfo_screenheight() - h) // 2 - 20))
         x, y = window._form_pos
         tk.Wm.wm_geometry(window, f"{w}x{h}+{x}+{y}")
+
+    def make_dim_overlay(self):
+        """Затемнение главного окна под окном-формой (создаётся скрытым).
+        Не "поверх всех окон": затемнение принадлежит главному окну (transient), а форма - затемнению.
+        Windows держит их в порядке главное окно -> затемнение -> форма, но другие программы
+        (WhatsApp, браузер) при переключении спокойно встают сверху"""
+        overlay = tk.Toplevel(self.root)
+        overlay.withdraw()
+        overlay.overrideredirect(True)
+        overlay.configure(bg="black")
+        overlay.attributes("-alpha", 0.5)
+        overlay.transient(self.root)
+
+        def follow_root(event):
+            # Главное окно передвинули / изменили размер - затемнение следом
+            if event.widget is self.root and overlay.winfo_exists() and overlay.winfo_ismapped():
+                self._place_dim_overlay(overlay)
+
+        self.root.bind("<Configure>", follow_root, add="+")
+        return overlay
+
+    @staticmethod
+    def set_window_owner(window, owner):
+        """Windows: сделать owner владельцем окна window - окно всегда над владельцем, сворачивается с ним,
+        но не висит над другими программами. Tk для окна без рамки (затемнение) этого сам не делает"""
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            ga_root = 2
+            window.update_idletasks()
+            hwnd = user32.GetAncestor(window.winfo_id(), ga_root) or window.winfo_id()
+            owner_hwnd = user32.GetAncestor(owner.winfo_id(), ga_root) or owner.winfo_id()
+            gwl_hwndparent = -8
+            setter = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+            setter.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            setter(hwnd, gwl_hwndparent, owner_hwnd)
+        except Exception as e:
+            print(f"Не удалось назначить владельца окна: {e}")
+
+    def _place_dim_overlay(self, overlay):
+        overlay.geometry(f"{self.root.winfo_width()}x{self.root.winfo_height()}+{self.root.winfo_rootx()}+{self.root.winfo_rooty()}")
+
+    def show_dim_overlay(self, overlay):
+        """Показать затемнение точно поверх главного окна (по его текущему положению и размеру)"""
+        self.root.update_idletasks()
+        self._place_dim_overlay(overlay)
+        overlay.deiconify()
+        self.set_window_owner(overlay, self.root)
+        overlay.lift()
+
+    def show_form_window_when_ready(self, window, focus_widget=None, delay=40):
+        """Показать окно-форму один раз, уже собранным и нужного размера.
+        Окно строится скрытым (withdraw сразу после создания): CustomTkinter на Windows после resizable()
+        прячет и снова показывает окно, чтобы перекрасить заголовок, - если окно уже видно, оно мигает.
+        Даём библиотеке закончить это, пока окно скрыто, и только потом показываем"""
+        window.update()
+
+        def show():
+            if not window.winfo_exists():
+                return
+            self.fit_form_window(window)
+            window.deiconify()
+            owner = getattr(window, "dim_overlay", None)
+            if owner is not None and owner.winfo_exists():
+                self.set_window_owner(window, owner)
+            window.lift()
+            window.grab_set()
+            window.focus_force()
+            if focus_widget is not None:
+                focus_widget.focus_set()
+                # Окно получает фокус не сразу после показа - ставим курсор в поле ещё раз, когда оно уже активно
+                window.after(30, lambda: focus_widget.winfo_exists() and focus_widget.focus_set())
+
+        window.after(delay, show)
 
     def form_buttons(self, window, ok_text, ok_command, cancel_command):
         """Широкая основная кнопка и второстепенная "Отмена" внизу окна"""
@@ -4383,9 +4463,68 @@ class AutoServiceApp:
             self.add_part_form_frame.focus_force()
             return
 
+        # Окно строится один раз (заранее, вскоре после запуска) - дальше только сброс формы и показ
+        window = self._ensure_part_window()
+        self.reset_add_part_form()
+        self.show_dim_overlay(self.wh_part_overlay)
+        delay = 40 if self._part_window_fresh else 1   # сразу после построения CustomTkinter ещё перекрашивает заголовок
+        self._part_window_fresh = False
+        self.add_part_form_visible = True
+        self.show_form_window_when_ready(window, self.wh_car_number_entry, delay=delay)
+
+    def _ensure_part_window(self):
+        """Готовое окно "Добавить запчасть": построить, если ещё нет"""
+        window = getattr(self, "_part_window", None)
+        try:
+            if window is not None and window.winfo_exists():
+                return window
+        except tk.TclError:
+            pass
+        self._part_window = self._build_add_part_window()
+        return self._part_window
+
+    def _prebuild_part_window(self):
+        """Построить окно "Добавить запчасть" заранее, пока программа простаивает"""
+        try:
+            self._ensure_part_window()
+        except Exception as e:
+            print(f"Окно склада заранее не построено (построится при первом открытии): {e}")
+
+    def reset_add_part_form(self):
+        """Каждое открытие - чистая форма: поля, найденная машина, форма новой машины, телефон, галочка, ошибки"""
+        for entry in (self.wh_car_number_entry, self.wh_new_brand_entry, self.wh_new_model_entry,
+                      self.wh_new_client_name_entry, self.wh_part_name_entry, self.wh_quantity_entry,
+                      self.wh_price_entry, self.wh_notes_entry):
+            entry.delete(0, tk.END)
+            entry.configure(border_color=self.wh_normal_border)
+        self.set_phone_value(self.wh_phone_entry, "")
+        self.wh_phone_entry.configure(border_color=self.wh_normal_border)
+        self.wh_quantity_entry.insert(0, "1")
+        self.restore_placeholder(self.wh_car_number_entry)
+        self.wh_paid_var.set(False)
+        self.wh_selected_car_id = None
+        self.wh_phone_fill = None
+        self.wh_plate_phone = None
+        self.wh_searched_number = None
+        self.wh_phone_cars_numbers = {}
+        self.hide_wh_brand_listbox()
+        self.hide_wh_model_listbox()
+        if self.wh_phone_cars_combo.winfo_manager():
+            self.wh_phone_cars_combo.pack_forget()
+        self.hide_new_car_form()
+        self.set_wh_car_status("")
+        self.fit_form_window(self.add_part_form_frame)
+
+    def _build_add_part_window(self):
+        """Построить окно "Добавить запчасть" (скрытым)"""
+        self.wh_part_overlay = self.make_dim_overlay()
         window = self.add_part_form_frame = ctk.CTkToplevel(self.root)
+        window.withdraw()  # строим скрытым - показывает show_add_part_form
+        self._part_window_fresh = True
+        window.after(300, lambda: setattr(self, "_part_window_fresh", False))
         window.title(self.tr("warehouse.order_part"))
         window.transient(self.root)
+        window.dim_overlay = self.wh_part_overlay   # форма принадлежит затемнению - всегда над ним, но не над другими программами
         window.resizable(False, False)
         window.protocol("WM_DELETE_WINDOW", self.hide_add_part_form)
         content = self.wh_form_content = self.form_content(window)
@@ -4397,11 +4536,11 @@ class AutoServiceApp:
         number_row.pack(fill=tk.X)
         self.wh_car_number_entry = self.form_entry(number_row, placeholder_text="А123БВ777")
         self.wh_car_number_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # Машина ищется сама по мере ввода (как в "Записать клиента"), кнопка "Найти" не нужна
+        self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.search_car_for_warehouse())
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
         # Enter в госномере - поиск машины, а не "Заказать"
         self.wh_car_number_entry.bind('<Return>', lambda e: (self.search_car_for_warehouse(), "break")[1])
-        ctk.CTkButton(number_row, text=self.tr("warehouse.find_btn"), command=self.search_car_for_warehouse,
-                      width=80, height=34, corner_radius=8).pack(side=tk.LEFT, padx=(8, 0))
 
         # Информация о найденной машине (строка показывается, только когда есть что сказать)
         status_holder = tk.Frame(car_body, bg="white")
@@ -4494,12 +4633,9 @@ class AutoServiceApp:
         self.form_clear_error_on_type((self.wh_car_number_entry, self.wh_new_brand_entry, self.wh_phone_entry,
                                        self.wh_part_name_entry, self.wh_quantity_entry, self.wh_price_entry))
 
-        self.fit_form_window(window)
-        window.update()
-        window.grab_set()
-        window.focus_force()
-        self.wh_car_number_entry.focus_set()
-        self.add_part_form_visible = True
+        self.wh_normal_border = self.wh_car_number_entry.cget("border_color")
+        window.update_idletasks()
+        return window
 
     def set_wh_car_status(self, text, state=None):
         """Строка о машине в форме склада и цвет рамки карточки.
@@ -4519,9 +4655,12 @@ class AutoServiceApp:
             self.fit_form_window(self.add_part_form_frame)
 
     def search_car_for_warehouse(self):
-        """Поиск машины по госномеру для склада"""
+        """Поиск машины по госномеру для склада - по мере ввода (с 6 символов), как в "Записать клиента" """
         car_number = self.wh_car_number_entry.get().strip()
-        if not car_number:
+        if car_number and car_number.upper() == getattr(self, "wh_searched_number", None):
+            return  # этот госномер уже искали - не дёргаем базу на каждое нажатие (Tab, стрелки)
+        self.wh_searched_number = car_number.upper() if len(car_number) >= 6 else None
+        if len(car_number) < 6:
             self.wh_selected_car_id = None
             # Госномер стёрли - телефон, подставленный по нему (если не правили), тоже убираем
             plate_phone = getattr(self, "wh_plate_phone", None)
@@ -4532,7 +4671,8 @@ class AutoServiceApp:
             if getattr(self, "wh_form_by_phone", False):
                 # Форму новой машины открыл поиск по телефону - не закрываем, ждём госномер
                 return
-            self.set_wh_car_status(self.tr("warehouse.enter_car_number"), "warn")
+            # Госномер ещё вводят (или стёрли) - ни "найдено", ни "новая машина" пока не показываем
+            self.set_wh_car_status("")
             self.hide_new_car_form()
             return
 
@@ -4706,7 +4846,7 @@ class AutoServiceApp:
     def hide_wh_brand_listbox(self):
         """Скрыть список марок (склад)"""
         if self.wh_brand_listbox_visible:
-            self.wh_brand_listbox.place_forget()
+            self.hide_popup(self.wh_brand_listbox)
             self.wh_brand_listbox_visible = False
 
     def on_wh_brand_select(self, event):
@@ -4758,7 +4898,7 @@ class AutoServiceApp:
     def hide_wh_model_listbox(self):
         """Скрыть список моделей (склад)"""
         if self.wh_model_listbox_visible:
-            self.wh_model_listbox.place_forget()
+            self.hide_popup(self.wh_model_listbox)
             self.wh_model_listbox_visible = False
 
     def on_wh_model_select(self, event):
@@ -4782,8 +4922,14 @@ class AutoServiceApp:
         if hasattr(self, 'wh_model_listbox_visible'):
             self.hide_wh_model_listbox()
 
-        if hasattr(self, 'add_part_form_frame') and self.add_part_form_frame:
-            self.add_part_form_frame.destroy()
+        # Окно не уничтожаем - прячем вместе с затемнением; при следующем открытии форма сбросится
+        window = getattr(self, "_part_window", None)
+        if window is not None and window.winfo_exists():
+            window.grab_release()
+            window.withdraw()
+        overlay = getattr(self, "wh_part_overlay", None)
+        if overlay is not None and overlay.winfo_exists():
+            overlay.withdraw()
         self.add_part_form_visible = False
 
     def add_warehouse_part(self):
@@ -4861,7 +5007,8 @@ class AutoServiceApp:
         if car_number and car_id is None:
             result = messagebox.askyesno(
                 self.tr("common.attention"),
-                self.tr("warehouse.msg_car_not_found_confirm", car_number=car_number)
+                self.tr("warehouse.msg_car_not_found_confirm", car_number=car_number),
+                parent=self.add_part_form_frame   # поверх окна формы, а не под затемнением
             )
             if not result:
                 return
@@ -4875,7 +5022,8 @@ class AutoServiceApp:
             is_paid=self.wh_paid_var.get()
         )
 
-        messagebox.showinfo(self.tr("common.success"), self.tr("warehouse.msg_part_added"))
+        messagebox.showinfo(self.tr("common.success"), self.tr("warehouse.msg_part_added"),
+                            parent=self.add_part_form_frame)
         self.hide_add_part_form()
         self.refresh_warehouse()
 
@@ -7940,31 +8088,64 @@ class AutoServiceApp:
         win.bell()
 
     def show_add_booking_window(self):
-        """Показать окно для записи клиента"""
-        # Слоты времени из настроек (по умолчанию каждые 2 часа с 10:00 до 20:00)
-        TIME_SLOTS = booking_time_slots()
+        """Показать окно для записи клиента. Окно строится один раз (заранее, вскоре после запуска)
+        и дальше только показывается/прячется - поэтому открывается сразу"""
         # Подтягиваем свежие записи с сайта, чтобы проверка занятости учла и их
         self.web_sync_now()
+        self._ensure_booking_window()["open"]()
 
-        # Создаём затемняющий оверлей поверх главного окна
-        self.root.update_idletasks()
-        overlay = tk.Toplevel(self.root)
-        overlay.overrideredirect(True)
-        overlay.geometry(f"{self.root.winfo_width()}x{self.root.winfo_height()}+{self.root.winfo_x()}+{self.root.winfo_y()}")
-        overlay.configure(bg="black")
-        overlay.attributes("-alpha", 0.5)
-        overlay.attributes("-topmost", True)
-        overlay.update()
+    def _ensure_booking_window(self):
+        """Готовое окно "Записать клиента": построить, если ещё нет (или поменялась сетка времени в настройках)"""
+        cached = getattr(self, "_booking_window", None)
+        if cached:
+            try:
+                alive = cached["window"].winfo_exists()
+            except tk.TclError:
+                alive = False
+            if alive and cached["slots"] == booking_time_slots():
+                return cached
+            for widget in (cached["window"], cached["overlay"]):
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass
+        self._booking_window = self._build_add_booking_window()
+        return self._booking_window
+
+    def _prebuild_booking_window(self):
+        """Построить окно "Записать клиента" заранее, пока программа простаивает"""
+        try:
+            self._ensure_booking_window()
+        except Exception as e:
+            print(f"Окно записи заранее не построено (построится при первом открытии): {e}")
+
+    def _build_add_booking_window(self):
+        """Построить окно "Записать клиента" (скрытым). Возвращает {"window", "overlay", "slots", "open"}"""
+        # Слоты времени из настроек (по умолчанию каждые 2 часа с 10:00 до 20:00)
+        TIME_SLOTS = booking_time_slots()
+
+        # Затемняющий оверлей поверх главного окна - показывается вместе с окном записи
+        overlay = self.make_dim_overlay()
 
         add_window = ctk.CTkToplevel(self.root)
+        add_window.withdraw()  # строим скрытым - покажем один раз, когда всё готово (show_form_window_when_ready)
         add_window.title(self.tr("bookings.add_client"))
         add_window.transient(self.root)
-        add_window.attributes("-topmost", True)
+        add_window.dim_overlay = overlay   # форма принадлежит затемнению - всегда над ним, но не над другими программами
         add_window.resizable(False, False)
 
         def on_close():
-            overlay.destroy()
-            add_window.destroy()
+            # Окно не уничтожаем - спрячем, при следующем открытии форма сбросится (reset_and_show)
+            try:
+                hide_slot_tooltip()
+                hide_brand_list()
+                hide_model_list()
+                hide_notes_keyword_list()
+            except NameError:
+                pass
+            add_window.grab_release()
+            add_window.withdraw()
+            overlay.withdraw()
 
         add_window.protocol("WM_DELETE_WINDOW", on_close)
 
@@ -8039,7 +8220,7 @@ class AutoServiceApp:
 
         def hide_brand_list():
             if brand_listbox_visible[0]:
-                brand_listbox.place_forget()
+                self.hide_popup(brand_listbox)
                 brand_listbox_visible[0] = False
 
         def on_brand_key(event):
@@ -8073,7 +8254,7 @@ class AutoServiceApp:
 
         def hide_model_list():
             if model_listbox_visible[0]:
-                model_listbox.place_forget()
+                self.hide_popup(model_listbox)
                 model_listbox_visible[0] = False
 
         def on_model_key(event):
@@ -8136,12 +8317,27 @@ class AutoServiceApp:
         # Что подставил поиск по телефону: {"digits": номер, "filled": {поле: значение}}
         phone_fill = [None]
 
+        # Что подставил поиск по госномеру: {"number": госномер, "filled": {поле: значение}} -
+        # госномер поправили - это убираем (если руками не меняли)
+        plate_fill = [None]
+        plate_fill_fields = {"name": name_entry, "phone": phone_entry}
+
         def check_car_number(*args):
             """Проверка госномера - ищем существующее авто и владельца"""
             car_num = car_number_entry.get().strip().upper()
+            if plate_fill[0] and plate_fill[0]["number"] == car_num:
+                return  # этот госномер уже найден и подставлен
+            if plate_fill[0]:
+                # Госномер поправили - имя и телефон прежнего владельца убираем
+                filled = plate_fill[0]["filled"]
+                plate_fill[0] = None
+                self.undo_autofill(plate_fill_fields, filled)
+                if "phone" in filled:
+                    phone_fill[0] = None
             if len(car_num) >= 6:
                 car_info = self.db.get_car_info_by_number(car_num)
                 if car_info:
+                    before = self.snapshot_fields(plate_fill_fields)
                     car_found_by_number[0] = True
                     found_car_id[0] = car_info.get('car_id')
                     owner_name = car_info.get('client_name', '')
@@ -8169,6 +8365,7 @@ class AutoServiceApp:
                         phone_digits = ''.join(c for c in owner_phone if c.isdigit())
                         if len(phone_digits) >= 10:
                             self.set_phone_value(phone_entry, phone_digits[-10:])
+                    plate_fill[0] = {"number": car_num, "filled": self.autofilled_diff(plate_fill_fields, before)}
                 else:
                     # Авто не найдено - показываем поля марки/модели, сбрасываем данные
                     car_found_by_number[0] = False
@@ -8311,15 +8508,21 @@ class AutoServiceApp:
         slot_bookings = {}  # время -> список записей на выбранную дату
         slot_tooltip = [None]
 
+        button_look = {}  # время -> как кнопка нарисована сейчас (перерисовываем только изменившиеся)
+
         def select_time(slot):
             if slot in past_slots:
                 return
             selected_time[0] = slot
             for s, btn in time_buttons.items():
-                if s in past_slots:
+                look = "past" if s in past_slots else ("selected" if s == slot else "free")
+                if button_look.get(s) == look:
+                    continue
+                button_look[s] = look
+                if look == "past":
                     btn.configure(state="disabled", fg_color="#f1f3f5", text_color_disabled="#b0b7bf",
                                   border_color="#e3e7eb")
-                elif s == slot:
+                elif look == "selected":
                     btn.configure(state="normal", fg_color="#1f538d", text_color="white", hover_color="#1f538d",
                                   border_color="#1f538d")
                 else:
@@ -8339,7 +8542,7 @@ class AutoServiceApp:
             btn = time_buttons[slot]
             tip = tk.Toplevel(add_window)
             tip.wm_overrideredirect(True)
-            tip.attributes("-topmost", True)  # окно записи topmost - иначе подсказка уйдёт под него
+            tip.transient(add_window)  # подсказка принадлежит окну записи - над ним, но не над другими программами
             tip.wm_geometry(f"+{btn.winfo_rootx()}+{btn.winfo_rooty() + btn.winfo_height() + 4}")
             frame = tk.Frame(tip, bg='#ffffe0', relief='solid', borderwidth=1)
             frame.pack()
@@ -8440,7 +8643,7 @@ class AutoServiceApp:
 
         def hide_notes_keyword_list():
             if notes_keyword_listbox_visible[0]:
-                notes_keyword_listbox.place_forget()
+                self.hide_popup(notes_keyword_listbox)
                 notes_keyword_listbox_visible[0] = False
 
         def on_notes_key(event):
@@ -8646,15 +8849,54 @@ class AutoServiceApp:
         self.form_bind_keys(add_window, content, save_booking, on_close,
                             lambda: (hide_brand_list(), hide_model_list(), hide_notes_keyword_list()))
 
-        # На сегодня свободного времени не осталось - сразу открываем завтрашний день
-        now = datetime.now()
-        if all(slot <= now.strftime("%H:%M") for slot in TIME_SLOTS):
-            date_entry.set_date(now.date() + timedelta(days=1))
-        update_available_times()  # заодно подгоняет высоту окна
-        add_window.update()
-        add_window.grab_set()
-        add_window.focus_force()
-        car_number_entry.focus_set()
+        form_entries = (car_number_entry, brand_entry, model_entry, phone_entry, name_entry, notes_entry)
+        just_built = [True]
+        normal_border = car_number_entry.cget("border_color")
+
+        def reset_and_show():
+            """Каждое открытие - чистая форма: поля, найденная машина, подсказки, ошибки, дата и время"""
+            for entry in form_entries:
+                if entry is phone_entry:
+                    self.set_phone_value(phone_entry, "")
+                else:
+                    entry.delete(0, tk.END)
+                entry.configure(border_color=normal_border)
+            self.restore_placeholder(car_number_entry)
+            car_found_by_number[0] = False
+            found_car_id[0] = None
+            phone_fill[0] = None
+            plate_fill[0] = None
+            phone_cars_numbers.clear()
+            hide_phone_cars()
+            hide_brand_list()
+            hide_model_list()
+            hide_notes_keyword_list()
+            hide_slot_tooltip()
+            set_car_state(None)
+
+            # Дата - сегодня (окно могло быть построено вчера), а если на сегодня время кончилось - завтра
+            now = datetime.now()
+            date_entry.configure(mindate=now.date())
+            day = now.date()
+            if all(slot <= now.strftime("%H:%M") for slot in TIME_SLOTS):
+                day += timedelta(days=1)
+            date_entry.set_date(day)
+            selected_time[0] = None
+            update_available_times()  # занятость слотов - свежая из базы; заодно подгоняет высоту окна
+
+            # Затемнение - по текущему положению главного окна, потом само окно записи
+            self.show_dim_overlay(overlay)
+            # Сразу после построения CustomTkinter ещё перекрашивает заголовок (прячет/показывает окно) - ждём;
+            # при повторных открытиях это уже сделано - показываем сразу
+            delay = 40 if just_built[0] else 1
+            just_built[0] = False
+            self.show_form_window_when_ready(add_window, car_number_entry, delay=delay)
+
+        # Окно построено скрытым; CustomTkinter перекрасит заголовок, пока его не видно
+        # (построено заранее - к первому открытию это уже сделано)
+        add_window.update_idletasks()
+        add_window.after(300, lambda: just_built.__setitem__(0, False))
+        return {"window": add_window, "overlay": overlay, "slots": TIME_SLOTS, "open": reset_and_show}
 
     # ===== Скрытие/показ колонок таблиц (общее для "Записей" и "Склада") =====
     # Настройки хранятся в settings.json под ключом settings_key: список скрытых колонок
