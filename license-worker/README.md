@@ -1,7 +1,6 @@
 # autoservice-license-worker
 
-Бессерверная (Cloudflare Workers) замена self-hosted backend из
-`docs/LICENSE_PAYMENT_PLAN.md` — не нужен свой VPS/сервер. Делает две вещи:
+Бессерверная (Cloudflare Workers) оплата лицензий — не нужен свой VPS/сервер. Делает две вещи:
 
 - `GET /pay/{license_key}` — создаёт платёж в ЮKassa и редиректит клиента на оплату
   (эту ссылку кодирует QR на экране входа в приложение).

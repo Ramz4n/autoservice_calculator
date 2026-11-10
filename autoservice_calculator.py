@@ -7409,233 +7409,193 @@ class AutoServiceApp:
             )
 
             elements = []
+            dark = colors.Color(0.15, 0.2, 0.25)
+            grey_text = colors.Color(0.38, 0.45, 0.5)
+            line_grey = colors.Color(0.75, 0.78, 0.8)
+            works_header_bg = colors.Color(0.85, 0.91, 0.98)
+            parts_header_bg = colors.Color(0.99, 0.92, 0.82)
+            subtotal_bg = colors.Color(0.96, 0.97, 0.98)
 
-            # ═══════════════════════════════════════════════════════
-            # ШАПКА: Название компании
-            # ═══════════════════════════════════════════════════════
+            style_small = ParagraphStyle('Small', parent=style_normal, fontSize=8, leading=10, textColor=grey_text)
+            style_right = ParagraphStyle('Right', parent=style_normal, alignment=TA_RIGHT)
+            style_right_bold = ParagraphStyle('RightBold', parent=style_bold, alignment=TA_RIGHT)
+            style_label = ParagraphStyle('Label', parent=style_normal, textColor=grey_text)
+            style_center_grey = ParagraphStyle('CenterGrey', parent=style_normal, alignment=TA_CENTER,
+                                               textColor=grey_text)
+
+            def fmt_phone(phone):
+                digits = phone_mask_digits(phone or "")
+                if len(digits) == 10:
+                    return f"+7 ({digits[:3]}) {digits[3:6]}-{digits[6:8]}-{digits[8:]}"
+                return phone or ""
+
+            def fmt_mileage(value):
+                digits = re.sub(r"\D", "", str(value or ""))
+                return (f"{int(digits):,}".replace(",", " ") + " км") if digits else ""
+
+            # ═══ ШАПКА: автосервис ═══
             elements.append(Paragraph(company_name, style_header))
-            if company_address:
-                elements.append(Paragraph(company_address, style_company))
-            if company_phone:
-                elements.append(Paragraph(f"Тел: {company_phone}", style_company))
-            elements.append(Spacer(1, 15))
-
-            # Линия
-            line_table = Table([['']], colWidths=[content_width])
-            line_table.setStyle(TableStyle([
-                ('LINEABOVE', (0, 0), (-1, 0), 1, colors.black),
-            ]))
-            elements.append(line_table)
+            contacts = " · ".join(x for x in (company_address, f"тел. {company_phone}" if company_phone else "") if x)
+            if contacts:
+                elements.append(Paragraph(contacts, style_company))
             elements.append(Spacer(1, 10))
+            line_table = Table([['']], colWidths=[content_width])
+            line_table.setStyle(TableStyle([('LINEABOVE', (0, 0), (-1, 0), 1, dark)]))
+            elements.append(line_table)
 
-            # ═══════════════════════════════════════════════════════
-            # ЗАГОЛОВОК: ЛИСТ НАРЯД
-            # ═══════════════════════════════════════════════════════
-            title_style = ParagraphStyle(
-                'Title',
-                parent=styles['Normal'],
-                fontName=font_name_bold,
-                fontSize=16,
-                leading=20,
-                alignment=TA_CENTER,
-                spaceAfter=15
-            )
+            # ═══ ЗАГОЛОВОК: номер наряда, дата и время ═══
+            title_style = ParagraphStyle('Title', parent=styles['Normal'], fontName=font_name_bold, fontSize=16,
+                                         leading=20, alignment=TA_CENTER, spaceBefore=4, spaceAfter=2)
             order_numbers = ", ".join(dict.fromkeys(str(w[14]) for w in works if w[14]))
-            title_text = f"ЛИСТ НАРЯД № {order_numbers}" if order_numbers else "ЛИСТ НАРЯД"
+            title_text = f"ЛИСТ-НАРЯД № {order_numbers}" if order_numbers else "ЛИСТ-НАРЯД"
             elements.append(Paragraph(title_text, title_style))
+            when = display_date + (f", {booking.get('booking_time')}" if booking.get('booking_time') else "")
+            elements.append(Paragraph(when, style_center_grey))
+            elements.append(Spacer(1, 12))
 
-            # ═══════════════════════════════════════════════════════
-            # ИНФОРМАЦИЯ О КЛИЕНТЕ И АВТОМОБИЛЕ
-            # Одна колонка "label - значение" построчно — читается легче,
-            # чем два поля в одной строке. Дата и мастер указаны здесь один
-            # раз на весь документ, повторно в заголовках работ не дублируются.
-            # ═══════════════════════════════════════════════════════
-            master_names = ", ".join(dict.fromkeys(w[2] for w in works if w[2])) or "-"
-
-            info_data = [
-                [Paragraph("<b>Дата:</b>", style_normal), Paragraph(display_date, style_normal)],
-                [Paragraph("<b>Клиент:</b>", style_normal), Paragraph(client_name or "-", style_normal)],
-                [Paragraph("<b>Телефон:</b>", style_normal), Paragraph(client_phone or "-", style_normal)],
-                [Paragraph("<b>Автомобиль:</b>", style_normal), Paragraph(car_info or "-", style_normal)],
-                [Paragraph("<b>Мастер:</b>", style_normal), Paragraph(master_names, style_normal)],
-            ]
-
-            col_widths = [content_width * 0.2, content_width * 0.8]
-            info_table = Table(info_data, colWidths=col_widths)
-            info_table.setStyle(TableStyle([
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ]))
-            elements.append(info_table)
-
-            # ═══════════════════════════════════════════════════════
-            # РАБОТЫ
-            # ═══════════════════════════════════════════════════════
-            grand_total_works = 0
-            grand_total_parts = 0
-
-            # Цвета фона для наглядного разделения таблицы работ и таблицы
-            # запчастей — у каждой свой оттенок (шапка + строка суммы).
-            works_header_bg = colors.Color(0.80, 0.88, 0.98)
-            works_subtotal_bg = colors.Color(0.91, 0.95, 0.99)
-            parts_header_bg = colors.Color(0.99, 0.90, 0.78)
-            parts_subtotal_bg = colors.Color(0.99, 0.95, 0.89)
-
-            for work in works:
-                work_id, _, _, description, amount, _, _, _, _, mileage, _, _, _, _, _, _ = work
-
-                work_amount = float(amount or 0)
-                grand_total_works += work_amount
-
-                # Номер наряда и мастер уже указаны один раз в шапке документа
-                # и в информационном блоке — здесь для каждой работы оставляем
-                # только пробег, если он есть.
-                if mileage:
-                    mileage_table = Table(
-                        [[Paragraph("<b>Пробег:</b>", style_normal), Paragraph(f"{mileage} км", style_normal)]],
-                        colWidths=col_widths
-                    )
-                    mileage_table.setStyle(TableStyle([
-                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                        ('TOPPADDING', (0, 0), (-1, -1), 4),
-                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                    ]))
-                    elements.append(mileage_table)
-                    elements.append(Spacer(1, 6))
-
-                # Таблица работ
-                works_table_data = [[
-                    Paragraph("<b>Наименование работ</b>", style_bold),
-                    Paragraph("<b>Цена</b>", style_bold)
-                ]]
-
-                # Описание работ - каждая позиция отдельной строкой со своей ценой
-                work_items = self.get_work_line_items(work_id, description, work_amount) if description else []
-                if work_items:
-                    for item_name, item_price in work_items:
-                        works_table_data.append([
-                            Paragraph(f"• {item_name}", style_normal),
-                            Paragraph(self.format_currency(item_price), style_normal)
-                        ])
-                else:
-                    works_table_data.append([
-                        Paragraph("Работы не указаны", style_normal),
-                        Paragraph("", style_normal)
-                    ])
-
-                # Строка "Сумма работ" — последняя строка той же таблицы, чтобы
-                # рамка охватывала список работ и итог по ним как единый блок.
-                works_table_data.append([
-                    Paragraph("Сумма работ:", style_bold),
-                    Paragraph(self.format_currency(work_amount), style_bold)
-                ])
-
-                works_table = Table(works_table_data, colWidths=[content_width * 0.75, content_width * 0.25])
-                works_table.setStyle(TableStyle([
+            # ═══ КЛИЕНТ И АВТОМОБИЛЬ: две колонки, пустые поля не выводим ═══
+            master_names = ", ".join(dict.fromkeys(w[2] for w in works if w[2]))
+            vin = next((w[10] for w in works if w[10]), None) or booking.get('car_vin') or ""
+            mileage = next((w[9] for w in works if w[9]), None)
+            left = [(lbl, val) for lbl, val in (("Клиент", client_name), ("Телефон", fmt_phone(client_phone)),
+                                                ("Мастер", master_names)) if val]
+            right = [(lbl, val) for lbl, val in (("Автомобиль", car_info), ("VIN", vin),
+                                                 ("Пробег", fmt_mileage(mileage))) if val]
+            info_rows = []
+            for i in range(max(len(left), len(right))):
+                row = []
+                for side in (left, right):
+                    if i < len(side):
+                        row += [Paragraph(side[i][0] + ":", style_label), Paragraph(side[i][1], style_bold)]
+                    else:
+                        row += ["", ""]
+                info_rows.append(row)
+            if info_rows:
+                info_table = Table(info_rows, colWidths=[content_width * w for w in (0.13, 0.35, 0.15, 0.37)])
+                info_table.setStyle(TableStyle([
                     ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                    ('TOPPADDING', (0, 0), (-1, -1), 2),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                ]))
+                elements.append(info_table)
+                elements.append(Spacer(1, 12))
+
+            # ═══ РАБОТЫ и ЗАПЧАСТИ: таблицы с нумерацией, шапка таблицы повторяется на новой странице ═══
+            col_widths = [content_width * 0.07, content_width * 0.68, content_width * 0.25]
+
+            def items_table(title, rows, subtotal_label, subtotal, header_bg):
+                data = [[Paragraph("<b>№</b>", style_bold), Paragraph(f"<b>{title}</b>", style_bold),
+                         Paragraph("<b>Сумма</b>", style_right_bold)]]
+                for number, (name_cell, price_cell) in enumerate(rows, 1):
+                    data.append([Paragraph(str(number), style_normal), name_cell, price_cell])
+                data.append(["", Paragraph(subtotal_label, style_right_bold),
+                             Paragraph(self.format_currency(subtotal), style_right_bold)])
+                table = Table(data, colWidths=col_widths, repeatRows=1)
+                table.setStyle(TableStyle([
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                     ('TOPPADDING', (0, 0), (-1, -1), 4),
                     ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                    ('BACKGROUND', (0, 0), (-1, 0), works_header_bg),
-                    ('BACKGROUND', (0, -1), (-1, -1), works_subtotal_bg),
-                    ('LINEBELOW', (0, 0), (-1, 0), 0.75, colors.black),
-                    ('LINEABOVE', (0, -1), (-1, -1), 0.75, colors.black),
-                    ('BOX', (0, 0), (-1, -1), 0.75, colors.black),
+                    ('BACKGROUND', (0, 0), (-1, 0), header_bg),
+                    ('BACKGROUND', (0, -1), (-1, -1), subtotal_bg),
+                    ('LINEBELOW', (0, 0), (-1, 0), 0.75, dark),
+                    ('LINEBELOW', (0, 1), (-1, -3), 0.25, line_grey),
+                    ('LINEABOVE', (0, -1), (-1, -1), 0.75, dark),
+                    ('BOX', (0, 0), (-1, -1), 0.75, dark),
                 ]))
-                elements.append(works_table)
+                return table
+
+            work_rows, part_rows = [], []
+            grand_total_works = grand_total_parts = prepaid_total = 0.0
+            for work in works:
+                work_id, description, amount = work[0], work[3], float(work[4] or 0)
+                grand_total_works += amount
+                for item_name, item_price in (self.get_work_line_items(work_id, description, amount) if description else []):
+                    work_rows.append((Paragraph(self.clean_item_name(item_name), style_normal),
+                                      Paragraph(self.format_currency(item_price), style_right)))
+                parts = self.db.get_parts_by_work_id(work_id) or []
+                wh_prices = self.db.get_warehouse_prices_by_work_ids([work_id]) if parts else {}
+                for part_name, part_price in parts:
+                    part_price = float(part_price)
+                    grand_total_parts += part_price
+                    # Оплаченная заранее: без пометки в названии; настоящая цена (со склада) зачёркнута,
+                    # под ней мелко "оплачено ранее" - в итог к оплате не входит
+                    original = self.prepaid_original_price(wh_prices, work_id, part_name)
+                    shown_name, price_text, struck = self.part_row_values(part_name, part_price, original)
+                    if price_text == self.tr("warehouse.already_paid_marker"):
+                        prepaid_total += float(original or 0)
+                        top = f"<strike>{struck}</strike><br/>" if struck else ""
+                        price_cell = Paragraph(f"{top}<font size=8 color='#2e7d32'>{price_text}</font>", style_right)
+                    else:
+                        price_cell = Paragraph(price_text, style_right)
+                    part_rows.append((Paragraph(shown_name, style_normal), price_cell))
+
+            if not work_rows:
+                work_rows.append((Paragraph("Работы не указаны", style_normal), Paragraph("", style_right)))
+            elements.append(items_table("Работы", work_rows, "Итого работы:", grand_total_works, works_header_bg))
+            elements.append(Spacer(1, 10))
+            if part_rows:
+                elements.append(items_table("Запчасти", part_rows, "Итого запчасти:", grand_total_parts, parts_header_bg))
                 elements.append(Spacer(1, 10))
 
-                # Запчасти
-                parts = self.db.get_parts_by_work_id(work_id)
-                wh_prices = self.db.get_warehouse_prices_by_work_ids([work_id]) if parts else {}
-                parts_total = 0
-
-                if parts:
-                    parts_table_data = [[
-                        Paragraph("<b>Запчасти</b>", style_bold),
-                        Paragraph("<b>Цена</b>", style_bold)
-                    ]]
-
-                    for part_name, part_price in parts:
-                        part_price = float(part_price)
-                        parts_total += part_price
-                        # Оплаченная заранее: без пометки в названии, вместо "0 руб." - "оплачено ранее",
-                        # настоящая цена (со склада) - зачёркнутой
-                        original = self.prepaid_original_price(wh_prices, work_id, part_name)
-                        shown_name, price_text, struck = self.part_row_values(part_name, part_price, original)
-                        if struck:
-                            price_text = f"<strike>{struck}</strike> {price_text}"
-                        parts_table_data.append([
-                            Paragraph(f"• {shown_name}", style_normal),
-                            Paragraph(price_text, style_normal)
-                        ])
-
-                    # Строка "Сумма запчастей" — последняя строка той же таблицы,
-                    # тем же приёмом, что и в таблице работ выше.
-                    parts_table_data.append([
-                        Paragraph("Сумма запчастей:", style_bold),
-                        Paragraph(self.format_currency(parts_total), style_bold)
-                    ])
-
-                    parts_table = Table(parts_table_data, colWidths=[content_width * 0.75, content_width * 0.25])
-                    parts_table.setStyle(TableStyle([
-                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                        ('TOPPADDING', (0, 0), (-1, -1), 4),
-                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                        ('BACKGROUND', (0, 0), (-1, 0), parts_header_bg),
-                        ('BACKGROUND', (0, -1), (-1, -1), parts_subtotal_bg),
-                        ('LINEBELOW', (0, 0), (-1, 0), 0.75, colors.black),
-                        ('LINEABOVE', (0, -1), (-1, -1), 0.75, colors.black),
-                        ('BOX', (0, 0), (-1, -1), 0.75, colors.black),
-                    ]))
-                    elements.append(parts_table)
-                    elements.append(Spacer(1, 10))
-
-                grand_total_parts += parts_total
-
-            # ═══════════════════════════════════════════════════════
-            # ИТОГО
-            # Разбивка "Сумма работ" / "Сумма запчастей" уже показана прямо
-            # под соответствующими таблицами выше, поэтому здесь остаётся
-            # только общий итог к оплате.
-            # ═══════════════════════════════════════════════════════
+            # ═══ ИТОГИ: работы, запчасти, оплачено ранее, крупно - к оплате ═══
             grand_total = grand_total_works + grand_total_parts
-
-            totals_data = [
-                [Paragraph("<b>ИТОГО К ОПЛАТЕ:</b>", style_bold), Paragraph(f"<b>{self.format_currency(grand_total)}</b>", style_bold)]
-            ]
-
-            totals_table = Table(totals_data, colWidths=[content_width * 0.75, content_width * 0.25])
+            totals = [[Paragraph("Работы", style_normal), Paragraph(self.format_currency(grand_total_works), style_right)]]
+            if part_rows:
+                totals.append([Paragraph("Запчасти", style_normal), Paragraph(self.format_currency(grand_total_parts), style_right)])
+            if prepaid_total:
+                totals.append([Paragraph("Оплачено ранее (не входит в оплату)", style_label),
+                               Paragraph(self.format_currency(prepaid_total), ParagraphStyle('PrepaidRight', parent=style_right, textColor=grey_text))])
+            style_grand = ParagraphStyle('Grand', parent=style_bold, fontSize=13, leading=17)
+            totals.append([Paragraph("ИТОГО К ОПЛАТЕ", style_grand),
+                           Paragraph(self.format_currency(grand_total), ParagraphStyle('GrandRight', parent=style_grand, alignment=TA_RIGHT))])
+            totals_table = Table(totals, colWidths=[content_width * 0.33, content_width * 0.25], hAlign='RIGHT')
             totals_table.setStyle(TableStyle([
-                ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
-                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('LINEABOVE', (0, -1), (-1, -1), 0.5, colors.black),
-                ('BACKGROUND', (0, -1), (-1, -1), colors.Color(0.95, 0.95, 0.95)),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('LINEABOVE', (0, -1), (-1, -1), 1, dark),
+                ('TOPPADDING', (0, -1), (-1, -1), 7),
+                ('BOTTOMPADDING', (0, -1), (-1, -1), 7),
+                ('BACKGROUND', (0, -1), (-1, -1), colors.Color(0.91, 0.96, 0.91)),
             ]))
             elements.append(totals_table)
 
-            # ═══════════════════════════════════════════════════════
-            # ПОДПИСИ
-            # ═══════════════════════════════════════════════════════
-            elements.append(Spacer(1, 40))
-
-            signatures_data = [[
-                Paragraph("Исполнитель: _____________________", style_normal),
-                Paragraph("Заказчик: _____________________", style_normal)
-            ]]
-            signatures_table = Table(signatures_data, colWidths=[content_width * 0.5, content_width * 0.5])
-            signatures_table.setStyle(TableStyle([
-                ('ALIGN', (0, 0), (0, 0), 'LEFT'),
-                ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
-            ]))
+            # ═══ ПОДПИСИ ═══
+            elements.append(Spacer(1, 36))
+            signatures_table = Table([[
+                Paragraph("Исполнитель: ________________", style_normal),
+                Paragraph("Заказчик: ________________", style_normal),
+                Paragraph("Дата: ____________", style_right),
+            ]], colWidths=[content_width * 0.38, content_width * 0.36, content_width * 0.26])
             elements.append(signatures_table)
 
+            # ═══ Низ каждой страницы: номер наряда и "стр. N из M" ═══
+            from reportlab.pdfgen import canvas as pdf_canvas
+            footer_title = title_text.replace("ЛИСТ-НАРЯД", "Лист-наряд")
+
+            class NumberedCanvas(pdf_canvas.Canvas):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self._saved_pages = []
+
+                def showPage(self):
+                    self._saved_pages.append(dict(self.__dict__))
+                    self._startPage()
+
+                def save(self):
+                    total = len(self._saved_pages)
+                    for state in self._saved_pages:
+                        self.__dict__.update(state)
+                        if total > 1:   # на одностраничном наряде номер страницы не нужен
+                            self.setFont(font_name, 8)
+                            self.setFillColor(grey_text)
+                            self.drawRightString(width - 40, 22, f"{footer_title} · стр. {self._pageNumber} из {total}")
+                        super().showPage()
+                    super().save()
+
             # Собираем документ
-            doc.build(elements)
+            doc.build(elements, canvasmaker=NumberedCanvas)
 
             messagebox.showinfo("Успех", f"Лист наряд сохранён в:\n{file_path}")
 
