@@ -1285,6 +1285,10 @@ class Database:
             if digits:
                 conditions.append("REGEXP_REPLACE(COALESCE(c.phone, ''), '[^0-9]', '') LIKE %s")
                 params.append(f"%{digits}%")
+                if len(digits) > 1 and digits[0] == "8":
+                    # Телефоны хранятся как +7..., а набирают часто через 8: 8909... = начало номера 7909...
+                    conditions.append("REGEXP_REPLACE(COALESCE(c.phone, ''), '[^0-9]', '') LIKE %s")
+                    params.append(f"7{digits[1:]}%")
             query += " AND (" + " OR ".join(conditions) + ")"
         elif date_range:
             # Быстрый фильтр (сегодня / завтра / неделя) - ровно эти даты
