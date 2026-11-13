@@ -2415,23 +2415,28 @@ class AutoServiceApp:
             text = getattr(self, "works_lookup_text", "")
             # Предупреждение (машина записана на другого - смена владельца) - рамка остаётся оранжевой
             warning = lookup in ("new", "pick") and text not in ready_texts
+            missing = self.works_missing_fields() if started else []
             if not started or (lookup is None and not ready):
                 owner_state = None   # госномер / телефон ещё вводят
-            elif self.works_phone_incomplete():
-                owner_state = "new"   # телефона нет / недописан - сохранить не получится
-            elif not warning and (lookup == "found" or ready):
-                owner_state = "found"
+            elif missing or warning:
+                owner_state = "new"   # чего-то не хватает (в т.ч. телефона) или смена владельца
             else:
-                owner_state = "new"
+                owner_state = "found"
             self.form_set_card_state(owner_card, owner_state)
-            # "Новая машина" / "Новый клиент", а всё нужное уже вписано - надпись тоже зелёная
-            # (надпись о смене владельца и другие не трогаем)
+            # Чего не хватает - рамкой самого поля (как у "Мастера"); пока госномер / телефон вводят - не красим
+            self.works_mark_missing_fields(missing if owner_state else [])
+            # "Новая машина" / "Новый клиент": всё нужное вписано - надпись зелёная,
+            # иначе - что именно осталось заполнить (надпись о смене владельца и другие не трогаем)
             if lookup == "new" and text in ready_texts and self.works_lookup_status.winfo_manager():
                 if owner_state == "found":
                     self.works_lookup_status.configure(text=self.tr(ready_texts[text]),
                                                        text_color=self.FORM_STATE_COLORS["found"])
                 else:
-                    self.works_lookup_status.configure(text=text, text_color=self.FORM_STATE_COLORS["new"])
+                    missing_key = {"works.lookup_new_car_ready": "works.lookup_new_car_missing",
+                                   "works.lookup_new_client_ready": "works.lookup_new_client_missing"}[ready_texts[text]]
+                    names = ", ".join(self.tr(f"works.missing_{key}") for key in missing)
+                    self.works_lookup_status.configure(text=self.tr(missing_key, fields=names) if names else text,
+                                                       text_color=self.FORM_STATE_COLORS["new"])
 
     def works_items_section(self, parent, title, on_add, on_remove):
         """Карточка "Работы" / "Запчасти": строка ввода "название | цена | +" над списком, сумма под списком.
@@ -2563,13 +2568,15 @@ class AutoServiceApp:
             return True
         name = self.client_name_entry.get().strip()
         phone_digits = phone_mask_digits(self.client_phone_entry.get())
+        client_id = getattr(self, "works_client_id", None)
         if not self.works_leave_current_record():
             return False
 
         # Новая запись для того же клиента
         self.client_name_entry.insert(0, name)
         self.set_phone_value(self.client_phone_entry, phone_digits)
-        self.load_client_cars("+7" + phone_digits if phone_digits else "", name, auto_select=False)
+        self.load_client_cars("+7" + phone_digits if phone_digits else "", name, auto_select=False,
+                              client_id=client_id)
         # Телефон уже "найден" - повторно по нему не ищем
         self.works_phone_fill = {"digits": phone_digits, "filled": {}}
         self.works_lock_filled()
@@ -2756,6 +2763,24 @@ class AutoServiceApp:
     def works_phone_incomplete(self):
         """Телефона нет или он недописан - сохранить не получится (телефон обязателен)"""
         return len(phone_mask_digits(self.client_phone_entry.get())) != 10
+
+    def works_missing_fields(self):
+        """Каких данных клиента / машины не хватает: ключи из works_lookup_fields (number, brand, model, phone)"""
+        missing = [key for key, entry in (("number", self.car_number_entry), ("brand", self.car_brand_entry),
+                                          ("model", self.car_model_entry)) if not entry.get().strip()]
+        if self.works_phone_incomplete():
+            missing.append("phone")
+        return missing
+
+    def works_mark_missing_fields(self, missing):
+        """Поля, которых не хватает, - оранжевой рамкой, остальные - обычной"""
+        fields = self.works_lookup_fields()
+        if not hasattr(self, "_works_field_border"):
+            self._works_field_border = fields["number"].cget("border_color")
+        for key in ("number", "brand", "model", "phone"):
+            color = self.FORM_STATE_BORDERS["new"] if key in missing else self._works_field_border
+            if fields[key].cget("border_color") != color:
+                fields[key].configure(border_color=color)
 
     # Обработчики автокомплита для марки
     def on_brand_keyrelease(self, event):
@@ -2951,7 +2976,7 @@ class AutoServiceApp:
         values = [""]  # Пустой вариант для ручного ввода
 
         for booking in bookings:
-            booking_id, full_name, phone, booking_date, booking_time, car_id = booking
+            booking_id, full_name, phone, booking_date, booking_time, car_id, client_id = booking
             # Форматируем дату
             if hasattr(booking_date, 'strftime'):
                 date_str = booking_date.strftime('%d.%m')
@@ -2964,7 +2989,8 @@ class AutoServiceApp:
                 'id': booking_id,
                 'name': full_name or '',
                 'phone': phone or '',
-                'car_id': car_id
+                'car_id': car_id,
+                'client_id': client_id
             }
 
         self.booking_combo.configure(values=values)
@@ -3008,7 +3034,8 @@ class AutoServiceApp:
             self.client_name_entry.insert(0, booking_info['name'])
             self.set_phone_value(self.client_phone_entry, booking_info['phone'])
             # Загружаем машины этого клиента (передаём car_id из записи)
-            self.load_client_cars(booking_info['phone'], booking_info['name'], booking_info.get('car_id'))
+            self.load_client_cars(booking_info['phone'], booking_info['name'], booking_info.get('car_id'),
+                                  client_id=booking_info.get('client_id'))
             self.works_mark_autofilled(before)
             if booking_info['name']:
                 self.works_set_lookup_state("found", self.tr("works.lookup_booking", name=booking_info['name']))
@@ -3031,18 +3058,23 @@ class AutoServiceApp:
             self.client_cars_data = {}
             self.works_set_lookup_state(None)
 
-    def load_client_cars(self, phone, name, booking_car_id=None, auto_select=True):
-        """Загрузить машины клиента по телефону или имени.
+    def works_find_client_cars(self, phone, name, client_id=None):
+        """Машины клиента: по id клиента (запись, найденная машина), иначе по телефону.
+        По одному имени - только если нет ни id, ни телефона: тёзки - разные люди, иначе клиенту без телефона
+        подтягиваются машины всех его тёзок"""
+        if client_id:
+            return self.db.get_client_cars_by_client_id(client_id)
+        if len(phone_mask_digits(phone or "")) == 10:
+            return self.db.get_client_cars_by_phone(phone)
+        return self.db.get_client_cars_by_name(name) if name else []
+
+    def load_client_cars(self, phone, name, booking_car_id=None, auto_select=True, client_id=None):
+        """Загрузить машины клиента (works_find_client_cars).
         booking_car_id - ID машины из записи (None = "Другое авто" в боте)
         auto_select - автоматически выбирать машину при поиске по телефону
         """
-        cars = []
-        # Сначала ищем по телефону
-        if phone:
-            cars = self.db.get_client_cars_by_phone(phone)
-        # Если не нашли по телефону, ищем по имени
-        if not cars and name:
-            cars = self.db.get_client_cars_by_name(name)
+        self.works_client_id = client_id
+        cars = self.works_find_client_cars(phone, name, client_id)
 
         self.client_cars_data = {}
         values = [self.tr("works.new_car")]
@@ -3121,9 +3153,10 @@ class AutoServiceApp:
         if fill and fill["digits"] != phone_digits:
             self.works_phone_fill = None
             undo = fill["filled"]
-            if "number" in getattr(self, "works_locked", ()):
-                # Машина уже определена (закрыта) - телефон это только контакт: убираем лишь имя,
-                # подставленное по прошлому номеру, машину не трогаем
+            if self.works_number_fill:
+                # Машину нашли по госномеру - телефон это только контакт: убираем лишь имя,
+                # подставленное по прошлому номеру, машину не трогаем. Машину, подставленную
+                # по самому телефону (его машина / выбранная из его машин), убираем вместе с ним
                 undo = {k: v for k, v in undo.items() if k == "name"}
             self.undo_autofill(fields, undo)
             self.works_unmark_edited()
@@ -3297,6 +3330,10 @@ class AutoServiceApp:
         if not car_number or len(car_number) < 3 or (live and len(car_number) < self.CAR_NUMBER_LIVE_MIN):
             return
 
+        # У этой машины уже есть запись в работе - открываем её (с её работами и мастером)
+        if self.works_open_car_record(car_number):
+            return
+
         # Проверяем, не заполнены ли уже другие поля машины
         if self.car_brand_entry.get().strip() or self.car_model_entry.get().strip():
             return  # Поля уже заполнены, не перезаписываем
@@ -3316,6 +3353,25 @@ class AutoServiceApp:
         else:
             # Несколько клиентов - показываем окно выбора
             self.show_client_selection_dialog(clients, car_number)
+
+    def works_open_car_record(self, car_number):
+        """Ввели (или поправили) госномер машины, у которой уже есть запись в работе - открываем эту запись,
+        а не собираем новую с работами и мастером прошлой машины. Уже добавлены работы / запчасти -
+        спрашиваем. True - запись открыта"""
+        if getattr(self, "_works_declined_record", None) == car_number.upper():
+            return False   # уже ответили "нет" для этого госномера - не спрашиваем снова
+        booking_id = self.works_find_car_booking(car_number)
+        if not booking_id:
+            return False
+        if (self.works_list or self.parts_list) and not messagebox.askyesno(
+                self.tr("common.attention"), self.tr("works.ask_open_car_record", car=car_number.upper())):
+            # Остаёмся в новой записи - данные машины подставит обычный поиск
+            self._works_declined_record = car_number.upper()
+            return False
+        self.clear_work_form()
+        self.open_booking_in_add_work(booking_id)
+        self.works_show_info_banner(self.tr("works.record_reopened", car=self.works_car_title() or car_number.upper()))
+        return True
 
     def fill_car_and_client_info(self, client_info):
         """Заполнить поля машины и клиента"""
@@ -3345,7 +3401,8 @@ class AutoServiceApp:
             self.set_phone_value(self.client_phone_entry, client_info["client_phone"])
 
         # Загружаем список машин клиента
-        self.load_client_cars_without_autofill(client_info.get("client_phone", ""), client_info.get("client_name", ""))
+        self.load_client_cars_without_autofill(client_info.get("client_phone", ""), client_info.get("client_name", ""),
+                                               client_info.get("client_id"))
 
         # Выбираем текущую машину в списке
         car_number = self.car_number_entry.get().strip().upper()
@@ -3413,13 +3470,10 @@ class AutoServiceApp:
         ctk.CTkButton(dialog, text=self.tr("common.cancel"), command=dialog.destroy,
                      fg_color="#757575", hover_color="#616161", width=100).pack(pady=15)
 
-    def load_client_cars_without_autofill(self, phone, name):
+    def load_client_cars_without_autofill(self, phone, name, client_id=None):
         """Загрузить машины клиента без автозаполнения полей"""
-        cars = []
-        if phone:
-            cars = self.db.get_client_cars_by_phone(phone)
-        if not cars and name:
-            cars = self.db.get_client_cars_by_name(name)
+        self.works_client_id = client_id
+        cars = self.works_find_client_cars(phone, name, client_id)
 
         self.client_cars_data = {}
         values = [self.tr("works.new_car")]
@@ -4088,8 +4142,40 @@ class AutoServiceApp:
         if in_form or getattr(self, "works_linked_wh_parts", None):
             self.refresh_warehouse()
 
+    def works_known_client_phone(self, car_number):
+        """Телефон клиента этой записи, который уже есть в базе: (client_id, имя, телефон) или None.
+        Редактируем наряд - клиент наряда; иначе - владелец машины с этим госномером"""
+        editing = getattr(self, "editing_work_id", None)
+        if editing:
+            work = self.db.get_work_by_id(editing)
+            if work and work[-1]:
+                return (work[-1], work[12] or "", work[13]) if phone_mask_digits(work[13] or "") else None
+        car = self.db.get_car_owner_by_number(car_number) if car_number else None
+        if car and car["client_id"] and phone_mask_digits(car["owner_phone"] or ""):
+            return car["client_id"], car["owner_name"] or "", car["owner_phone"]
+        return None
+
+    def works_flush_number_lookup(self):
+        """Госномер поправили и сразу нажали "Добавить запись": кнопка фокус не забирает, поэтому проверка госномера
+        (через паузу после ввода или при уходе из поля) могла не сработать - и запись ушла бы с машиной
+        и владельцем от прошлого госномера. Доделываем проверку сейчас. Если она что-то поменяла в форме
+        (подставила другого владельца, вернула госномер записи, открыла окно выбора) - не сохраняем:
+        пусть сначала увидят. Возвращает True - можно сохранять"""
+        pending = getattr(self, "_car_number_search_job", None)
+        if pending:
+            self.root.after_cancel(pending)
+            self._car_number_search_job = None
+        before = (self.works_form_snapshot(), getattr(self, "_works_looked_up_number", None),
+                  getattr(self, "selected_booking_id", None))
+        self.on_car_number_change()
+        after = (self.works_form_snapshot(), getattr(self, "_works_looked_up_number", None),
+                 getattr(self, "selected_booking_id", None))
+        return before == after
+
     def add_work(self):
         """Добавить или обновить запись о работе"""
+        if not self.works_flush_number_lookup():
+            return
         selected_worker = self.worker_combo.get()
         if not selected_worker or selected_worker == self.tr("works.select_master"):
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_master"))
@@ -4168,8 +4254,26 @@ class AutoServiceApp:
         # Телефон желателен: без него - вопрос (клиент мог оставить машину и уйти, номер допишут позже);
         # недописанный номер - почти всегда опечатка, не сохраняем
         phone_digits = phone_mask_digits(self.client_phone_entry.get())
+        clear_phone_client_id = None   # телефон у клиента был, его стёрли и решили удалить
         if not phone_digits:
-            if not messagebox.askyesno(self.tr("common.attention"), self.tr("works.ask_save_without_phone")):
+            known = self.works_known_client_phone(car_number)
+            if known:
+                # У клиента в базе есть телефон, а в форме его стёрли - удалить его или оставить прежний?
+                known_id, known_name, known_phone = known
+                known_digits = phone_mask_digits(known_phone)
+                answer = messagebox.askyesnocancel(
+                    self.tr("works.phone_erased_title"),
+                    self.tr("works.ask_phone_erased", name=known_name or self.tr("common.no_name"),
+                            phone=format_phone_ru(known_digits)))
+                if answer is None:
+                    self.client_phone_entry.focus_set()
+                    return
+                if answer:
+                    clear_phone_client_id = known_id
+                else:
+                    self.set_phone_value(self.client_phone_entry, known_digits)
+                    phone_digits = known_digits
+            elif not messagebox.askyesno(self.tr("common.attention"), self.tr("works.ask_save_without_phone")):
                 self.client_phone_entry.focus_set()
                 return
         elif len(phone_digits) != 10:
@@ -4196,7 +4300,10 @@ class AutoServiceApp:
             return
 
         def client_and_car(tg_user_id=telegram_user_id):
-            return self.works_owner_ids(owner, tg_user_id, client_name, client_phone, car_brand, car_model, car_number)
+            ids = self.works_owner_ids(owner, tg_user_id, client_name, client_phone, car_brand, car_model, car_number)
+            if clear_phone_client_id and ids[0] == clear_phone_client_id:
+                self.db.clear_client_phone(clear_phone_client_id)   # стёртый телефон решили удалить и в базе
+            return ids
 
         # Проверяем, редактируем ли существующую запись
         if hasattr(self, 'editing_work_id') and self.editing_work_id:
@@ -4350,6 +4457,7 @@ class AutoServiceApp:
         self.editing_work_id = None
         self.works_phone_fill = None
         self.works_number_fill = None
+        self.works_client_id = None
         self._works_looked_up_number = None
         self.works_clear_marks()
         self.works_unlock_all()
@@ -7731,7 +7839,7 @@ class AutoServiceApp:
     # --- Методы для вкладки Записи ---
 
     BOOKING_STATUS_COLORS = {"waiting": "#f59e0b", "in_progress": "#3b82f6", "completed": "#22c55e",
-                             "cancelled": "#9e9e9e", "overdue": "#e53935"}
+                             "cancelled": "#e53935", "overdue": "#9e9e9e"}
 
     def setup_bookings_tab(self):
         """Вкладка "Записи": быстрые фильтры (сегодня / завтра / неделя / все), статусы с количеством,
@@ -7843,8 +7951,10 @@ class AutoServiceApp:
             image.put(color, to=(0, 0, 6, 26))
             self.bookings_status_images[status] = image
         self.bookings_tree.tag_configure("today", font=("Arial", 11, "bold"))
-        self.bookings_tree.tag_configure("overdue", background="#fff4f4")   # просрочена: светлый фон + красная полоска
-        self.bookings_tree.tag_configure("cancelled", foreground="#9e9e9e")
+        # Просрочена: серый фон, серая полоска, строка зачёркнута
+        self.bookings_tree.tag_configure("overdue", background="#f3f4f6", font=("Arial", 11, "overstrike"))
+        # Отменена: строка зачёркнута и красным
+        self.bookings_tree.tag_configure("cancelled", foreground="#c62828", font=("Arial", 11, "overstrike"))
         self.bookings_tree.tag_configure("odd", background="#fafbfc")
         self.bookings_raw = {}   # строка -> настоящие (не отформатированные) имя, телефон, Telegram
 
@@ -7979,8 +8089,8 @@ class AutoServiceApp:
 
         search_query = self.bookings_search_entry.get().strip().lower() if hasattr(self, 'bookings_search_entry') else ""
         today = date.today()
-        # Незавершённые записи (в ожидании, в работе) база отдаёт за любую дату; выполненные и отменённые -
-        # за последние 3 месяца, если не включено "за всё время". Поиск - по всей базе
+        # Незавершённые записи (в ожидании, в работе) база отдаёт за любую дату; выполненные, отменённые
+        # и просроченные - за последние 3 месяца, если не включено "за всё время". Поиск - по всей базе
         limited = not getattr(self, "bookings_show_all_time", False)
         date_from = today - timedelta(days=self.BOOKINGS_RECENT_DAYS) if limited else None
 
@@ -8029,12 +8139,21 @@ class AutoServiceApp:
         self.update_bookings_count()
 
         # "Показать за всё время" - только там, где ограничение действует (не для незавершённых и не при поиске)
-        if wanted in ("waiting", "overdue", "in_progress") or search_query:
+        if wanted in ("waiting", "in_progress") or search_query:
             self.bookings_range_btn.pack_forget()
         else:
             self.bookings_range_btn.configure(text=self.tr("bookings.recent_only") if not limited
                                               else self.tr("bookings.show_all_time"))
             self.bookings_range_btn.pack(side=tk.LEFT)
+
+    @staticmethod
+    def booking_is_overdue(booking):
+        """Запись "в ожидании", а её день прошёл - клиент не приехал, заявка уже не актуальна"""
+        booking_date = booking.get("booking_date")
+        if isinstance(booking_date, datetime):
+            booking_date = booking_date.date()
+        return (booking.get("status") == "waiting" and isinstance(booking_date, date)
+                and booking_date < date.today())
 
     def update_bookings_count(self):
         """Подпись "Показано N из M" под таблицей записей"""
@@ -8400,14 +8519,31 @@ class AutoServiceApp:
         brand_listbox = self.form_popup_listbox(content)
         model_listbox = self.form_popup_listbox(content)
 
+        car_state = [None]
+
+        def update_card_marks(*args):
+            """Рамки карточек: всё нужное заполнено - зелёная, чего-то не хватает - оранжевая, пустая форма - обычная.
+            "Автомобиль": найдено авто или у нового вписаны марка и модель; "Клиент": телефон и имя"""
+            state = car_state[0]
+            if state == "new" and brand_entry.get().strip() and model_entry.get().strip():
+                state = "found"
+            self.form_set_card_state(car_card, state)
+            if car_state[0] == "new":
+                car_status_label.configure(text_color=self.FORM_STATE_COLORS[state])
+            started = bool(car_number_entry.get().strip() or phone_mask_digits(phone_entry.get())
+                           or name_entry.get().strip())
+            client_ready = len(phone_mask_digits(phone_entry.get())) == 10 and name_entry.get().strip()
+            self.form_set_card_state(client_card, ("found" if client_ready else "new") if started else None)
+
         def set_car_state(state, text=""):
             """state: None - пусто, "found" - авто найдено, "new" - новое авто (нужны марка и модель)"""
-            self.form_set_card_state(car_card, state)
+            car_state[0] = state
             if text:
                 car_status_label.configure(text=text, text_color=self.FORM_STATE_COLORS.get(state, "#ef6c00"))
                 car_status_label.pack(fill=tk.X, pady=(6, 0), after=car_number_entry)
             else:
                 car_status_label.pack_forget()
+            update_card_marks()
             if state == "new":
                 if not car_details_visible[0]:
                     car_details_frame.pack(fill=tk.X, pady=(6, 0), after=car_status_label)
@@ -8502,7 +8638,7 @@ class AutoServiceApp:
         model_entry.bind('<FocusOut>', lambda e: hide_list_later(hide_model_list), add="+")
 
         # === КЛИЕНТ: телефон и имя рядом ===
-        _, client_body = section(self.tr("bookings.section_client"))
+        client_card, client_body = section(self.tr("bookings.section_client"))
         client_grid = ctk.CTkFrame(client_body, fg_color="transparent")
         client_grid.pack(fill=tk.X)
         client_grid.grid_columnconfigure((0, 1), weight=1, uniform="client")
@@ -8672,6 +8808,11 @@ class AutoServiceApp:
 
         phone_entry.bind("<KeyRelease>", check_phone, add="+")
         phone_entry.bind("<FocusOut>", check_phone)
+
+        # Любая правка полей (и выбор из подсказок) - пересчитать цвет рамок; после поиска - тоже
+        for entry in (car_number_entry, brand_entry, model_entry, phone_entry, name_entry):
+            entry.bind("<KeyRelease>", lambda e: add_window.after_idle(update_card_marks), add="+")
+            entry.bind("<FocusOut>", lambda e: add_window.after(250, update_card_marks), add="+")
 
         # === ДАТА И ВРЕМЯ ===
         _, when_body = section(self.tr("bookings.section_datetime"))
@@ -9203,7 +9344,7 @@ class AutoServiceApp:
             # Проверяем статус - "Начать работу" только для "В ожидании"
             if booking_id:
                 booking = self.db.get_booking_by_id(int(booking_id))
-                if booking and booking.get("status") == "waiting":
+                if booking and booking.get("status") == "waiting" and not self.booking_is_overdue(booking):
                     self.bookings_context_menu.entryconfig(0, state="normal")
                 else:
                     self.bookings_context_menu.entryconfig(0, state="disabled")
@@ -9237,6 +9378,10 @@ class AutoServiceApp:
         # Проверяем статус
         if booking.get("status") != "waiting":
             messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_start_work_only_waiting"))
+            return
+        # Просрочена (клиент не приехал в свой день) - заявка не актуальна, клиента записывают заново
+        if self.booking_is_overdue(booking):
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_start_work_overdue"))
             return
 
         # Переключаемся на вкладку "Добавить работу"
@@ -9282,6 +9427,11 @@ class AutoServiceApp:
     def open_booking_in_add_work(self, booking_id):
         """Открыть запись на вкладке "Добавить работу": клиент, машина, работы, запчасти, мастер.
         Если по записи уже есть наряд - форма в режиме редактирования этого наряда"""
+        # Просрочена и наряда по ней нет (клиент не приехал) - заявка не актуальна, работу по ней не начинаем
+        overdue = self.db.get_booking_by_id(int(booking_id))
+        if overdue and self.booking_is_overdue(overdue) and not self.db.get_work_by_booking_id(int(booking_id)):
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_start_work_overdue"))
+            return False
         # Сначала уходим из того, что открыто в форме (несохранённое - с вопросом) и очищаем её целиком:
         # иначе работы / запчасти / режим редактирования прошлой записи останутся в новой
         if not self.works_leave_current_record():
@@ -9318,7 +9468,7 @@ class AutoServiceApp:
         self.set_phone_value(self.client_phone_entry, phone)
 
         # Загружаем машины клиента
-        self.load_client_cars(phone, full_name, car_id)
+        self.load_client_cars(phone, full_name, car_id, client_id=booking.get("client_id"))
 
         # Если есть связанная работа - загружаем её данные
         work = self.db.get_work_by_booking_id(int(booking_id))

@@ -1295,7 +1295,10 @@ class Database:
             query += " AND b.booking_date BETWEEN %s AND %s"
             params += [date_range[0], date_range[1]]
         elif date_from:
-            query += " AND (b.booking_date >= %s OR b.status IN ('waiting', 'in_progress'))"
+            # Незавершённые - за любую дату; но "в ожидании" с прошедшей датой (просрочена: клиент не приехал,
+            # заявка уже не актуальна) - как выполненные и отменённые, за период
+            query += (" AND (b.booking_date >= %s OR b.status = 'in_progress'"
+                      " OR (b.status = 'waiting' AND b.booking_date >= CURDATE()))")
             params.append(date_from)
 
         query += " ORDER BY b.booking_date ASC, b.booking_time ASC"
@@ -1449,7 +1452,7 @@ class Database:
             SELECT b.id,
                    c.full_name,
                    c.phone,
-                   b.booking_date, b.booking_time, b.car_id
+                   b.booking_date, b.booking_time, b.car_id, b.client_id
             FROM bookings b
             LEFT JOIN clients c ON b.client_id = c.id
             WHERE b.status IN ('waiting', 'in_progress') AND b.booking_date >= CURDATE()
@@ -1816,6 +1819,14 @@ class Database:
         conn.commit()
         conn.close()
 
+    def clear_client_phone(self, client_id):
+        """Удалить телефон клиента (стёрли в форме и подтвердили удаление)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE clients SET phone = NULL WHERE id = %s", (client_id,))
+        conn.commit()
+        conn.close()
+
     def get_car_by_number(self, car_number):
         """Получить авто по госномеру"""
         if not car_number:
@@ -1922,6 +1933,23 @@ class Database:
         result = cursor.fetchone()
         conn.close()
         return result[0] if result else None
+
+    def get_client_cars_by_client_id(self, client_id):
+        """Машины клиента по его id (надёжнее имени: тёзки - разные клиенты)"""
+        if not client_id:
+            return []
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT cc.car_brand, cc.car_model, cc.car_number, cc.vin
+            FROM client_cars cc
+            WHERE cc.client_id = %s
+            AND cc.car_brand IS NOT NULL AND cc.car_brand != ''
+            ORDER BY cc.car_brand, cc.car_model
+        """, (client_id,))
+        cars = cursor.fetchall()
+        conn.close()
+        return cars
 
     def get_client_cars_by_name(self, name):
         """Получить список машин клиента по имени через clients"""
@@ -2052,7 +2080,7 @@ class Database:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT cl.full_name as client_name, cl.phone as client_phone,
-                   cc.car_brand, cc.car_model, cc.vin
+                   cc.car_brand, cc.car_model, cc.vin, cc.client_id
             FROM client_cars cc
             LEFT JOIN clients cl ON cc.client_id = cl.id
             WHERE UPPER(cc.car_number) = UPPER(%s)
@@ -2067,7 +2095,8 @@ class Database:
                 "client_phone": row[1] or "",
                 "car_brand": row[2] or "",
                 "car_model": row[3] or "",
-                "vin": row[4] or ""
+                "vin": row[4] or "",
+                "client_id": row[5]
             })
         return clients
 
