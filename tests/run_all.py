@@ -11,14 +11,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import Harness  # noqa: E402
 import test_positive  # noqa: E402
 import test_negative  # noqa: E402
+import test_effects  # noqa: E402
 
 # Новые наборы проверок - добавлять сюда
-SUITES = [("Позитивные", test_positive), ("Негативные", test_negative)]
+SUITES = [("Позитивные", test_positive), ("Негативные", test_negative),
+          ("Связи между разделами", test_effects)]
 FILTERS = sys.argv[1:]
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_run.txt")
 
 
 def main():
+    # Консоль Windows (cp1251) не печатает часть символов («−», эмодзи) - без замены печать итога падала,
+    # и прогон зависал, не дойдя до выхода
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
     try:
         h = Harness(LOG_PATH)
     except SystemExit as e:

@@ -1260,6 +1260,13 @@ class AutoServiceApp:
         entry.focus_set()
         messagebox.showwarning(self.tr("common.attention"), self.tr(message_key), parent=window)
 
+    def form_combo_error(self, combo, on):
+        """Красная рамка (и стрелка) у списка - например «Машины клиента»: нажали «Сохранить», а машину не выбрали"""
+        if not hasattr(combo, "_normal_colors"):
+            combo._normal_colors = (combo.cget("border_color"), combo.cget("button_color"))
+        border, button = (self.FORM_ERROR_BORDER, self.FORM_ERROR_BORDER) if on else combo._normal_colors
+        combo.configure(border_color=border, button_color=button)
+
     def confirm_new_plate(self, plate, parent=None, entry=None):
         """Перед сохранением новой машины: госномер похож на ошибку (пропущена первая буква, буквы,
         которых нет в российских номерах, не по образцу) - спросить "Сохранить так?".
@@ -1288,10 +1295,17 @@ class AutoServiceApp:
         return False
 
     def form_clear_error_on_type(self, entries):
-        """Красная рамка снимается, как только поле начали править"""
+        """Красная рамка снимается, как только поле поправили: набрали с клавиатуры или программа вписала
+        значение сама (выбрали машину из списка по телефону - госномер подставился)"""
         for entry in entries:
             default = entry.cget("border_color")
             entry.bind("<KeyRelease>", lambda e, en=entry, d=default: en.configure(border_color=d), add="+")
+
+            def insert(index, string, en=entry, d=default, original=entry.insert):
+                original(index, string)
+                if string:
+                    en.configure(border_color=d)
+            entry.insert = insert
 
     def attach_name_autocomplete(self, entry, listbox_parent, position="right"):
         """Подсказка имён из config/first_names.txt для поля ввода имени.
@@ -1855,13 +1869,15 @@ class AutoServiceApp:
             messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_enter_name"))
             return
         position_id = self.position_id_by_name(self.worker_position_combo.get())
-        if self.db.add_worker(name, position_id):
-            messagebox.showinfo(self.tr("common.success"),
-                                self.tr("workers.msg_added", name=name, position=self.worker_position_combo.get()))
-            self.worker_name_entry.delete(0, tk.END)
-            self.after_workers_change()
-        else:
+        result = self.db.add_worker(name, position_id)
+        if result == "exists":
             messagebox.showerror(self.tr("common.error"), self.tr("workers.msg_already_exists"))
+            return
+        key = "workers.msg_restored" if result == "restored" else "workers.msg_added"
+        messagebox.showinfo(self.tr("common.success"),
+                            self.tr(key, name=name, position=self.worker_position_combo.get()))
+        self.worker_name_entry.delete(0, tk.END)
+        self.after_workers_change()
 
     def selected_worker(self):
         """(id, ФИО) выбранного в таблице сотрудника или None (с предупреждением)"""
@@ -1898,9 +1914,13 @@ class AutoServiceApp:
         if not worker:
             return
         worker_id, worker_name = worker
-        if messagebox.askyesno(self.tr("common.confirm"), self.tr("workers.msg_confirm_delete", name=worker_name)):
-            self.db.delete_worker(worker_id)
-            messagebox.showinfo(self.tr("common.success"), self.tr("workers.msg_deleted"))
+        works, bonuses = self.db.worker_history(worker_id)
+        question = (self.tr("workers.msg_confirm_fire", name=worker_name, works=works, bonuses=bonuses)
+                    if works or bonuses else self.tr("workers.msg_confirm_delete", name=worker_name))
+        if messagebox.askyesno(self.tr("common.confirm"), question):
+            result = self.db.delete_worker(worker_id)
+            messagebox.showinfo(self.tr("common.success"), self.tr(
+                "workers.msg_fired" if result == "fired" else "workers.msg_deleted", name=worker_name))
             self.after_workers_change()
 
     def refresh_workers_list(self):
@@ -3321,11 +3341,7 @@ class AutoServiceApp:
             # Если по записи уже есть наряд - подставляем мастера, который его ведёт
             existing_work = self.db.get_work_by_booking_id(booking_info['id'])
             if existing_work:
-                worker_id = existing_work[1]
-                for name, wid in self.workers_data.items():
-                    if wid == worker_id:
-                        self.worker_combo.set(name)
-                        break
+                self.works_select_master(existing_work[1])
         else:
             self.selected_booking_id = None
             self.client_cars_combo.configure(values=[self.tr("works.new_car")])
@@ -3633,7 +3649,6 @@ class AutoServiceApp:
         if self.car_brand_entry.get().strip() or self.car_model_entry.get().strip():
             return  # Поля уже заполнены, не перезаписываем
 
-        clients = result.get("owners", [])
         if result["status"] == "new":
             if not live:
                 self.works_set_lookup_state("new", self.tr("works.lookup_new_car"))
@@ -3641,12 +3656,7 @@ class AutoServiceApp:
             return
 
         self._works_looked_up_number = car_number.upper()
-        if len(clients) == 1:
-            # Только один клиент - заполняем сразу
-            self.fill_car_and_client_info(clients[0])
-        else:
-            # Несколько клиентов - показываем окно выбора
-            self.show_client_selection_dialog(clients, car_number)
+        self.fill_car_and_client_info(result["car"])
 
     PLATE_MIN_TYPING = 6   # с какой длины искать госномер прямо во время ввода
     PLATE_MIN = 3          # и когда номер уже ввели (ушли из поля / Enter)
@@ -3660,7 +3670,7 @@ class AutoServiceApp:
           "hint"  - номер вводят, он с регионом из двух цифр (Х555ХХ77) и такая машина есть, но его могут
                     дописать до Х555ХХ777: подставлять рано, text - подсказка "Есть в базе: ... Tab - подставить";
           "found" - машина есть: car (car_id, марка, модель, VIN, пробег, владелец client_id / client_name /
-                    client_phone), owners - все записи по номеру, text - "✓ Hyundai Tucson — Иван";
+                    client_phone), text - "✓ Hyundai Tucson — Иван" (госномер в базе уникален - машина одна);
           "new"   - такой машины в базе нет"""
         number = (plate or "").strip()
         if len(number) < (self.PLATE_MIN_TYPING if typing else self.PLATE_MIN):
@@ -3673,7 +3683,7 @@ class AutoServiceApp:
             return {"status": "hint", "number": number, "car": car,
                     "text": self.tr("plates.lookup_hint", number=number.upper(), car=self.car_title(car), action=key,
                                     name=car.get("client_name") or self.tr("common.no_name"))}
-        return {"status": "found", "number": number, "car": car, "owners": owners, "text": self.car_found_text(car)}
+        return {"status": "found", "number": number, "car": car, "text": self.car_found_text(car)}
 
     def car_title(self, car):
         """Марка и модель одной строкой: "Hyundai Tucson" """
@@ -3761,43 +3771,6 @@ class AutoServiceApp:
         self.works_lock_filled()
         # Всё подставили - курсор сразу в "Пробег"
         self.mileage_entry.focus_set()
-
-    def show_client_selection_dialog(self, clients, car_number):
-        """Показать диалог выбора клиента для госномера"""
-        dialog = ctk.CTkToplevel(self.root)
-        dialog.title(self.tr("works.dialog_select_client_title", car_number=car_number))
-        dialog.geometry("450x300")
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        ctk.CTkLabel(dialog, text=self.tr("works.dialog_select_client_label", car_number=car_number),
-                    font=("Arial", 13)).pack(pady=(15, 10), padx=15, anchor="w")
-
-        # Фрейм для списка клиентов
-        list_frame = ctk.CTkScrollableFrame(dialog, height=180)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
-
-        selected_client = [None]  # Используем список для хранения выбора
-
-        def select_client(client):
-            selected_client[0] = client
-            dialog.destroy()
-            self.fill_car_and_client_info(client)
-
-        for client in clients:
-            name = client.get("client_name") or self.tr("common.no_name")
-            phone = client.get("client_phone") or self.tr("common.no_phone")
-            btn_text = f"{name}  |  {phone}"
-
-            btn = ctk.CTkButton(list_frame, text=btn_text, anchor="w",
-                               command=lambda c=client: select_client(c),
-                               fg_color="#2b2b2b", hover_color="#3b3b3b",
-                               height=40, font=("Arial", 12))
-            btn.pack(fill=tk.X, pady=3)
-
-        # Кнопка отмены
-        ctk.CTkButton(dialog, text=self.tr("common.cancel"), command=dialog.destroy,
-                     fg_color="#757575", hover_color="#616161", width=100).pack(pady=15)
 
     def load_client_cars_without_autofill(self, phone, name, client_id=None):
         """Загрузить машины клиента без автозаполнения полей"""
@@ -3952,6 +3925,21 @@ class AutoServiceApp:
         self.worker_combo.configure(values=worker_names)
         selected = next((name for name, wid in self.workers_data.items() if wid == previous_id), None)
         self.worker_combo.set(selected or self.tr("works.select_master"))
+
+    def works_select_master(self, worker_id):
+        """Поставить мастера наряда в список. Мастер уволен - добавляем его в список с пометкой «уволен»
+        (наряд остаётся за ним; другого мастера можно выбрать)"""
+        for name, wid in self.workers_data.items():
+            if wid == worker_id:
+                self.worker_combo.set(name)
+                return
+        name = self.db.get_worker_name(worker_id)
+        if not name:
+            return
+        label = self.tr("workers.fired_suffix", name=name)
+        self.workers_data[label] = worker_id
+        self.worker_combo.configure(values=[self.tr("works.select_master")] + list(self.workers_data))
+        self.worker_combo.set(label)
 
     def works_available_warehouse_parts(self, car_number):
         """Детали со склада, которые можно добавить в наряд: "на складе" для этой машины
@@ -4590,6 +4578,14 @@ class AutoServiceApp:
         mileage = self.mileage_entry.get().strip()
         vin = self.vin_entry.get().strip().upper()
 
+        # У клиента несколько машин, а машину не выбрали (кнопки машин красные) - просим выбрать,
+        # а не «Введите марку»
+        if not car_number and self.client_cars_combo.get() == self.tr("works.select_car"):
+            self.client_cars_combo.configure(text_color=ClientCarChips.PICK_COLOR)
+            self.works_set_lookup_state("pick", self.tr("works.lookup_pick_car", count=len(self.client_cars_data)))
+            messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_pick_client_car"))
+            return
+
         # Валидация обязательных полей авто
         if not car_brand:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_brand"))
@@ -5089,6 +5085,7 @@ class AutoServiceApp:
         self.wh_phone_cars_numbers = {}
         self.hide_wh_brand_listbox()
         self.hide_wh_model_listbox()
+        self.form_combo_error(self.wh_phone_cars_combo, False)
         if self.wh_phone_cars_combo.winfo_manager():
             self.wh_phone_cars_combo.pack_forget()
         self.hide_new_car_form()
@@ -5121,6 +5118,9 @@ class AutoServiceApp:
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
         # Госномер с ошибкой - красным сразу при вводе ("не по образцу" - когда ушли из поля)
         self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.wh_update_plate_error(), add="+")
+        # Вписали госномер сами (другая машина) - подсветку списка «Машины клиента» убрать
+        self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.wh_car_number_entry.get().strip()
+                                      and self.form_combo_error(self.wh_phone_cars_combo, False), add="+")
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: window.after(150, self.wh_update_plate_error), add="+")
         # Enter в госномере - поиск машины, а не "Заказать"
         self.wh_car_number_entry.bind('<Return>', lambda e: (self.search_car_for_warehouse(), "break")[1])
@@ -5316,6 +5316,7 @@ class AutoServiceApp:
         self.fit_form_window(self.add_part_form_frame)
 
     def wh_hide_phone_cars(self):
+        self.form_combo_error(self.wh_phone_cars_combo, False)
         if self.wh_phone_cars_combo.winfo_manager():
             self.wh_phone_cars_combo.pack_forget()
             self.fit_form_window(self.add_part_form_frame)
@@ -5487,6 +5488,7 @@ class AutoServiceApp:
         """Выбрана машина клиента из списка (склад)"""
         number = self.wh_phone_cars_numbers.get(choice)
         if number:
+            self.form_combo_error(self.wh_phone_cars_combo, False)
             fields = self.wh_phone_fill_fields()
             before = self.snapshot_fields(fields)
             self.fill_wh_car_number(number)
@@ -5636,6 +5638,15 @@ class AutoServiceApp:
             price = float(price_str.replace(",", ".")) if price_str else None
         except ValueError:
             self.form_mark_error(self.wh_price_entry, "warehouse.msg_price_number", self.add_part_form_frame)
+            return
+
+        # По телефону показан список машин клиента, а машину не выбрали и госномер не вписали - подсвечиваем
+        # список (иначе запчасть молча ушла бы на склад без машины)
+        if not car_number and self.wh_phone_cars_combo.winfo_manager():
+            self.form_combo_error(self.wh_phone_cars_combo, True)
+            self.wh_phone_cars_combo.focus_set()
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_client_car"),
+                                   parent=self.add_part_form_frame)
             return
 
         # Используем car_id если машина найдена
@@ -6380,7 +6391,8 @@ class AutoServiceApp:
         works_by_worker = {row[0]: (row[1], float(row[2]), row[3])
                            for row in self.db.get_summary_by_period(date_from, date_to)}
         bonus_sums = self.db.get_bonuses_sum_by_period(date_from, date_to)
-        staff = self.db.get_staff()
+        # Уволенные - только если у них есть работы или выплаты за этот период
+        staff = self.db.get_staff(fired_ids=set(works_by_worker) | set(bonus_sums))
         known = {w["id"] for w in staff}
         self.summary_bonus_data = {}
         self.summary_workers = {}
@@ -6423,17 +6435,19 @@ class AutoServiceApp:
                     self.summary_bonus_data[str(worker_id)] = self.db.get_bonuses_by_worker_and_period(
                         worker_id, date_from, date_to)
                 has_works = bool(count)
+                shown_name = (self.tr("workers.fired_suffix", name=worker["full_name"]) if worker["fired"]
+                              else worker["full_name"])
                 item = self.summary_tree.insert("", tk.END, values=(
-                    "    " + worker["full_name"],
+                    "    " + shown_name,
                     count if is_master or has_works else "",
                     self.format_currency(total) if is_master or has_works else "",
                     self.format_currency(share) if is_master or has_works else "",
                     self.format_currency(bonus_total) if bonus_total else "-"
                 ), tags=(str(worker_id), 'oddrow' if index % 2 == 0 else 'evenrow'))
                 self.summary_workers[item] = {"id": worker_id, "name": worker["full_name"], "position": position,
-                                              "is_master": is_master, "works": has_works}
+                                              "is_master": is_master, "works": has_works, "fired": worker["fired"]}
 
-        # Работы сотрудников, которых уже нет в списке (не должно быть - удаление сотрудника удаляет его работы),
+        # Работы сотрудников, которых нет в списке (не должно быть - уволенные с работами показаны выше),
         # всё равно учитываем в итогах, чтобы сумма сходилась с работами за период
         for worker_id, (name, total, count) in works_by_worker.items():
             if worker_id not in known:
@@ -6482,7 +6496,8 @@ class AutoServiceApp:
         menu = self.summary_context_menu
         menu.entryconfigure(0, state="normal" if worker["works"] or worker["is_master"] else "disabled")
         menu.entryconfigure(1, label="  💰  " + self.tr("reports.ctx_add_bonus" if worker["is_master"]
-                                                        else "reports.ctx_add_payment"))
+                                                        else "reports.ctx_add_payment"),
+                            state="disabled" if worker.get("fired") else "normal")   # уволенному - нет
         menu.post(event.x_root, event.y_root)
 
     def show_add_bonus_window(self):
@@ -7492,6 +7507,7 @@ class AutoServiceApp:
                                                             self.tr("finances.category_utilities"), self.tr("finances.category_parts_purchase"),
                                                             self.tr("finances.category_tools"), self.tr("finances.category_ads"),
                                                             self.tr("finances.category_other"), self.tr("finances.income_label")],
+                                                    command=self.on_expense_category_selected,
                                                     fg_color="white", text_color="black", button_color="#0078d7", button_hover_color="#005a9e")
         self.expense_category_combo.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         self.expense_category_combo.set(self.tr("finances.category_rent"))
@@ -7551,9 +7567,22 @@ class AutoServiceApp:
                    command=self.delete_expense, width=400, fg_color="red", hover_color="#555555")
         self.delete_expense_btn.pack(anchor=tk.CENTER, pady=10)
 
+    def on_expense_category_selected(self, category):
+        """Выбрали категорию «Доход» при «Расходе» - переключаем на «Доход» (и обратно), чтобы тип и категория сходились"""
+        is_income = category == self.tr("finances.income_label")
+        if is_income != self.is_income_var.get():
+            self.is_income_var.set(is_income)
+            self.on_income_switch_changed()
+
     def on_income_switch_changed(self):
-        """Обработчик переключения расход/доход"""
+        """Обработчик переключения расход/доход. Категория следует за переключателем:
+        «Доход» - категория «Доход»; обратно на «Расход» - первая категория расходов"""
         is_income = self.is_income_var.get()
+        income_category = self.tr("finances.income_label")
+        if is_income:
+            self.expense_category_combo.set(income_category)
+        elif self.expense_category_combo.get() == income_category:
+            self.expense_category_combo.set(self.tr("finances.category_rent"))
         if is_income:
             self.expense_type_label.configure(text_color="gray", font=("Segoe UI", 14))
             self.income_type_label.configure(text_color="#4caf50", font=("Segoe UI", 14, "bold"))
@@ -8767,6 +8796,13 @@ class AutoServiceApp:
         """Отметить запись как отменённую"""
         booking_id = self.get_selected_booking_id()
         if booking_id:
+            # По записи уже есть работы - не отменяем: работы остались бы в «Статистике», в зарплату не попали бы
+            # никогда, а запчасти так и висели бы «установлена»
+            works_count = len(self.db.get_all_works_by_booking_id(booking_id) or [])
+            if works_count:
+                messagebox.showwarning(self.tr("common.attention"),
+                                       self.tr("bookings.msg_cancel_has_works", count=works_count))
+                return
             self.db.update_booking_status(booking_id, "cancelled")
             self.refresh_bookings()
             messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_cancelled"))
@@ -9141,6 +9177,9 @@ class AutoServiceApp:
                                            corner_radius=8)
         phone_cars_visible = [False]
         phone_cars_numbers = {}
+
+        def phone_cars_error(on):
+            self.form_combo_error(phone_cars_combo, on)
         # Что подставил поиск по телефону: {"digits": номер, "filled": {поле: значение}}
         phone_fill = [None]
 
@@ -9224,8 +9263,12 @@ class AutoServiceApp:
 
         car_number_entry.bind("<KeyRelease>", check_car_number)
         car_number_entry.bind("<FocusOut>", check_car_number)
+        # Вписали госномер сами (другая машина) - подсветку списка «Машины клиента» убрать
+        car_number_entry.bind("<KeyRelease>", lambda e: car_number_entry.get().strip() and phone_cars_error(False),
+                              add="+")
 
         def hide_phone_cars():
+            phone_cars_error(False)
             if phone_cars_visible[0]:
                 phone_cars_combo.pack_forget()
                 phone_cars_visible[0] = False
@@ -9239,6 +9282,7 @@ class AutoServiceApp:
         def on_phone_car_select(choice):
             number = phone_cars_numbers.get(choice)
             if number:
+                phone_cars_error(False)
                 before = self.snapshot_fields(phone_fill_fields)
                 fill_car_number(number)
                 # Машину выбрали из списка по телефону - при смене номера её тоже уберём
@@ -9587,7 +9631,14 @@ class AutoServiceApp:
             model = model_entry.get().strip()
             existing_car_id = found_car_id[0]  # ID найденного авто или None
 
-            # Валидация госномера - обязательно
+            # Валидация госномера - обязательно. Есть список машин клиента (по телефону) - подсвечиваем его:
+            # скорее всего машину просто не выбрали
+            if not number and phone_cars_visible[0]:
+                phone_cars_error(True)
+                phone_cars_combo.focus_set()
+                messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_client_car"),
+                                       parent=add_window)
+                return
             if not number:
                 mark_error(car_number_entry, "works.msg_enter_car_number")
                 return
@@ -10067,10 +10118,7 @@ class AutoServiceApp:
 
             # Выбираем мастера
             if worker_id:
-                for name, wid in self.workers_data.items():
-                    if wid == worker_id:
-                        self.worker_combo.set(name)
-                        break
+                self.works_select_master(worker_id)
 
             # Загружаем запчасти
             self.parts_list = []

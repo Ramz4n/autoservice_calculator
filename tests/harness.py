@@ -45,16 +45,25 @@ class Harness:
 
         import autoservice_calculator as m
         self.m = m
+        # Наружу из тестов ничего не уходит: уведомления клиенту (Telegram, SMS) и обмен с сайтом подменены,
+        # вызовы записываются в self.outgoing
+        self.outgoing = []
+        m.send_telegram_notification = lambda *a, **k: (self.outgoing.append(("telegram", a)), False)[1]
+        m.send_sms_notification = lambda *a, **k: (self.outgoing.append(("sms", a)), False)[1]
+        m.web_sync.enabled = lambda: False
         self.root = ctk.CTk()
         self.root.geometry("1400x900+0+0")
         self.app = m.AutoServiceApp(self.root, current_user={"id": 1, "username": "autotest", "full_name": "",
                                                               "role": "admin"})
         self.root.update()
         # Окна, которые ждут ответа сами (не messagebox), в тестах появляться не должны - отмечаем, если появились
+        self.real_ask_new_owner = self.app.works_ask_new_owner   # включается в тестах смены владельца
         self.app.works_ask_new_owner = lambda *a, **k: self._unexpected("окно «новый владелец?»")
-        self.app.show_client_selection_dialog = lambda *a, **k: self._unexpected("окно выбора владельца")
         self._input_answer = [""]
         m.ctk.CTkInputDialog = self._fake_input_dialog()
+        # Окно пароля (ждёт ввода само) - ответы из очереди self.passwords, пустая очередь = «Отмена»
+        self.passwords = []
+        self.app.ask_password = self._fake_ask_password
 
         import backup as backup_module
         from db_config import get_base_path
@@ -65,8 +74,15 @@ class Harness:
         self.log(f"Резервная копия перед тестами: {path}")
         self.snapshot = {t: self.q(f"SELECT COALESCE(MAX(id), 0) FROM {t}")[0][0] for t in TABLES}
         self.positions_before = self.q("SELECT id, name, is_master FROM positions ORDER BY id")
+        self.reports_password_before = self.q("SELECT value FROM app_settings WHERE name = 'reports_password'")
 
     # ---------- служебное ----------
+    def _fake_ask_password(self, title, prompt):
+        answer = self.passwords.pop(0) if self.passwords else None
+        self.dialogs.append(("ask_password", str(title), str(prompt)))
+        self.log(f"      окно пароля: {str(prompt)[:80]!r} -> {'Отмена' if answer is None else '***'}")
+        return answer
+
     def _patch_dialogs(self):
         def make(kind):
             def dialog(title=None, message=None, **kw):
@@ -144,6 +160,14 @@ class Harness:
         saved = any(d[0] == "showinfo" for d in new)
         self.check(name, warned and not changed and not saved,
                    f"предупреждение={warned} изменения={changed} успех={saved}")
+
+    def owner_question(self, enabled):
+        """Вопрос «новый владелец?» (обычно в тестах он - неожиданность): enabled=True - настоящий,
+        ответы берутся из очереди self.answers (askokcancel / askyesnocancel: True / False / None)"""
+        if enabled:
+            self.app.works_ask_new_owner = self.real_ask_new_owner
+        else:
+            self.app.works_ask_new_owner = lambda *a, **k: self._unexpected("окно «новый владелец?»")
 
     def dialogs_since(self, index):
         return self.dialogs[index:]
@@ -242,7 +266,7 @@ class Harness:
         app.add_work_to_list()
 
     def warehouse_form(self, plate, brand=None, model=None, phone10=None, name=None, part="Тест деталь",
-                       qty="1", price="500", save=True, close=True):
+                       qty="1", price="500", save=True, close=True, paid=None):
         """Склад → «Добавить запчасть»: госномер (с уходом из поля), данные новой машины, деталь, «Заказать»"""
         app = self.app
         app.switch_tab("warehouse")
@@ -259,6 +283,8 @@ class Harness:
                 entry.delete(0, "end"); entry.insert(0, value)
         if phone10 is not None:
             app.set_phone_value(app.wh_phone_entry, phone10)
+        if paid is not None:
+            app.wh_paid_var.set(paid)   # «Оплачено заранее — не включать в счёт»
         if save:
             app.add_warehouse_part()
             self.root.update()
@@ -286,6 +312,227 @@ class Harness:
             win.destroy()
         app._edit_data_overlay.withdraw()
 
+    # ---------- Склад ----------
+    def warehouse_part(self, name):
+        """(id, статус, work_id, is_paid, received_date) детали склада по названию или None"""
+        r = self.q("SELECT id, status, work_id, is_paid, received_date FROM warehouse_parts WHERE part_name = %s "
+                   "ORDER BY id DESC LIMIT 1", (name,))
+        return r[0] if r else None
+
+    def warehouse_set_status(self, part_id, status):
+        """Склад → выбрать строку → ПКМ → «На складе» / «Выдано»"""
+        app = self.app
+        app.switch_tab("warehouse")
+        app.refresh_warehouse()
+        item = next((i for i in app.warehouse_tree.get_children()
+                     if str(app.warehouse_tree.item(i, "values")[0]) == str(part_id)), None)
+        if item is None:
+            return False
+        app.warehouse_tree.selection_set(item)
+        app.update_part_status(status)
+        self.root.update()
+        return True
+
+    def works_add_from_warehouse(self, names):
+        """«Добавить работу» → «Со склада» → отметить детали с этими названиями → «Добавить».
+        Возвращает названия, которые были в окне выбора"""
+        app = self.app
+        before = set(self.root.winfo_children())
+        app.add_part_from_warehouse()
+        self.root.update()
+        dialog = next((x for x in self.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel)),
+                      None)
+        if dialog is None:
+            return []
+        boxes = self.find_widgets(dialog, ctk.CTkCheckBox)
+        offered = [b.cget("text") for b in boxes]
+        for box in boxes:
+            if any(n in box.cget("text") for n in names):
+                box.select()
+        self.find_button(dialog, app.tr("common.add")).invoke()
+        self.root.update()
+        if dialog.winfo_exists():
+            dialog.destroy()
+        return offered
+
+    def works_remove_part(self, name):
+        """«Добавить работу» → ✕ в строке запчасти (подтверждение - «Да»)"""
+        app = self.app
+        for item in app.parts_tree.get_children():
+            if app.parts_list[app.parts_tree.index(item)][0].startswith(name):
+                app.remove_part_from_list(item)
+                return True
+        return False
+
+    # ---------- «Отчёты», «Статистика», «Финансы» - как их видит пользователь ----------
+    @staticmethod
+    def money(text):
+        """"1.234,50 руб." / "-" -> 1234.5 / 0"""
+        import re
+        m = re.search(r"-?[\d.]+,\d{2}", text or "")
+        return float(m.group(0).replace(".", "").replace(",", ".")) if m else 0.0
+
+    def report(self):
+        """Сформировать «Отчёты» за сегодня. {"rows": {ФИО: dict(count, total, share, bonus)},
+        "income", "expenses", "masters", "profit"} - то, что показано на экране"""
+        app = self.app
+        app.switch_tab("reports")
+        app.generate_report(show_empty_message=False)
+        rows = {}
+        for item in app.summary_tree.get_children():
+            if item not in getattr(app, "summary_workers", {}):
+                continue   # строка должности
+            name, count, total, share, bonus = app.summary_tree.item(item, "values")
+            rows[str(name).strip()] = {"count": int(count or 0), "total": self.money(total),
+                                       "share": self.money(share), "bonus": self.money(bonus)}
+        return {"rows": rows, "income": self.money(app.income_label.cget("text")),
+                "other_income": self.money(app.other_income_label.cget("text")),
+                "expenses_list": [str(x[1]) for x in app.expenses_tooltip.data],
+                "income_list": [str(x[1]) for x in app.other_income_tooltip.data],
+                "expenses": self.money(app.expenses_label.cget("text")),
+                "masters": self.money(app.masters_label.cget("text")),
+                "profit": self.money(app.profit_label.cget("text"))}
+
+    def master_percent(self):
+        return float(self.app.percent_var.get().replace(",", "."))
+
+    def stats(self):
+        """Сформировать «Статистику» за сегодня: марки, клиенты, виды работ - строки, которые на экране"""
+        app = self.app
+        app.switch_tab("statistics")
+        app.generate_statistics(show_empty_message=False)
+        return {"brands": {b: (visits, round(total, 2)) for b, visits, cars, total in app._stats_brand_rows},
+                "clients": {n: (visits, round(total, 2)) for n, phone, visits, total in app._stats_client_rows},
+                "works": {n: (count, round(total, 2)) for n, count, total in app._stats_work_rows}}
+
+    def give_bonus(self, worker_name, amount):
+        """«Отчёты» → ПКМ по сотруднику → «Выписать премию / выплату» → сумма → «Начислить»"""
+        app = self.app
+        self.report()
+        item = next(i for i, w in app.summary_workers.items() if w["name"] == worker_name)
+        app.summary_tree.selection_set(item)
+        before = set(self.root.winfo_children())
+        app.show_add_bonus_window()
+        self.root.update()
+        win = next(x for x in self.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel))
+        entry = self.find_widgets(win, ctk.CTkEntry)[0]
+        entry.delete(0, "end"); entry.insert(0, str(amount))
+        self.find_button(win, app.tr("reports.bonus_save_btn")).invoke()
+        self.root.update()
+        if win.winfo_exists():   # сумму не приняли - окно осталось открытым, закрываем
+            win.destroy()
+
+    def report_menu(self, worker_name):
+        """Меню правого клика по сотруднику в «Отчётах»: (текст пункта премии / выплаты, доступно ли «Подробно»)"""
+        app = self.app
+        self.report()
+        item = next(i for i, w in app.summary_workers.items() if w["name"] == worker_name)
+        app.summary_tree.see(item)
+        self.root.update()
+        x, y, w, hgt = app.summary_tree.bbox(item)
+
+        class Click:
+            pass
+        click = Click()
+        click.x, click.y = x + 5, y + hgt // 2
+        click.x_root, click.y_root = app.summary_tree.winfo_rootx() + click.x, app.summary_tree.winfo_rooty() + click.y
+        menu = app.summary_context_menu
+        menu.post = lambda *a: None   # на Windows всплывшее меню ждёт клика - тест бы завис; пункты настроятся и так
+        try:
+            app.show_summary_context_menu(click)
+        finally:
+            del menu.post
+        return menu.entrycget(1, "label").strip(), menu.entrycget(0, "state")
+
+    def delete_expense_in_finances(self, expense_id):
+        """«Финансы» → выбрать строку → «Удалить»"""
+        app = self.app
+        app.switch_tab("expenses")
+        app.refresh_expenses()
+        item = next((i for i in app.expenses_tree.get_children()
+                     if str(app.expenses_tree.item(i, "values")[0]) == str(expense_id)), None)
+        if item is None:
+            return False
+        app.expenses_tree.selection_set(item)
+        app.delete_expense()
+        self.root.update()
+        return True
+
+    def finance_entry(self, income, category, description, amount, day=None, button="finances.confirm_date_btn"):
+        """«Финансы»: Расход/Доход, категория, описание, сумма → «Добавить» → окно даты (day или сегодня) →
+        «Сохранить» (button="common.cancel" - «Отмена»). Возвращает id новой записи или None"""
+        from tkcalendar import DateEntry
+        app = self.app
+        app.switch_tab("expenses")
+        app.is_income_var.set(income)
+        app.on_income_switch_changed()
+        app.expense_category_combo.set(category)
+        for entry, value in ((app.expense_desc_entry, description), (app.expense_amount_entry, amount)):
+            entry.delete(0, "end")
+            entry.insert(0, str(value))
+        last = self.q("SELECT COALESCE(MAX(id), 0) FROM expenses")[0][0]
+        self.root.update()   # вкладка при первом открытии дорисовывается - её окна не путать с окном даты
+        before = set(self.root.winfo_children())
+        app.add_expense()
+        self.root.update()
+        win = next((x for x in self.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel)
+                    and self.find_widgets(x, DateEntry)), None)
+        if win is not None:
+            if day is not None:
+                self.find_widgets(win, DateEntry)[0].set_date(day)
+            self.find_button(win, app.tr(button)).invoke()
+            self.root.update()
+            if win.winfo_exists():
+                win.destroy()
+        new = self.q("SELECT id FROM expenses WHERE id > %s ORDER BY id", (last,))
+        return new[0][0] if new else None
+
+    def finance_rows(self):
+        """Список «Финансов» как на экране: {id: (тип, категория, описание, сумма, дата)}"""
+        app = self.app
+        app.switch_tab("expenses")
+        app.refresh_expenses()
+        return {str(v[0]): tuple(str(x) for x in v[1:])
+                for v in (app.expenses_tree.item(i, "values") for i in app.expenses_tree.get_children())}
+
+    def period_entries(self, tab):
+        """Поля дат вкладки «reports» / «statistics»"""
+        return self.app.period_locks[tab]["entries"]
+
+    def set_period(self, tab, date_from, date_to):
+        """Поставить даты, как будто их выбрали в календаре (закрытое поле - тоже, чтобы проверить, что не обойти)"""
+        for entry, day in zip(self.period_entries(tab), (date_from, date_to)):
+            state = str(entry.cget("state"))
+            entry.configure(state="normal")
+            entry.set_date(day)
+            entry.configure(state=state)
+
+    def period_unlocked_ui(self, tab):
+        """Даты открыты (и кнопка «Только сегодня»)"""
+        lock = self.app.period_locks[tab]
+        return (lock["unlocked"] and all(str(e.cget("state")) == "normal" for e in lock["entries"])
+                and lock["button"].cget("text") == self.app.tr("reports.period_unlocked_btn"))
+
+    def period_locked_ui(self, tab):
+        """Даты закрыты на сегодня (и кнопка «Другой период»)"""
+        from datetime import date
+        lock = self.app.period_locks[tab]
+        return (not lock["unlocked"] and all(str(e.cget("state")) == "disabled" for e in lock["entries"])
+                and all(e.get_date() == date.today() for e in lock["entries"])
+                and lock["button"].cget("text") == self.app.tr("reports.period_locked_btn"))
+
+    def complete_booking(self, booking_id):
+        """«Записи» → ПКМ → «Выполнено»"""
+        self.app.get_selected_booking_id = lambda: booking_id
+        self.app.mark_booking_completed()
+        self.root.update()
+
+    def delete_booking(self, booking_id):
+        """«Записи» → ПКМ → «Удалить»"""
+        self.app.get_selected_booking_id = lambda: booking_id
+        self.app.delete_selected_booking()
+        self.root.update()
+
     # ---------- уборка и итог ----------
     def cleanup(self):
         self.group = "Уборка"
@@ -300,6 +547,10 @@ class Harness:
                         self.log(f"  {t}: удалено {cur.rowcount}")
                 for pid, name, is_master in self.positions_before:
                     cur.execute("UPDATE positions SET name = %s, is_master = %s WHERE id = %s", (name, is_master, pid))
+                cur.execute("DELETE FROM app_settings WHERE name = 'reports_password'")
+                if self.reports_password_before:
+                    cur.execute("INSERT INTO app_settings (name, value) VALUES ('reports_password', %s)",
+                                (self.reports_password_before[0][0],))
                 cur.execute("SET FOREIGN_KEY_CHECKS = 1")
             conn.commit()
         finally:
@@ -308,6 +559,11 @@ class Harness:
         self.check("после уборки база как до тестов",
                    not any(left.values())
                    and self.q("SELECT id, name, is_master FROM positions ORDER BY id") == self.positions_before, left)
+        self.check("пароль для отчётов как до тестов",
+                   self.q("SELECT value FROM app_settings WHERE name = 'reports_password'")
+                   == self.reports_password_before)
+        self.check("наружу ничего не отправлено (уведомления подменены)", True,
+                   f"перехвачено отправок: {len(self.outgoing)}")
         unexpected = [d for d in self.dialogs if d[0] == "unexpected"]
         self.check("не было неожиданных окон", not unexpected, unexpected)
 

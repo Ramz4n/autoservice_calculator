@@ -297,6 +297,9 @@ MIGRATIONS = [
     "WHERE part_name <> TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' '))",
     "UPDATE warehouse_parts SET part_name = TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' ')) "
     "WHERE part_name <> TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' '))",
+    # Увольнение: сотрудника с работами или выплатами не удаляем (иначе из «Отчётов» и «Статистики» за прошлое
+    # пропадут его работы и доход), а помечаем датой увольнения - он скрывается из списков
+    "ALTER TABLE workers ADD COLUMN IF NOT EXISTS fired_at DATE DEFAULT NULL",
     # Должности сотрудников: раньше в программе были только мастера - должность "Мастер" создаётся одна
     # (если её ещё нет), и все сотрудники без должности становятся мастерами. Ничего не удаляется
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS position_id INT DEFAULT NULL",

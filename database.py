@@ -127,6 +127,12 @@ class Database:
             except MySQLError as e:
                 print(f"Не удалось добавить должности сотрудникам: {e}")
 
+        if not self._column_exists(cursor, "workers", "fired_at"):
+            try:
+                cursor.execute("ALTER TABLE workers ADD COLUMN fired_at DATE DEFAULT NULL")
+            except MySQLError as e:
+                print(f"Не удалось добавить дату увольнения сотрудникам: {e}")
+
         # Госномера - в одном написании: заглавными, без пробелов, российские - кириллицей
         # (A123BC77 латиницей и "А 123 ВС 77" -> А123ВС77), иначе поиск их не находит
         for car_id, number in plate_fixes:
@@ -201,17 +207,28 @@ class Database:
     # --- Методы для работы с работниками ---
 
     def add_worker(self, full_name, position_id=None):
-        """Добавить сотрудника с должностью (не указана - мастер)"""
+        """Добавить сотрудника с должностью (не указана - мастер).
+        "added"; "restored" - такой был уволен: вернули на работу (с этой должностью), история его;
+        "exists" - работает сейчас"""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
             if position_id is None:
                 position_id = self._master_position_id(cursor)
+            cursor.execute("SELECT id, fired_at FROM workers WHERE full_name = %s", (full_name,))
+            row = cursor.fetchone()
+            if row:
+                if row[1] is None:
+                    return "exists"
+                cursor.execute("UPDATE workers SET fired_at = NULL, position_id = %s WHERE id = %s",
+                               (position_id, row[0]))
+                conn.commit()
+                return "restored"
             cursor.execute("INSERT INTO workers (full_name, position_id) VALUES (%s, %s)", (full_name, position_id))
             conn.commit()
-            return True
+            return "added"
         except pymysql.IntegrityError:
-            return False
+            return "exists"
         finally:
             conn.close()
 
@@ -236,7 +253,7 @@ class Database:
         cursor.execute("""
             SELECT p.id, p.name, p.is_master, COUNT(w.id)
             FROM positions p
-            LEFT JOIN workers w ON w.position_id = p.id
+            LEFT JOIN workers w ON w.position_id = p.id AND w.fired_at IS NULL
             GROUP BY p.id, p.name, p.is_master, p.sort_order
             ORDER BY p.is_master DESC, p.sort_order, p.name
         """)
@@ -300,9 +317,11 @@ class Database:
             row = cursor.fetchone()
             if row and row[0] and self._is_last_car_position(cursor, position_id):
                 return "master"
-            cursor.execute("SELECT COUNT(*) FROM workers WHERE position_id = %s", (position_id,))
+            cursor.execute("SELECT COUNT(*) FROM workers WHERE position_id = %s AND fired_at IS NULL", (position_id,))
             if cursor.fetchone()[0]:
                 return "has_workers"
+            # У уволенных этой должности - без должности (в старых отчётах они в группе «—»)
+            cursor.execute("UPDATE workers SET position_id = NULL WHERE position_id = %s", (position_id,))
             cursor.execute("DELETE FROM positions WHERE id = %s", (position_id,))
             conn.commit()
             return "ok"
@@ -316,34 +335,67 @@ class Database:
         conn.commit()
         conn.close()
 
-    def get_staff(self):
-        """Все сотрудники с должностями: [dict(id, full_name, position_id, position, is_master)] -
-        сначала мастера, дальше по должностям, внутри - по ФИО. Без должности - считается мастером"""
+    def get_staff(self, fired_ids=()):
+        """Работающие сотрудники с должностями: [dict(id, full_name, position_id, position, is_master, fired)] -
+        сначала мастера, дальше по должностям, внутри - по ФИО. Без должности - считается мастером.
+        fired_ids - и эти уволенные (у них работы / выплаты за период отчёта)"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT w.id, w.full_name, p.id, p.name, COALESCE(p.is_master, 1)
+        ids = [int(i) for i in fired_ids]
+        extra = f" OR w.id IN ({', '.join(['%s'] * len(ids))})" if ids else ""
+        cursor.execute(f"""
+            SELECT w.id, w.full_name, p.id, p.name, COALESCE(p.is_master, 1), w.fired_at
             FROM workers w
             LEFT JOIN positions p ON p.id = w.position_id
+            WHERE w.fired_at IS NULL{extra}
             ORDER BY COALESCE(p.is_master, 1) DESC, p.sort_order, p.name, w.full_name
-        """)
+        """, ids)
         rows = cursor.fetchall()
         conn.close()
-        return [{"id": r[0], "full_name": r[1], "position_id": r[2], "position": r[3] or "", "is_master": bool(r[4])}
-                for r in rows]
+        return [{"id": r[0], "full_name": r[1], "position_id": r[2], "position": r[3] or "", "is_master": bool(r[4]),
+                 "fired": r[5] is not None} for r in rows]
+
+    def get_worker_name(self, worker_id):
+        """ФИО сотрудника (и уволенного) или None"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT full_name FROM workers WHERE id = %s", (worker_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def worker_history(self, worker_id):
+        """Сколько у сотрудника работ и премий / выплат: (работ, выплат)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM works WHERE worker_id = %s", (worker_id,))
+        works = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM worker_bonuses WHERE worker_id = %s", (worker_id,))
+        bonuses = cursor.fetchone()[0]
+        conn.close()
+        return works, bonuses
 
     def get_masters(self):
         """Только мастера (берут работы, получают процент): [(id, full_name)]"""
         return [(w["id"], w["full_name"]) for w in self.get_staff() if w["is_master"]]
 
     def delete_worker(self, worker_id):
-        """Удалить работника и все его записи"""
+        """Удалить сотрудника. Есть работы или выплаты - не удаляем, а увольняем: скрыт из списков, его работы
+        и выплаты остаются в «Отчётах» и «Статистике» (иначе за прошлые месяцы пропадёт доход).
+        Возвращает "fired" или "deleted"
+        """
+        works, bonuses = self.worker_history(worker_id)
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM works WHERE worker_id = %s", (worker_id,))
-        cursor.execute("DELETE FROM workers WHERE id = %s", (worker_id,))
+        if works or bonuses:
+            cursor.execute("UPDATE workers SET fired_at = CURDATE() WHERE id = %s", (worker_id,))
+            result = "fired"
+        else:
+            cursor.execute("DELETE FROM workers WHERE id = %s", (worker_id,))
+            result = "deleted"
         conn.commit()
         conn.close()
+        return result
 
     def get_all_workers(self):
         """Получить всех работников"""
@@ -1534,6 +1586,10 @@ class Database:
             work_ids = [row[0] for row in cursor.fetchall()]
             if work_ids:
                 marks = ", ".join(["%s"] * len(work_ids))
+                # Деталь стояла в наряде, но клиенту ещё не выдана - она снова на складе (иначе зависнет
+                # "установлена" без наряда и в "Со склада" её уже не предложат). Выданная - остаётся "выдано"
+                cursor.execute(f"UPDATE warehouse_parts SET status = 'на складе' "
+                               f"WHERE status = 'установлена' AND work_id IN ({marks})", work_ids)
                 cursor.execute(f"UPDATE warehouse_parts SET work_id = NULL WHERE work_id IN ({marks})", work_ids)
                 cursor.execute(f"DELETE FROM works WHERE id IN ({marks})", work_ids)
             cursor.execute("DELETE FROM bookings WHERE id = %s", (booking_id,))

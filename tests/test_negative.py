@@ -133,7 +133,7 @@ def test_positions_rejects(h):
     h.expect_rejected("пустое название должности", add_position("   "), "название")
     h.expect_rejected("должность с существующим названием", add_position(first_position), "уже есть")
     h.expect_rejected("сотрудник без ФИО", add_worker(""), "ФИО")
-    existing = h.q("SELECT full_name FROM workers LIMIT 1")
+    existing = h.q("SELECT full_name FROM workers WHERE fired_at IS NULL LIMIT 1")
     if existing:
         h.expect_rejected("сотрудник с существующим ФИО", add_worker(existing[0][0]), "уже есть")
 
@@ -166,4 +166,121 @@ def test_positions_rejects(h):
         h.q("UPDATE positions SET is_master = %s WHERE id = %s", (is_master, pid))
 
 
-TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_edit_rejects, test_positions_rejects]
+def test_payment_rejects(h):
+    """«Отчёты» → «Выписать премию / выплату»: неверная сумма"""
+    worker = h.q("SELECT w.full_name FROM workers w JOIN positions p ON p.id = w.position_id ORDER BY w.id LIMIT 1")
+    if not h.check("есть сотрудник для проверки", worker):
+        return
+    name = worker[0][0]
+    for amount in ("0", "-100", "abc", ""):
+        before = h.q("SELECT COUNT(*) FROM expenses")[0][0], h.q("SELECT COUNT(*) FROM worker_bonuses")[0][0]
+        h.expect_rejected(f"сумма «{amount}»", lambda a=amount: h.give_bonus(name, a), "сумму")
+        after = h.q("SELECT COUNT(*) FROM expenses")[0][0], h.q("SELECT COUNT(*) FROM worker_bonuses")[0][0]
+        h.check(f"сумма «{amount}»: ни расхода, ни выплаты", before == after, (before, after))
+
+
+def test_finance_rejects(h):
+    """«Финансы»: неверный ввод - предупреждение, окна даты нет, ни одной записи; удаление без выбора и с ответом «Нет»"""
+    app = h.app
+    tr = app.tr
+    rent = tr("finances.category_rent")
+
+    def count():
+        return h.q("SELECT COUNT(*) FROM expenses")[0][0]
+
+    for label, income, category, desc, amount, text in (
+            ("расход без описания", False, rent, "", 100, "описание"),
+            ("доход без описания", True, tr("finances.income_label"), "", 100, "описание"),
+            ("без категории", False, "", "Тест", 100, "категори"),
+            ("сумма 0", False, rent, "Тест", "0", "сумму"),
+            ("сумма с минусом", False, rent, "Тест", "-50", "сумму"),
+            ("сумма буквами", False, rent, "Тест", "abc", "сумму"),
+            ("пустая сумма", False, rent, "Тест", "", "сумму")):
+        before = count()
+        h.expect_rejected(f"«Финансы»: {label}",
+                          lambda a=(income, category, desc, amount): h.finance_entry(*a), text)
+        h.check(f"«Финансы»: {label} - ни одной записи", count() == before)
+
+    app.switch_tab("expenses")
+    app.refresh_expenses()
+    app.expenses_tree.selection_set(())
+    before = count()
+    h.expect_rejected("«Финансы»: удалить без выбора строки", app.delete_expense, "Выберите запись")
+    h.check("«Финансы»: без выбора ничего не удалено", count() == before)
+
+    entry_id = h.finance_entry(False, rent, "Тест не удалять", 100)
+    if h.check("запись для проверки удаления создана", entry_id):
+        h.answers[:] = [False]
+        h.delete_expense_in_finances(entry_id)
+        h.check("«Финансы»: ответ «Нет» - запись осталась", h.q("SELECT id FROM expenses WHERE id = %s", (entry_id,)))
+        h.answers[:] = []
+        h.delete_expense_in_finances(entry_id)
+    app.is_income_var.set(False)
+    app.on_income_switch_changed()
+    app.expense_desc_entry.delete(0, "end")
+    app.expense_amount_entry.delete(0, "end")
+
+
+def test_period_rejects(h):
+    """«Другой период»: без пароля, неверный пароль, «Отмена» - даты остаются закрыты на сегодня;
+    смена пароля с ошибкой - пароль не меняется; дата «С» позже «По» - отчёт не формируется"""
+    from datetime import date, timedelta
+    app = h.app
+    today = date.today()
+
+    def setting():
+        return h.q("SELECT value FROM app_settings WHERE name = 'reports_password'")
+
+    h.q("DELETE FROM app_settings WHERE name = 'reports_password'")   # уборка вернёт прежний пароль
+    for tab in ("reports", "statistics"):
+        before = len(h.dialogs)
+        app.toggle_period_lock(tab)
+        new = h.dialogs_since(before)
+        h.check(f"{tab}: пароль не задан - сообщение «не задан», окна пароля нет, закрыто",
+                any("не задан" in d[2] for d in new) and not any(d[0] == "ask_password" for d in new)
+                and h.period_locked_ui(tab), new)
+
+    app.db.set_reports_password("тест-верный")
+    for tab in ("reports", "statistics"):
+        before = len(h.dialogs)
+        h.passwords[:] = ["тест-неверный"]
+        app.toggle_period_lock(tab)
+        h.check(f"{tab}: неверный пароль - ошибка, закрыто",
+                any(d[0] == "showerror" and "Неверный" in d[2] for d in h.dialogs_since(before))
+                and h.period_locked_ui(tab))
+        before = len(h.dialogs)
+        h.passwords[:] = [None]
+        app.toggle_period_lock(tab)
+        h.check(f"{tab}: «Отмена» в окне пароля - без сообщений, закрыто",
+                not any(d[0].startswith("show") for d in h.dialogs_since(before)) and h.period_locked_ui(tab))
+
+    stored = setting()
+    for label, answers, text in (
+            ("неверный текущий пароль", ["тест-неверный"], "Неверный"),
+            ("новый и повтор не совпадают", ["тест-верный", "тест-новый", "тест-другой"], "не совпадают"),
+            ("пустой новый пароль", ["тест-верный", ""], None),
+            ("«Отмена» на повторе", ["тест-верный", "тест-новый", None], None)):
+        before = len(h.dialogs)
+        h.passwords[:] = answers
+        app.change_reports_password()
+        new = h.dialogs_since(before)
+        warned = text is None or any(d[0] == "showerror" and text in d[2] for d in new)
+        h.check(f"смена пароля: {label} - пароль не изменился", warned and setting() == stored
+                and not any(d[0] == "showinfo" for d in new), new)
+
+    h.passwords[:] = ["тест-верный"]
+    app.toggle_period_lock("reports")
+    h.report()
+    reported = (app.report_date_from, app.report_date_to)
+    h.set_period("reports", today, today - timedelta(days=3))
+    before = len(h.dialogs)
+    app.generate_report(show_empty_message=False)
+    h.check("дата «С» позже «По» - предупреждение, отчёт не пересчитан",
+            any(d[0] == "showwarning" and "больше" in d[2] for d in h.dialogs_since(before))
+            and (app.report_date_from, app.report_date_to) == reported)
+    app.toggle_period_lock("reports")
+    h.check("«Отчёты» снова закрыты", h.period_locked_ui("reports"))
+
+
+TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_edit_rejects, test_positions_rejects,
+         test_payment_rejects, test_finance_rejects, test_period_rejects]
