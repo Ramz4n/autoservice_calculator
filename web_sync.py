@@ -24,6 +24,7 @@ import time
 import requests
 
 from db_config import get_base_path
+from plates import PLATE_LATIN_TO_CYR, normalize_plate
 
 SETTINGS_FILE = os.path.join(get_base_path(), 'config', 'settings.json')
 ACTIVE_STATUSES = ('waiting', 'in_progress')
@@ -167,21 +168,14 @@ def _apply_command(db, cmd):
         conn.close()
 
 
-# латинские буквы, которые выглядят как буквы госномера: A123BC77 и А123ВС77 - один и тот же номер
-_PLATE_LATIN = str.maketrans("ABEKMHOPCTYX", "АВЕКМНОРСТУХ")
-
-
 def _plate_key(plate):
     """Госномер для сравнения: без пробелов и дефисов, заглавными, латиница -> кириллица"""
-    return re.sub(r'[\s\-]', '', str(plate or '')).upper().translate(_PLATE_LATIN)
+    return re.sub(r'[\s\-]', '', str(plate or '')).upper().translate(PLATE_LATIN_TO_CYR)
 
 
 def _plate_save(plate):
-    """Госномер для базы: заглавными, без пробелов. Российский номер, набранный латиницей (A123BC77),
-    переводим в кириллицу, а номера других стран (35OL123, 1234AB-7) оставляем как написаны."""
-    plate = re.sub(r'\s', '', str(plate or '')).upper()
-    ru = plate.translate(_PLATE_LATIN)
-    return ru if re.fullmatch(r'[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3}', ru) else plate
+    """Госномер для базы - общее правило программы (plates.normalize_plate)"""
+    return normalize_plate(plate)
 
 
 def _phone_key(phone):

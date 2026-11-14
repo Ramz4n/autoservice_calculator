@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 # Импорт класса для работы с базой данных
 from database import Database
 import web_sync
+from plates import plate_problem, PLATE_EXAMPLE
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
 import backup as backup_module
@@ -1041,7 +1042,8 @@ class AutoServiceApp:
 
     # ===== Оформление окон-форм ("Записать клиента", "Добавить запчасть"): блоки-карточки, поля во всю ширину =====
     FORM_CARD_BORDER = "#dfe3e8"
-    FORM_STATE_BORDERS = {"found": "#66bb6a", "new": "#ffa726"}  # машина найдена / новая машина
+    FORM_STATE_BORDERS = {"found": "#66bb6a", "new": "#ffa726",   # машина найдена / новая машина
+                          "error": "#e53935"}                      # ошибка (госномер с ошибкой)
     FORM_STATE_COLORS = {"found": "#2e7d32", "new": "#ef6c00", "warn": "#ef6c00"}
     FORM_ERROR_BORDER = "#e53935"
 
@@ -1257,6 +1259,33 @@ class AutoServiceApp:
         entry.configure(border_color=self.FORM_ERROR_BORDER)
         entry.focus_set()
         messagebox.showwarning(self.tr("common.attention"), self.tr(message_key), parent=window)
+
+    def confirm_new_plate(self, plate, parent=None, entry=None):
+        """Перед сохранением новой машины: госномер похож на ошибку (пропущена первая буква, буквы,
+        которых нет в российских номерах, не по образцу) - спросить "Сохранить так?".
+        Нет - курсор в поле госномера, возвращает False. Номера других стран (латиница) не трогаем"""
+        problem = plate_problem(plate)
+        if not problem:
+            return True
+        kind, value = problem
+        if kind == "missing_letter":
+            text = self.tr("plates.missing_letter", plate=value)
+            similar = self.db.find_cars_with_first_letter_missing(value)
+            if similar:
+                cars = "\n".join("• " + " ".join(x for x in (car["car_number"], car["car_brand"], car["car_model"]) if x)
+                                 + (f" — {car['owner_name']}" if car["owner_name"] else "") for car in similar)
+                text += self.tr("plates.similar_cars", cars=cars)
+        elif kind == "bad_letters":
+            text = self.tr("plates.bad_letters", letters=value)
+        else:
+            text = self.tr("plates.bad_format", plate=value, example=PLATE_EXAMPLE)
+        if messagebox.askyesno(self.tr("plates.check_title"), text + self.tr("plates.save_anyway"),
+                               icon="warning", parent=parent or self.root):
+            return True
+        if entry is not None:
+            entry.configure(border_color=self.FORM_ERROR_BORDER)
+            entry.focus_set()
+        return False
 
     def form_clear_error_on_type(self, entries):
         """Красная рамка снимается, как только поле начали править"""
@@ -2287,6 +2316,8 @@ class AutoServiceApp:
         # Начали вводить госномер / телефон - запись начата: рамки карточек получают цвет
         for entry in (self.car_number_entry, self.client_phone_entry):
             entry.bind("<KeyRelease>", lambda e: self.works_update_card_marks(), add="+")
+        # Ушли из госномера - проверить номер целиком (не по образцу - красным только после ввода)
+        self.car_number_entry.bind("<FocusOut>", lambda e: self.root.after(250, self.works_update_card_marks), add="+")
         # Подсказка имён - список под полем, поверх строк ниже
         self.attach_name_autocomplete(self.client_name_entry, col, position="below")
 
@@ -2424,7 +2455,13 @@ class AutoServiceApp:
                 owner_state = "found"
             self.form_set_card_state(owner_card, owner_state)
             # Чего не хватает - рамкой самого поля (как у "Мастера"); пока госномер / телефон вводят - не красим
+            # Госномер с ошибкой - красным вместо результата поиска; исправили - снова результат поиска
+            plate_error = self.show_plate_error(self.car_number_entry, owner_card, self.works_lookup_status,
+                                                restore=self.works_show_lookup_status,
+                                                place_label=self.works_place_plate_error)
             self.works_mark_missing_fields(missing if owner_state else [])
+            if plate_error:
+                return
             # "Новая машина" / "Новый клиент": всё нужное вписано - надпись зелёная,
             # иначе - что именно осталось заполнить (надпись о смене владельца и другие не трогаем)
             if lookup == "new" and text in ready_texts and self.works_lookup_status.winfo_manager():
@@ -2743,9 +2780,15 @@ class AutoServiceApp:
     def works_set_lookup_state(self, state, text=""):
         """Результат поиска: строка под госномером и рамка карточки.
         state: "found" - зелёная, "new" - оранжевая, "pick" - красный текст (выбрать машину), None - обычная"""
-        colors = {"found": self.FORM_STATE_COLORS["found"], "new": self.FORM_STATE_COLORS["new"], "pick": "#c62828"}
         self.works_lookup_state = state
         self.works_lookup_text = text
+        self.works_show_lookup_status()
+        self.works_update_card_marks()
+
+    def works_show_lookup_status(self):
+        """Строка под госномером - результат поиска (works_lookup_state / works_lookup_text) или подсказка"""
+        colors = {"found": self.FORM_STATE_COLORS["found"], "new": self.FORM_STATE_COLORS["new"], "pick": "#c62828"}
+        state, text = self.works_lookup_state, self.works_lookup_text
         if state and text:
             self.works_lookup_status.configure(text=text, text_color=colors[state])
             self.works_lookup_status.pack(fill=tk.X, pady=(0, 6), after=self.works_search_row)
@@ -2754,7 +2797,6 @@ class AutoServiceApp:
             self.works_lookup_status.configure(text="")
             self.works_lookup_status.pack_forget()
             self.works_lookup_hint.pack(fill=tk.X, pady=(0, 4), before=self.works_search_row)
-        self.works_update_card_marks()
 
     def works_car_data_ready(self):
         """Для сохранения хватает данных о машине: госномер, марка и модель (VIN и пробег - по желанию)"""
@@ -2772,12 +2814,65 @@ class AutoServiceApp:
             missing.append("phone")
         return missing
 
+    def show_plate_error(self, entry, card, label, restore, place_label, fit=None):
+        """Госномер с ошибкой - одинаково во всех формах ("Добавить работу", "Записать клиента", склад,
+        "Изменить данные"): поле и карточка красной рамкой, в строке label красным - что не так.
+        Номер исправили - рамка поля обычная, строку возвращает форма (restore - показать в label своё:
+        "найдена" / "новая машина" или спрятать). Рамку карточки без ошибки ставит сама форма.
+        place_label - показать label на своём месте формы; fit - подогнать размер окна.
+        Возвращает True, если ошибка есть (форме тогда не перекрашивать карточку и строку)"""
+        if not hasattr(entry, "_plate_normal_border"):
+            entry._plate_normal_border = entry.cget("border_color")
+        error = self.plate_error_text(entry)
+        if error:
+            entry._plate_error_shown = True
+            entry.configure(border_color=self.FORM_ERROR_BORDER)
+            self.form_set_card_state(card, "error")
+            label.configure(text=error, text_color=self.FORM_ERROR_BORDER)
+            if not label.winfo_manager():
+                place_label()
+                if fit:
+                    entry.after_idle(fit)
+            return True
+        if getattr(entry, "_plate_error_shown", False):
+            entry._plate_error_shown = False
+            entry.configure(border_color=entry._plate_normal_border)
+            restore()
+            if fit:
+                entry.after_idle(fit)
+        return False
+
+    def plate_error_text(self, entry):
+        """Госномер в поле entry похож на ошибку - короткий текст, что не так, иначе "".
+        Пропущенная первая буква и буквы не из госномеров - сразу; "не по образцу" - когда номер
+        уже ввели (курсор ушёл из поля), а не на середине ввода"""
+        problem = plate_problem(entry.get())
+        if not problem:
+            return ""
+        kind, value = problem
+        if kind == "missing_letter":
+            return self.tr("plates.short_missing_letter", plate=value)
+        if kind == "bad_letters":
+            return self.tr("plates.short_bad_letters", letters=value)
+        try:
+            typing = entry.focus_get() is getattr(entry, "_entry", None)
+        except (KeyError, tk.TclError):
+            typing = False
+        return "" if typing else self.tr("plates.short_bad_format", example=PLATE_EXAMPLE)
+
+    def works_place_plate_error(self):
+        """Строка "госномер с ошибкой" - на месте строки результата поиска (подсказку над полями убираем)"""
+        self.works_lookup_hint.pack_forget()
+        self.works_lookup_status.pack(fill=tk.X, pady=(0, 6), after=self.works_search_row)
+
     def works_mark_missing_fields(self, missing):
         """Поля, которых не хватает, - оранжевой рамкой, остальные - обычной"""
         fields = self.works_lookup_fields()
         if not hasattr(self, "_works_field_border"):
             self._works_field_border = fields["number"].cget("border_color")
         for key in ("number", "brand", "model", "phone"):
+            if getattr(fields[key], "_plate_error_shown", False):
+                continue   # госномер с ошибкой - красная рамка (show_plate_error), не перекрашиваем
             color = self.FORM_STATE_BORDERS["new"] if key in missing else self._works_field_border
             if fields[key].cget("border_color") != color:
                 fields[key].configure(border_color=color)
@@ -3322,6 +3417,14 @@ class AutoServiceApp:
             self.works_set_lookup_state(None)
         elif fill:
             return  # этот номер уже найден и подставлен
+        # "Новая машина" показана для другого номера (номер стёрли или поменяли) - строку убираем,
+        # по новому номеру поиск покажет своё
+        new_car_number = getattr(self, "_works_new_car_number", None)
+        if new_car_number and new_car_number != car_number.upper():
+            self._works_new_car_number = None
+            if getattr(self, "works_lookup_state", None) == "new" \
+                    and getattr(self, "works_lookup_text", "") == self.tr("works.lookup_new_car"):
+                self.works_set_lookup_state(None)
         if car_number.upper() != getattr(self, "_works_looked_up_number", None):
             self._works_looked_up_number = None
         elif self._works_looked_up_number:
@@ -3344,6 +3447,7 @@ class AutoServiceApp:
         if not clients:
             if not live:
                 self.works_set_lookup_state("new", self.tr("works.lookup_new_car"))
+                self._works_new_car_number = car_number.upper()   # для этого номера - стёрли / поменяли: убрать
             return
 
         self._works_looked_up_number = car_number.upper()
@@ -4270,6 +4374,10 @@ class AutoServiceApp:
         if not car_number:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"))
             return
+        # Машины с таким госномером ещё нет - проверить номер (пропущена первая буква, не те буквы)
+        if not self.db.get_car_info_by_number(car_number) and not self.confirm_new_plate(
+                car_number, entry=self.car_number_entry):
+            return
 
         # VIN короче стандартных 17 символов - предупреждаем
         if vin and len(vin) < VIN_LENGTH:
@@ -4785,6 +4893,9 @@ class AutoServiceApp:
         # Машина ищется сама по мере ввода (как в "Записать клиента"), кнопка "Найти" не нужна
         self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.search_car_for_warehouse())
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
+        # Госномер с ошибкой - красным сразу при вводе ("не по образцу" - когда ушли из поля)
+        self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.wh_update_plate_error(), add="+")
+        self.wh_car_number_entry.bind('<FocusOut>', lambda e: window.after(150, self.wh_update_plate_error), add="+")
         # Enter в госномере - поиск машины, а не "Заказать"
         self.wh_car_number_entry.bind('<Return>', lambda e: (self.search_car_for_warehouse(), "break")[1])
         self.attach_phone_mask(self.wh_phone_entry)
@@ -4815,7 +4926,8 @@ class AutoServiceApp:
         self.wh_new_car_visible = False
         frame = self.wh_new_car_frame
         self.form_label(frame, self.tr("bookings.add_window_brand"), required=True).grid(row=0, column=0, sticky="w")
-        self.form_label(frame, self.tr("bookings.add_window_model")).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.form_label(frame, self.tr("bookings.add_window_model"), required=True).grid(row=0, column=1, sticky="w",
+                                                                                     padx=(10, 0))
         self.form_label(frame, self.tr("works.client_name")).grid(row=0, column=2, sticky="w", padx=(10, 0))
         self.wh_new_brand_entry = self.form_entry(frame)
         self.wh_new_brand_entry.grid(row=1, column=0, sticky="ew")
@@ -4953,7 +5065,21 @@ class AutoServiceApp:
 
     def set_wh_car_status(self, text, state=None):
         """Строка о машине в форме склада и цвет рамки карточки.
-        state: "found" - найдена, "new" - новая машина (нужны данные), "warn" - подсказка, None - пусто"""
+        state: "found" - найдена, "new" - новая машина (нужны данные), "warn" - подсказка, None - пусто.
+        Госномер с ошибкой - вместо этого красная строка и рамки (wh_update_plate_error)"""
+        self.wh_car_status = (text, state)
+        if not self.wh_update_plate_error():
+            self._show_wh_car_status(text, state)
+
+    def wh_update_plate_error(self):
+        """Госномер на складе с ошибкой - красным (show_plate_error); исправили - снова строка о машине"""
+        return self.show_plate_error(
+            self.wh_car_number_entry, self.wh_car_card, self.wh_car_info_label,
+            restore=lambda: self._show_wh_car_status(*getattr(self, "wh_car_status", ("", None))),
+            place_label=lambda: self.wh_car_info_label.pack(fill=tk.X, pady=(6, 0)),
+            fit=lambda: self.fit_form_window(self.add_part_form_frame))
+
+    def _show_wh_car_status(self, text, state=None):
         self.wh_car_info_label.configure(text=text, text_color=self.FORM_STATE_COLORS.get(state, "gray"))
         if text:
             self.wh_car_info_label.pack(fill=tk.X, pady=(6, 0))
@@ -5305,12 +5431,20 @@ class AutoServiceApp:
             if not brand:
                 self.form_mark_error(self.wh_new_brand_entry, "warehouse.msg_enter_car_brand", self.add_part_form_frame)
                 return
+            # Модель обязательна, как в "Записать клиента" и "Добавить работу"
+            if not model:
+                self.form_mark_error(self.wh_new_model_entry, "works.msg_enter_model", self.add_part_form_frame)
+                return
 
             # Проверка телефона: должен быть +7 и 10 цифр
             if len(phone_digits) != 10:
                 self.form_mark_error(self.wh_phone_entry, "warehouse.msg_enter_full_phone", self.add_part_form_frame)
                 return
             phone = "+7" + phone_digits
+
+            # Новая машина - проверить госномер (пропущена первая буква, не те буквы)
+            if not self.confirm_new_plate(car_number, self.add_part_form_frame, self.wh_car_number_entry):
+                return
 
             # Создаём или находим клиента
             client_id = self.db.get_or_create_client(
@@ -5323,7 +5457,7 @@ class AutoServiceApp:
             car_id = self.db.get_or_create_car(
                 client_id=client_id,
                 car_brand=brand,
-                car_model=model if model else "",
+                car_model=model,
                 car_number=car_number
             )
 
@@ -8354,7 +8488,11 @@ class AutoServiceApp:
         """Удалить выбранную запись"""
         booking_id = self.get_selected_booking_id()
         if booking_id:
-            if messagebox.askyesno(self.tr("common.confirm"), self.tr("bookings.msg_confirm_delete")):
+            # Наряды записи удаляются вместе с ней (иначе висят в зарплате мастера) - предупреждаем об этом
+            works_count = len(self.db.get_all_works_by_booking_id(booking_id) or [])
+            question = (self.tr("bookings.msg_confirm_delete_with_works", count=works_count) if works_count
+                        else self.tr("bookings.msg_confirm_delete"))
+            if messagebox.askyesno(self.tr("common.confirm"), question):
                 self.db.delete_booking(booking_id)
                 self.refresh_bookings()
                 messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_deleted"))
@@ -8562,14 +8700,30 @@ class AutoServiceApp:
 
         car_state = [None]
 
+        car_status_text = [""]
+
+        def restore_car_status():
+            """Госномер исправили - снова строка о машине (найдена / новая) или ничего"""
+            if car_status_text[0]:
+                car_status_label.configure(text=car_status_text[0],
+                                           text_color=self.FORM_STATE_COLORS.get(car_state[0], "#ef6c00"))
+            else:
+                car_status_label.pack_forget()
+
         def update_card_marks(*args):
             """Рамки карточек: всё нужное заполнено - зелёная, чего-то не хватает - оранжевая, пустая форма - обычная.
-            "Автомобиль": найдено авто или у нового вписаны марка и модель; "Клиент": телефон и имя"""
+            "Автомобиль": найдено авто или у нового вписаны марка и модель; "Клиент": телефон и имя.
+            Госномер с ошибкой - поле и карточка красные, под госномером красным, что не так"""
             state = car_state[0]
             if state == "new" and brand_entry.get().strip() and model_entry.get().strip():
                 state = "found"
-            self.form_set_card_state(car_card, state)
-            if car_state[0] == "new":
+            plate_error = self.show_plate_error(
+                car_number_entry, car_card, car_status_label, restore=restore_car_status,
+                place_label=lambda: car_status_label.pack(fill=tk.X, pady=(6, 0), after=car_number_entry),
+                fit=fit_window)
+            if not plate_error:
+                self.form_set_card_state(car_card, state)
+            if car_state[0] == "new" and not plate_error:
                 car_status_label.configure(text_color=self.FORM_STATE_COLORS[state])
             started = bool(car_number_entry.get().strip() or phone_mask_digits(phone_entry.get())
                            or name_entry.get().strip())
@@ -8579,6 +8733,7 @@ class AutoServiceApp:
         def set_car_state(state, text=""):
             """state: None - пусто, "found" - авто найдено, "new" - новое авто (нужны марка и модель)"""
             car_state[0] = state
+            car_status_text[0] = text
             if text:
                 car_status_label.configure(text=text, text_color=self.FORM_STATE_COLORS.get(state, "#ef6c00"))
                 car_status_label.pack(fill=tk.X, pady=(6, 0), after=car_number_entry)
@@ -9104,6 +9259,9 @@ class AutoServiceApp:
                     return
                 if not model:
                     mark_error(model_entry, "works.msg_enter_model")
+                    return
+                # Новая машина - проверить госномер (пропущена первая буква, не те буквы)
+                if not self.confirm_new_plate(number, add_window, car_number_entry):
                     return
 
             # Валидация телефона - должен быть +7 и 10 цифр после
@@ -10081,66 +10239,290 @@ class AutoServiceApp:
         self.info_window_show(window, width, body)
 
     def edit_client_info(self):
-        """Открыть окно редактирования имени/телефона клиента — исправление
-        опечаток оператором (например, неверно введённый номер телефона)."""
-        selection = self.bookings_tree.selection()
-        if not selection:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_booking"))
+        """Окно "Изменить данные клиента и машины" (ПКМ в "Записях") - исправление опечаток оператором.
+        Оформлено как "Записать клиента": блоки "Автомобиль" и "Клиент". Правит ту же машину и того же
+        клиента (история нарядов и записей остаётся при них), сохраняет только изменённое.
+        Смена владельца (машину продали) - не здесь, а в "Добавить работу" с вопросом о новом владельце."""
+        booking_id = self.get_selected_booking_id()   # ничего не выбрано - сама предупредит
+        if not booking_id:
             return
-
-        values = self.bookings_tree.item(selection[0], "values")
-        if not values:
-            return
-
-        booking_id = values[0] if len(values) > 0 else None
-        booking = self.db.get_booking_by_id(int(booking_id)) if booking_id else None
+        booking = self.db.get_booking_by_id(int(booking_id))
         client_id = booking.get("client_id") if booking else None
-
-        if not client_id:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_client_data"))
-            return
-
-        client = self.db.get_client_by_id(client_id)
+        client = self.db.get_client_by_id(client_id) if client_id else None
         if not client:
             messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_client_data"))
             return
+        car = self.db.get_car_details(booking.get("car_id"))
 
-        dialog = ctk.CTkToplevel(self.root)
-        dialog.title(self.tr("bookings.edit_client_title"))
-        dialog.geometry("360x330")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
+        # Затемнение главного окна - одно на всю программу, окно-форма строится на каждое открытие
+        overlay = getattr(self, "_edit_data_overlay", None)
+        if overlay is None or not overlay.winfo_exists():
+            overlay = self._edit_data_overlay = self.make_dim_overlay()
 
-        form = ctk.CTkFrame(dialog, fg_color="transparent")
-        form.pack(padx=25, pady=20, fill="x")
+        window = ctk.CTkToplevel(self.root)
+        window.withdraw()  # строим скрытым - покажем один раз, когда всё готово
+        window.title(self.tr("bookings.edit_client_title"))
+        window.transient(self.root)
+        window.dim_overlay = overlay
+        window.resizable(False, False)
+        content = self.form_content(window)
+        field_label = self.form_label
+        make_entry = self.form_entry
 
-        ctk.CTkLabel(form, text=self.tr("bookings.client_name_label"), anchor="w").pack(fill="x", pady=(0, 2))
-        name_var = tk.StringVar(value=client.get("full_name") or "")
-        ctk.CTkEntry(form, textvariable=name_var, height=36).pack(fill="x", pady=(0, 12))
+        def hint(parent, text):
+            ctk.CTkLabel(parent, text=text, font=("Arial", 11), text_color="#78909c", anchor="w", justify="left",
+                         wraplength=430).pack(fill=tk.X, pady=(8, 0))
 
-        ctk.CTkLabel(form, text=self.tr("bookings.col_phone"), anchor="w").pack(fill="x", pady=(0, 2))
-        phone_var = tk.StringVar(value=client.get("phone") or "")
-        ctk.CTkEntry(form, textvariable=phone_var, height=36).pack(fill="x", pady=(0, 12))
+        def two_columns(parent, weights=(1, 1)):
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill=tk.X, pady=(6, 0))
+            for col, weight in enumerate(weights):
+                row.grid_columnconfigure(col, weight=weight, uniform="cols" if weights == (1, 1) else None)
+            return row
 
-        ctk.CTkLabel(form, text=self.tr("bookings.client_telegram_label"), anchor="w").pack(fill="x", pady=(0, 2))
-        telegram_var = tk.StringVar(value=client.get("tg_username") or "")
-        ctk.CTkEntry(form, textvariable=telegram_var, placeholder_text="username", height=36).pack(fill="x", pady=(0, 4))
-        ctk.CTkLabel(form, text=self.tr("bookings.client_telegram_hint"), anchor="w", justify="left",
-                     font=("Segoe UI", 10), text_color="gray", wraplength=300).pack(fill="x", pady=(0, 12))
+        popups = []
 
-        def on_save():
-            self.db.update_client(client_id, name_var.get().strip(), phone_var.get().strip(), telegram_var.get().strip())
-            dialog.destroy()
-            messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_client_updated"))
+        def hide_popups():
+            for listbox in popups:
+                self.hide_popup(listbox)
+
+        def attach_suggestions(entry, search, next_entry):
+            """Подсказки под полем (марки, модели) - как в "Записать клиента" """
+            listbox = self.form_popup_listbox(content)
+            popups.append(listbox)
+
+            def on_key(event=None):
+                if event is not None and event.keysym in ("Return", "Escape", "Tab"):
+                    return
+                results = search(entry.get().strip())
+                if results and entry.get().strip() not in results[:1]:
+                    listbox.delete(0, tk.END)
+                    for value in results:
+                        listbox.insert(tk.END, value)
+                    self.place_popup(listbox, entry)
+                else:
+                    self.hide_popup(listbox)
+
+            def on_select(event):
+                sel = listbox.curselection()
+                if sel:
+                    entry.delete(0, tk.END)
+                    entry.insert(0, listbox.get(sel[0]))
+                    self.hide_popup(listbox)
+                    next_entry.focus_set()
+
+            def hide_later(event):
+                window.after(200, lambda: window.winfo_exists() and window.focus_get() is not listbox
+                             and self.hide_popup(listbox))
+
+            entry.bind("<KeyRelease>", on_key, add="+")
+            entry.bind("<FocusOut>", hide_later, add="+")
+            listbox.bind("<<ListboxSelect>>", on_select)
+
+        # === АВТОМОБИЛЬ ===
+        car_card, car_body = self.form_section(content, self.tr("bookings.section_car"))
+        car_entries = {}
+        if car:
+            field_label(car_body, self.tr("works.car_number"), required=True).pack(fill=tk.X)
+            number_entry = make_entry(car_body, placeholder_text="А123БВ777")
+            number_entry.pack(fill=tk.X)
+            number_entry.insert(0, car["car_number"])
+            # Госномер с ошибкой - красным под полем, что не так (как в "Записать клиента")
+            plate_error_label = ctk.CTkLabel(car_body, text="", font=("Arial", 13, "bold"), anchor="w")
+
+            row = two_columns(car_body)
+            field_label(row, self.tr("bookings.add_window_brand"), required=True).grid(row=0, column=0, sticky="w")
+            field_label(row, self.tr("bookings.add_window_model"), required=True).grid(row=0, column=1, sticky="w",
+                                                                                     padx=(10, 0))
+            brand_entry = make_entry(row)
+            brand_entry.grid(row=1, column=0, sticky="ew")
+            brand_entry.insert(0, car["car_brand"])
+            model_entry = make_entry(row)
+            model_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+            model_entry.insert(0, car["car_model"])
+
+            row = two_columns(car_body, weights=(3, 2))
+            vin_head = ctk.CTkFrame(row, fg_color="transparent")
+            vin_head.grid(row=0, column=0, sticky="ew")
+            field_label(vin_head, self.tr("works.vin")).pack(side=tk.LEFT)
+            vin_counter = ctk.CTkLabel(vin_head, text="", font=("Arial", 11))
+            vin_counter.pack(side=tk.RIGHT)
+            field_label(row, self.tr("works.mileage")).grid(row=0, column=1, sticky="w", padx=(10, 0))
+            vin_var = tk.StringVar(value=car["vin"])
+            vin_entry = make_entry(row, textvariable=vin_var)
+            vin_entry.grid(row=1, column=0, sticky="ew")
+            mileage_var = tk.StringVar(value=str(car["mileage"] or ""))
+            mileage_entry = make_entry(row, textvariable=mileage_var)
+            mileage_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+
+            def on_vin_change(*args):
+                # Как в "Добавить работу": без пробелов, заглавными, не длиннее 17, счётчик символов
+                value = vin_var.get()
+                cleaned = re.sub(r"\s", "", value).upper()[:VIN_LENGTH]
+                if cleaned != value:
+                    vin_var.set(cleaned)
+                length = len(cleaned)
+                vin_counter.configure(text=f"{length}/{VIN_LENGTH}" if length else "",
+                                      text_color="#22c55e" if length == VIN_LENGTH else "#ef4444")
+
+            def on_mileage_change(*args):
+                value = mileage_var.get()
+                digits = re.sub(r"\D", "", value)[:7]
+                if digits != value:
+                    mileage_var.set(digits)
+
+            vin_var.trace_add("write", on_vin_change)
+            mileage_var.trace_add("write", on_mileage_change)
+            on_vin_change()
+            on_mileage_change()
+
+            attach_suggestions(brand_entry, self.db.search_car_brands, model_entry)
+            attach_suggestions(model_entry, lambda text: self.db.search_car_models(brand_entry.get().strip(), text)
+                               if brand_entry.get().strip() else [], vin_entry)
+            car_entries = {"number": number_entry, "brand": brand_entry, "model": model_entry, "vin": vin_entry,
+                           "mileage": mileage_entry}
+            hint(car_body, self.tr("bookings.edit_car_hint"))
+        else:
+            ctk.CTkLabel(car_body, text=self.tr("bookings.edit_no_car"), font=("Arial", 13),
+                         text_color="#90a4ae", anchor="w").pack(fill=tk.X)
+
+        # === КЛИЕНТ: телефон и имя рядом, ниже Telegram ===
+        client_card, client_body = self.form_section(content, self.tr("bookings.section_client"))
+        row = ctk.CTkFrame(client_body, fg_color="transparent")
+        row.pack(fill=tk.X)
+        row.grid_columnconfigure((0, 1), weight=1, uniform="client")
+        field_label(row, self.tr("bookings.add_window_phone")).grid(row=0, column=0, sticky="w")
+        field_label(row, self.tr("works.client_name")).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        phone_entry = make_entry(row)
+        phone_entry.grid(row=1, column=0, sticky="ew")
+        self.attach_phone_mask(phone_entry)
+        self.set_phone_value(phone_entry, client["phone"] or "")
+        name_entry = make_entry(row)
+        name_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        name_entry.insert(0, client["full_name"] or "")
+        self.attach_name_autocomplete(name_entry, content, position="below")
+
+        field_label(client_body, self.tr("bookings.client_telegram_label")).pack(fill=tk.X, pady=(6, 0))
+        telegram_entry = make_entry(client_body, placeholder_text="username")
+        telegram_entry.pack(fill=tk.X)
+        if client["tg_username"]:
+            telegram_entry.insert(0, client["tg_username"])
+        hint(client_body, self.tr("bookings.client_telegram_hint"))
+        hint(client_body, self.tr("bookings.edit_client_hint"))
+
+        # Рамка карточки зелёная, когда в ней что-то исправлено - видно, что именно уйдёт в базу
+        original_car = {k: v.get().strip() for k, v in car_entries.items()}
+        original_client = (phone_mask_digits(phone_entry.get()), name_entry.get().strip(),
+                           telegram_entry.get().strip().lstrip("@"))
+
+        def current_client():
+            return (phone_mask_digits(phone_entry.get()), name_entry.get().strip(),
+                    telegram_entry.get().strip().lstrip("@"))
+
+        def car_changed():
+            return any(car_entries[k].get().strip().upper() != original_car[k].upper() for k in car_entries)
+
+        def update_card_marks(*args):
+            if car_entries and not self.show_plate_error(
+                    car_entries["number"], car_card, plate_error_label, restore=plate_error_label.pack_forget,
+                    place_label=lambda: plate_error_label.pack(fill=tk.X, pady=(6, 0), after=car_entries["number"]),
+                    fit=lambda: self.fit_form_window(window)):
+                self.form_set_card_state(car_card, "found" if car_changed() else None)
+            self.form_set_card_state(client_card, "found" if current_client() != original_client else None)
+
+        all_entries = list(car_entries.values()) + [phone_entry, name_entry, telegram_entry]
+        for entry in all_entries:
+            entry.bind("<KeyRelease>", lambda e: window.after_idle(update_card_marks), add="+")
+            entry.bind("<FocusOut>", lambda e: window.after(250, update_card_marks), add="+")
+        self.form_clear_error_on_type(all_entries)
+
+        def mark_error(entry, message_key, **kwargs):
+            entry.configure(border_color=self.FORM_ERROR_BORDER)
+            entry.focus_set()
+            messagebox.showwarning(self.tr("common.attention"), self.tr(message_key, **kwargs), parent=window)
+
+        def close():
+            hide_popups()
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            window.destroy()
+            overlay.withdraw()
+
+        def save():
+            hide_popups()
+            save_car = bool(car_entries) and car_changed()
+            if save_car:
+                number = car_entries["number"].get().strip().upper()
+                brand = car_entries["brand"].get().strip()
+                model = car_entries["model"].get().strip()
+                vin = car_entries["vin"].get().strip().upper()
+                mileage = car_entries["mileage"].get().strip() or None
+                if not number:
+                    return mark_error(car_entries["number"], "works.msg_enter_car_number")
+                if not brand:
+                    return mark_error(car_entries["brand"], "works.msg_enter_brand")
+                if not model:
+                    return mark_error(car_entries["model"], "works.msg_enter_model")
+                if number != original_car["number"].upper() and not self.confirm_new_plate(
+                        number, window, car_entries["number"]):
+                    return
+                if vin and len(vin) < VIN_LENGTH and vin != original_car["vin"].upper():
+                    if not messagebox.askyesno(self.tr("common.attention"),
+                                               self.tr("works.vin_too_short", count=len(vin), required=VIN_LENGTH),
+                                               parent=window):
+                        car_entries["vin"].focus_set()
+                        return
+                # Госномер / VIN уже у другой машины - не сохраняем, иначе в базе две машины с одним номером.
+                # Проверяем только изменённое: старые дубли VIN в базе не должны мешать поправить марку
+                clash = self.db.find_other_car(car["id"],
+                                               number if number != original_car["number"].upper() else None,
+                                               vin if vin != original_car["vin"].upper() else None)
+                if clash:
+                    field, other = clash
+                    title = " ".join(x for x in (other["car_brand"], other["car_model"], other["car_number"]) if x)
+                    return mark_error(car_entries["number" if field == "number" else "vin"],
+                                      "bookings.msg_plate_taken" if field == "number" else "bookings.msg_vin_taken",
+                                      number=number, vin=vin, car=title,
+                                      owner=other["owner_name"] or self.tr("common.no_name"))
+
+            phone_digits, name, telegram = current_client()
+            save_client = (phone_digits, name, telegram) != original_client
+            if save_client:
+                if phone_digits and len(phone_digits) != 10:
+                    return mark_error(phone_entry, "bookings.msg_enter_phone_after_plus7")
+                if phone_digits and phone_digits != original_client[0]:
+                    other = self.db.find_other_client_by_phone(phone_digits, client_id)
+                    if other and not messagebox.askyesno(
+                            self.tr("common.attention"),
+                            self.tr("bookings.msg_phone_taken", phone=format_phone_ru(phone_digits),
+                                    name=other["full_name"] or self.tr("common.no_name")), parent=window):
+                        phone_entry.focus_set()
+                        return
+
+            if not save_car and not save_client:
+                close()
+                return
+            try:
+                if save_car:
+                    self.db.update_car_info(car["id"], brand, model, number, vin, mileage)
+                if save_client:
+                    self.db.update_client(client_id, name, "+7" + phone_digits if phone_digits else "", telegram)
+            except Exception as e:
+                messagebox.showerror(self.tr("common.error"), str(e), parent=window)
+                return
+            close()
+            messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_data_updated"))
             self.refresh_bookings()
 
-        btn_row = ctk.CTkFrame(form, fg_color="transparent")
-        btn_row.pack(fill="x")
-        ctk.CTkButton(btn_row, text=self.tr("common.save"), command=on_save,
-                      fg_color="#4caf50", hover_color="#388e3c", width=130).pack(side=tk.LEFT, padx=(0, 10))
-        ctk.CTkButton(btn_row, text=self.tr("common.cancel"), command=dialog.destroy,
-                      fg_color="gray", width=130).pack(side=tk.LEFT)
+        window.protocol("WM_DELETE_WINDOW", close)
+        self.form_buttons(window, self.tr("common.save"), save, close)
+        self.form_bind_keys(window, content, save, close, hide_popups)
+
+        update_card_marks()   # госномер уже с ошибкой (заведён раньше) - сразу видно
+        self.show_dim_overlay(overlay)
+        self.show_form_window_when_ready(window, car_entries.get("number") or phone_entry)
 
 
 _SINGLE_INSTANCE_MUTEX_NAME = "AutoService_Alexan_SingleInstance_Mutex"

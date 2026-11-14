@@ -13,6 +13,7 @@ from tkinter import messagebox
 
 from db_config import DB_CONFIG, get_base_path
 from db_schema import TABLES, INDEXES, MIGRATIONS
+from plates import normalize_plate, plate_search_key
 
 
 def normalize_phone(phone):
@@ -91,7 +92,8 @@ class Database:
         # структуру уже работающей базы - полная копия в папку Backup (её видно и можно восстановить
         # во вкладке "Резервное копирование"). Сами изменения ничего не удаляют: добавляется пустое поле
         # и заполняется у старых нарядов
-        if not self._column_exists(cursor, "works", "client_id") or self._part_names_need_cleanup(cursor):
+        plate_fixes = self._car_numbers_to_normalize(cursor)
+        if not self._column_exists(cursor, "works", "client_id") or self._part_names_need_cleanup(cursor)                 or plate_fixes:
             conn.commit()
             self._backup_before_migration()
 
@@ -115,8 +117,37 @@ class Database:
                     "Данные не изменены и не удалены, но отчёты и редактирование записей работать не будут.\n\n"
                     f"Ошибка: {e}")
 
+        # Госномера - в одном написании: заглавными, без пробелов, российские - кириллицей
+        # (A123BC77 латиницей и "А 123 ВС 77" -> А123ВС77), иначе поиск их не находит
+        for car_id, number in plate_fixes:
+            try:
+                cursor.execute("UPDATE client_cars SET car_number = %s WHERE id = %s", (number, car_id))
+            except MySQLError as e:
+                print(f"Госномер машины {car_id} не приведён к виду {number}: {e}")
+
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _car_numbers_to_normalize(cursor):
+        """Машины, у которых госномер записан не в едином виде (plates.normalize_plate): [(id, новый номер)].
+        Если в базе уже есть машина с таким номером (одна машина заведена дважды: латиницей и кириллицей),
+        её не трогаем - иначе две машины с одним номером; такие дубли объединяют вручную"""
+        try:
+            cursor.execute("SELECT id, car_number FROM client_cars WHERE car_number IS NOT NULL AND car_number <> ''")
+            rows = cursor.fetchall()
+        except MySQLError:
+            return []
+        taken = {(number or "").upper() for _, number in rows}
+        fixes = []
+        for car_id, number in rows:
+            fixed = normalize_plate(number)
+            if fixed and fixed != number:
+                if fixed.upper() in taken and fixed.upper() != number.upper():
+                    continue
+                taken.add(fixed.upper())
+                fixes.append((car_id, fixed))
+        return fixes
 
     @staticmethod
     def _part_names_need_cleanup(cursor):
@@ -766,9 +797,9 @@ class Database:
             JOIN workers w ON wk.worker_id = w.id
             LEFT JOIN client_cars cc ON wk.car_id = cc.id
             LEFT JOIN clients cl ON cl.id = COALESCE(wk.client_id, cc.client_id)
-            WHERE UPPER(cc.car_number) LIKE %s
+            WHERE UPPER(REPLACE(cc.car_number, ' ', '')) LIKE %s OR UPPER(REPLACE(cc.car_number, ' ', '')) LIKE %s
             ORDER BY wk.work_date DESC
-        ''', (f'%{car_number.upper()}%',))
+        ''', ('%' + re.sub(r'\s', '', car_number).upper() + '%', '%' + plate_search_key(car_number) + '%'))
         works = cursor.fetchall()
         conn.close()
         return works
@@ -1279,8 +1310,10 @@ class Database:
         if search:
             like = f"%{search}%"
             conditions = ["LOWER(COALESCE(c.phone, '')) LIKE %s", "LOWER(COALESCE(cc.car_number, '')) LIKE %s",
-                          "LOWER(CONCAT_WS(' ', cc.car_brand, cc.car_model, cc.car_number)) LIKE %s"]
-            params += [like, like, like]
+                          "LOWER(CONCAT_WS(' ', cc.car_brand, cc.car_model, cc.car_number)) LIKE %s",
+                          # Госномер набран латиницей (a123bc) или с пробелами - ищем как А123ВС
+                          "UPPER(REPLACE(COALESCE(cc.car_number, ''), ' ', '')) LIKE %s"]
+            params += [like, like, like, f"%{plate_search_key(search)}%"]
             digits = re.sub(r"\D", "", search)
             if digits:
                 conditions.append("REGEXP_REPLACE(COALESCE(c.phone, ''), '[^0-9]', '') LIKE %s")
@@ -1359,12 +1392,24 @@ class Database:
         conn.close()
 
     def delete_booking(self, booking_id):
-        """Удалить запись"""
+        """Удалить запись вместе с её нарядами (works), иначе работы остаются в зарплате мастера в "Отчётах".
+        Запчасти наряда (parts) удаляются каскадом, складские позиции отвязываются от наряда."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM bookings WHERE id = %s", (booking_id,))
-        conn.commit()
-        conn.close()
+        try:
+            cursor.execute("SELECT id FROM works WHERE booking_id = %s", (booking_id,))
+            work_ids = [row[0] for row in cursor.fetchall()]
+            if work_ids:
+                marks = ", ".join(["%s"] * len(work_ids))
+                cursor.execute(f"UPDATE warehouse_parts SET work_id = NULL WHERE work_id IN ({marks})", work_ids)
+                cursor.execute(f"DELETE FROM works WHERE id IN ({marks})", work_ids)
+            cursor.execute("DELETE FROM bookings WHERE id = %s", (booking_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def add_booking(self, booking_date, booking_time, client_id, car_id=None, status="waiting", notes=None):
         """Добавить новую запись клиента. Возвращает ID записи или None при ошибке."""
@@ -1525,6 +1570,7 @@ class Database:
 
     def get_or_create_client(self, telegram_user_id=None, full_name=None, phone=None, tg_username=None, car_number=None):
         """Найти или создать клиента. Возвращает client_id"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         phone = normalize_phone(phone)
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -1682,6 +1728,7 @@ class Database:
     def get_or_create_car(self, client_id, car_brand, car_model, car_number, update_info=False):
         """Найти или создать авто клиента. Возвращает car_id.
         update_info=True — перезаписать марку/модель найденной машины значениями из формы"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         if not car_number:
             return None
         conn = self.get_connection()
@@ -1750,6 +1797,7 @@ class Database:
     def get_car_owner_by_number(self, car_number):
         """Машина по госномеру с текущим владельцем: dict(id, client_id, car_brand, car_model, car_number, vin,
         owner_name, owner_phone) или None"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         if not car_number:
             return None
         conn = self.get_connection()
@@ -1767,6 +1815,7 @@ class Database:
 
     def get_car_by_vin(self, vin, exclude_number=None):
         """Машина с таким VIN (кроме машины с госномером exclude_number) - тот же dict, что get_car_owner_by_number"""
+        exclude_number = normalize_plate(exclude_number) if exclude_number else exclude_number
         vin = (vin or "").strip().upper()
         if not vin:
             return None
@@ -1802,11 +1851,104 @@ class Database:
 
     def update_car_number(self, car_id, car_number):
         """Сменить госномер машины (перерегистрация) - история машины остаётся с ней"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE client_cars SET car_number = %s WHERE id = %s", (car_number.upper(), car_id))
         conn.commit()
         conn.close()
+
+    def get_car_details(self, car_id):
+        """Машина по ID со всеми полями для окна "Изменить данные": dict(id, client_id, car_brand, car_model,
+        car_number, vin, mileage) или None"""
+        if not car_id:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, client_id, car_brand, car_model, car_number, vin, mileage
+            FROM client_cars WHERE id = %s
+        """, (car_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"id": row[0], "client_id": row[1], "car_brand": row[2] or "", "car_model": row[3] or "",
+                "car_number": row[4] or "", "vin": row[5] or "", "mileage": row[6]}
+
+    def find_other_car(self, car_id, car_number=None, vin=None):
+        """Другая машина (не car_id) с таким госномером или VIN - чтобы правкой не получить две машины
+        с одним номером. Возвращает ("number" | "vin", dict как get_car_owner_by_number) или None"""
+        car_number = normalize_plate(car_number) if car_number else car_number
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            for field, value in (("number", (car_number or "").strip()), ("vin", (vin or "").strip())):
+                if not value:
+                    continue
+                column = "cc.car_number" if field == "number" else "cc.vin"
+                cursor.execute(f"""
+                    SELECT cc.id, cc.client_id, cc.car_brand, cc.car_model, cc.car_number, cc.vin, cl.full_name, cl.phone
+                    FROM client_cars cc
+                    LEFT JOIN clients cl ON cc.client_id = cl.id
+                    WHERE UPPER({column}) = UPPER(%s) AND cc.id <> %s
+                    LIMIT 1
+                """, (value, car_id))
+                row = cursor.fetchone()
+                if row:
+                    return field, self._car_owner_row(row)
+            return None
+        finally:
+            conn.close()
+
+    def find_cars_with_first_letter_missing(self, car_number, limit=5):
+        """Машины, госномер которых - car_number с ещё одной буквой спереди (ввели 123ВС77, а в базе А123ВС77):
+        [dict как get_car_owner_by_number]"""
+        car_number = normalize_plate(car_number)
+        if not car_number:
+            return []
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT cc.id, cc.client_id, cc.car_brand, cc.car_model, cc.car_number, cc.vin, cl.full_name, cl.phone
+            FROM client_cars cc
+            LEFT JOIN clients cl ON cc.client_id = cl.id
+            WHERE UPPER(cc.car_number) LIKE %s
+            ORDER BY cc.id DESC
+            LIMIT %s
+        """, ("_" + car_number.replace("_", "").replace("%", ""), limit))
+        rows = cursor.fetchall()
+        conn.close()
+        return [self._car_owner_row(row) for row in rows]
+
+    def update_car_info(self, car_id, car_brand, car_model, car_number, vin=None, mileage=None):
+        """Исправить данные машины (опечатки): та же машина, история нарядов и записей остаётся при ней"""
+        car_number = normalize_plate(car_number) if car_number else car_number
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE client_cars SET car_brand = %s, car_model = %s, car_number = %s, vin = %s, mileage = %s
+            WHERE id = %s
+        """, (car_brand, car_model, car_number.strip().upper(), (vin or "").strip().upper() or None,
+              mileage, car_id))
+        conn.commit()
+        conn.close()
+
+    def find_other_client_by_phone(self, phone, client_id):
+        """Другой клиент (не client_id) с таким телефоном: dict(id, full_name, phone) или None"""
+        digits = re.sub(r'\D', '', phone or "")[-10:]
+        if len(digits) != 10:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, full_name, phone FROM clients
+            WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s AND id <> %s
+            LIMIT 1
+        """, (digits, client_id))
+        row = cursor.fetchone()
+        conn.close()
+        return {"id": row[0], "full_name": row[1] or "", "phone": row[2] or ""} if row else None
 
     def update_client_contact(self, client_id, full_name=None, phone=None):
         """Обновить имя / телефон клиента (пустое - не трогать)"""
@@ -1829,6 +1971,7 @@ class Database:
 
     def get_car_by_number(self, car_number):
         """Получить авто по госномеру"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         if not car_number:
             return None
         conn = self.get_connection()
@@ -1872,29 +2015,6 @@ class Database:
         cars = cursor.fetchall()
         conn.close()
         return cars
-
-    def add_client_car(self, client_id, car_brand, car_model, car_number):
-        """Добавить автомобиль клиента в client_cars. Возвращает car_id или None."""
-        if not car_number or not car_brand or not client_id:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO client_cars (client_id, car_brand, car_model, car_number)
-                VALUES (%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    client_id = VALUES(client_id)
-            """, (client_id, car_brand, car_model, car_number.upper()))
-            conn.commit()
-            cursor.execute("SELECT id FROM client_cars WHERE UPPER(car_number) = UPPER(%s)", (car_number,))
-            result = cursor.fetchone()
-            return result[0] if result else None
-        except Exception as e:
-            print(f"Ошибка добавления авто: {e}")
-            return None
-        finally:
-            conn.close()
 
     def get_client_cars_by_telegram_id(self, telegram_user_id):
         """Получить список машин клиента по telegram_user_id через clients"""
@@ -2061,6 +2181,7 @@ class Database:
 
     def get_car_info_by_number(self, car_number):
         """Получить информацию о машине и владельце по госномеру"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         if not car_number:
             return None
         conn = self.get_connection()
@@ -2090,6 +2211,7 @@ class Database:
 
     def get_all_clients_by_car_number(self, car_number):
         """Получить клиента по госномеру из client_cars"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         if not car_number:
             return []
         conn = self.get_connection()
@@ -2118,6 +2240,7 @@ class Database:
 
     def get_active_work_by_car_number(self, car_number):
         """Найти активную работу (в работе) по госномеру"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         if not car_number:
             return None
         conn = self.get_connection()
@@ -2211,6 +2334,7 @@ class Database:
 
     def get_warehouse_parts_by_car_number(self, car_number, status="на складе"):
         """Получить запчасти на складе по госномеру машины"""
+        car_number = normalize_plate(car_number) if car_number else car_number
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
