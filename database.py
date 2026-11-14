@@ -1428,8 +1428,23 @@ class Database:
         finally:
             conn.close()
 
+    def day_capacity(self, day):
+        """Сколько машин можно записать на одно время в этот день: настройка max_cars_per_slot, но не больше
+        мастеров, которые в этот день работают (выходной / отпуск / больничный во вкладке "Сотрудники").
+        Возвращает dict(capacity, setting, working, total, absent=[(имя, вид)]).
+        Мастеров в программе нет - только настройка"""
+        setting = max_cars_per_slot()
+        workers = self.get_all_workers()
+        schedule = self.get_worker_schedule(day, day)
+        absent = [(name, schedule[worker_id][day]) for worker_id, name in workers
+                  if day in schedule.get(worker_id, {})]
+        working = len(workers) - len(absent)
+        capacity = min(setting, working) if workers else setting
+        return {"capacity": capacity, "setting": setting, "working": working, "total": len(workers),
+                "absent": absent}
+
     def is_time_slot_available(self, booking_date, booking_time):
-        """Проверить, есть ли на это время место (не больше max_cars_per_slot машин)"""
+        """Проверить, есть ли на это время место (вместимость дня - day_capacity)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
@@ -1438,7 +1453,7 @@ class Database:
         """, (booking_date, booking_time))
         count = cursor.fetchone()[0]
         conn.close()
-        return count < max_cars_per_slot()
+        return count < self.day_capacity(booking_date)["capacity"]
 
     def get_bookings_at_time(self, booking_date, booking_time):
         """Получить список записей на конкретное время с информацией о машинах."""

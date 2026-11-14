@@ -9050,6 +9050,8 @@ class AutoServiceApp:
         time_buttons = {}
         time_badges = {}
         past_slots = set()  # на сегодня - время, которое уже прошло
+        full_slots = set()  # время, где мест уже нет (записано столько, сколько мастеров работает)
+        day_info = [None]   # вместимость выбранного дня (Database.day_capacity)
         slot_bookings = {}  # время -> список записей на выбранную дату
         slot_tooltip = [None]
 
@@ -9060,7 +9062,8 @@ class AutoServiceApp:
                 return
             selected_time[0] = slot
             for s, btn in time_buttons.items():
-                look = "past" if s in past_slots else ("selected" if s == slot else "free")
+                look = "past" if s in past_slots else ("selected" if s == slot else
+                                                       ("full" if s in full_slots else "free"))
                 if button_look.get(s) == look:
                     continue
                 button_look[s] = look
@@ -9070,6 +9073,9 @@ class AutoServiceApp:
                 elif look == "selected":
                     btn.configure(state="normal", fg_color="#1f538d", text_color="white", hover_color="#1f538d",
                                   border_color="#1f538d")
+                elif look == "full":
+                    btn.configure(state="normal", fg_color="#fdecea", text_color="#c62828", hover_color="#f9d6d2",
+                                  border_color="#ef9a9a")
                 else:
                     btn.configure(state="normal", fg_color="white", text_color="black", hover_color="#dbe6f3",
                                   border_color="#c5cdd6")
@@ -9125,6 +9131,10 @@ class AutoServiceApp:
                 slot_bookings.update(self.db.get_bookings_by_date(date_entry.get_date()))
             except Exception as e:
                 print(f"Не удалось загрузить записи на дату: {e}")
+            capacity = day_info[0]["capacity"] if day_info[0] else None
+            full_slots.clear()
+            if capacity is not None:
+                full_slots.update(slot for slot in TIME_SLOTS if len(slot_bookings.get(slot, [])) >= capacity)
             for slot, badge in time_badges.items():
                 count = len(slot_bookings.get(slot, []))
                 if count:
@@ -9138,6 +9148,31 @@ class AutoServiceApp:
 
         # Статус (показывается, если на сегодня свободного времени не осталось)
         slot_status_label = ctk.CTkLabel(when_body, text="", font=("Arial", 13), text_color="#ef6c00", anchor="w")
+        # Кто из мастеров в этот день не работает и сколько машин можно на одно время (вкладка "Сотрудники")
+        staff_label = ctk.CTkLabel(when_body, text="", font=("Arial", 13), text_color="#ef6c00", anchor="w",
+                                   justify=tk.LEFT, wraplength=440)
+
+        def update_staff_label(booking_date):
+            try:
+                info = self.db.day_capacity(booking_date)
+            except Exception as e:
+                print(f"Не удалось загрузить график мастеров: {e}")
+                info = None
+            day_info[0] = info
+            if not info or not info["absent"]:
+                staff_label.pack_forget()
+                return
+            who = ", ".join(f"{self.display_name(name)} ({self.staff_kind_label(kind).lower()})"
+                            for name, kind in info["absent"])
+            if info["capacity"] <= 0:
+                text = self.tr("bookings.staff_nobody", who=who)
+            elif info["capacity"] < info["setting"]:
+                text = self.tr("bookings.staff_reduced", who=who, count=info["capacity"])
+            else:
+                text = self.tr("bookings.staff_absent", who=who)
+            staff_label.configure(text="⚠ " + text,
+                                  text_color="#c62828" if info["capacity"] <= 0 else "#ef6c00")
+            staff_label.pack(fill=tk.X, pady=(0, 8), before=time_grid)
 
         def update_available_times(*args):
             """Обновить слоты времени: прошедшие на сегодня - серые, занятость - кружками"""
@@ -9150,11 +9185,14 @@ class AutoServiceApp:
             if booking_date == now.date():
                 past_slots.update(s for s in TIME_SLOTS if s <= now.strftime("%H:%M"))
             free = [s for s in TIME_SLOTS if s not in past_slots]
-            # Выбранное время оставляем, если оно ещё доступно, иначе - первое свободное
-            slot = selected_time[0] if selected_time[0] in free else (free[0] if free else None)
-            selected_time[0] = None
-            select_time(slot)
+            update_staff_label(booking_date)
             refresh_slot_counts()
+            # Выбранное время оставляем, если оно ещё доступно, иначе - первое свободное (лучше - где есть место)
+            open_slots = [s for s in free if s not in full_slots] or free
+            slot = selected_time[0] if selected_time[0] in free else (open_slots[0] if open_slots else None)
+            selected_time[0] = None
+            button_look.clear()   # занятость поменялась - перерисовать все кнопки
+            select_time(slot)
 
             if free:
                 slot_status_label.pack_forget()
@@ -9314,6 +9352,9 @@ class AutoServiceApp:
                         message += f" ({car_info})"
                     message += f" - {booking['client_name']}\n"
 
+                info = self.db.day_capacity(booking_date)
+                if info["absent"]:
+                    message += self.tr("bookings.msg_slot_busy_staff", working=info["working"], total=info["total"])
                 message += self.tr("bookings.msg_slot_busy_footer")
 
                 # Спрашиваем пользователя
