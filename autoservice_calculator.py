@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import threading
 import re
+import types
 import requests
 import webbrowser
 from urllib.parse import quote
@@ -8479,9 +8480,22 @@ class AutoServiceApp:
                                        "order_number"))
 
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.bookings_tree.yview)
-        self.bookings_tree.configure(yscrollcommand=scrollbar.set)
+
+        def on_yscroll(first, last):
+            scrollbar.set(first, last)
+            self._bookings_place_no_phone_marks()
+
+        self.bookings_tree.configure(yscrollcommand=on_yscroll)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=6)
         self.bookings_tree.pack(fill=tk.BOTH, expand=True, padx=(6, 0), pady=6)
+
+        # «⚠ нет телефона» - красным только эта надпись (Treeview красит лишь всю строку): поверх ячейки
+        # «Телефон» кладём надпись и переставляем её при прокрутке, ширине колонок, выделении
+        self._bookings_no_phone_marks = {}   # строка -> надпись
+        later = lambda e=None: self.root.after_idle(self._bookings_place_no_phone_marks)
+        for sequence in ("<Configure>", "<Map>", "<<TreeviewSelect>>", "<B1-Motion>", "<ButtonRelease-1>",
+                         "<<ColumnsChanged>>"):
+            self.bookings_tree.bind(sequence, later, add="+")
 
         # Tooltip с полным текстом примечания при наведении (если текст обрезан)
         TreeviewTooltip(self.bookings_tree, columns=["notes"])
@@ -8528,6 +8542,47 @@ class AutoServiceApp:
         if item:
             self.bookings_tree.selection_set(item)
             self.show_booking_info()
+
+    BOOKINGS_NO_PHONE_COLOR = "#c62828"
+
+    def _bookings_mark_no_phone(self, item):
+        """Красная надпись «⚠ нет телефона» над ячейкой «Телефон» строки. Клики и колесо - как по таблице"""
+        tree = self.bookings_tree
+        label = tk.Label(tree, text="⚠ " + self.tr("bookings.no_phone"), fg=self.BOOKINGS_NO_PHONE_COLOR,
+                         bg="white", anchor="w", padx=4, pady=0, bd=0, font=("Arial", 11))
+
+        def as_tree_event(e):
+            return types.SimpleNamespace(x=label.winfo_x() + e.x, y=label.winfo_y() + e.y,
+                                         x_root=e.x_root, y_root=e.y_root)
+
+        def click(e):
+            tree.focus_set()
+            tree.selection_set(item)
+            tree.focus(item)
+
+        label.bind("<Button-1>", click)
+        label.bind("<Double-1>", lambda e: self._bookings_double_click(as_tree_event(e)))
+        label.bind("<Button-3>", lambda e: self.show_bookings_context_menu(as_tree_event(e)))
+        label.bind("<MouseWheel>", lambda e: tree.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        self._bookings_no_phone_marks[item] = label
+
+    def _bookings_place_no_phone_marks(self):
+        """Поставить надписи «нет телефона» на ячейки видимых строк (фон и шрифт - как у строки)"""
+        tree = self.bookings_tree
+        selected = set(tree.selection())
+        for item, label in list(self._bookings_no_phone_marks.items()):
+            bbox = tree.bbox(item, "phone") if tree.exists(item) else ""
+            if not bbox or bbox[2] <= 2:   # строка прокручена за край или колонка скрыта
+                label.place_forget()
+                continue
+            x, y, width, height = bbox
+            tags = tree.item(item, "tags")
+            background = ("#d6e8fb" if item in selected else "#f3f4f6" if "overdue" in tags
+                          else "#fafbfc" if "odd" in tags else "white")
+            style = " ".join(s for s, on in (("bold", "today" in tags),
+                                             ("overstrike", "overdue" in tags or "cancelled" in tags)) if on)
+            label.configure(bg=background, font=("Arial", 11, style) if style else ("Arial", 11))
+            label.place(x=x, y=y, width=width, height=height)
 
     def _bookings_search_keyrelease(self, event=None):
         """Поиск по мере ввода - с паузой, чтобы не обращаться к базе на каждую букву"""
@@ -8628,6 +8683,9 @@ class AutoServiceApp:
         for item in self.bookings_tree.get_children():
             self.bookings_tree.delete(item)
         self.bookings_raw = {}
+        for label in self._bookings_no_phone_marks.values():
+            label.destroy()
+        self._bookings_no_phone_marks = {}
 
         search_query = self.bookings_search_entry.get().strip().lower() if hasattr(self, 'bookings_search_entry') else ""
         today = date.today()
@@ -8675,8 +8733,11 @@ class AutoServiceApp:
                 " ".join(str(notes or "").split()), status_text.get(st, st)
             ), tags=tags)
             self.bookings_raw[item] = {"name": full_name or "", "phone": phone or "", "username": username or ""}
+            if not self.display_phone(phone):
+                self._bookings_mark_no_phone(item)
 
         self.sort_bookings_tree()
+        self.root.after_idle(self._bookings_place_no_phone_marks)
         self._bookings_draw_statuses(counts)
         self.update_bookings_count()
 
@@ -9909,6 +9970,7 @@ class AutoServiceApp:
         visible = [c for c in cfg["columns"] if c not in hidden] or list(cfg["columns"])
         cfg["tree"]["displaycolumns"] = visible
         self.fit_columns(settings_key)
+        cfg["tree"].event_generate("<<ColumnsChanged>>")
 
     def fit_columns(self, settings_key):
         """Растянуть видимые колонки на всю ширину таблицы (пропорционально исходным ширинам)"""

@@ -3,8 +3,8 @@
 Каждая функция test_* получает Harness (h). Тестовые госномера Т1xxТТ799 / Т105ТТ77(7), телефоны +7900000010x"""
 from datetime import date, timedelta
 
-PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799"]
-PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107"]
+PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799"]
+PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108"]
 
 
 def prepare(h):
@@ -637,9 +637,63 @@ def test_login(h):
             f.write(settings_before)
 
 
+def test_bookings_no_phone_red(h):
+    """«Записи»: у клиента без телефона «⚠ нет телефона» красным только в ячейке «Телефон» (надпись поверх
+    ячейки, ровно по ней); у записей с телефоном надписи нет; клик по надписи выбирает строку; колонку
+    «Телефон» скрыли - надпись тоже скрыта"""
+    app = h.app
+    h.booking_form("т108тт799", "ТестБезТелефона", "Модель", "9000000108", "Тест Без Телефона")
+    booking = h.q("SELECT b.id, b.client_id FROM bookings b JOIN client_cars cc ON cc.id = b.car_id "
+                  "WHERE cc.car_number = 'Т108ТТ799'")
+    if not h.check("запись сохранена", booking):
+        return
+    booking_id, client_id = booking[0]
+    h.q("UPDATE clients SET phone = NULL WHERE id = %s", (client_id,))
+    app.switch_tab("bookings")
+    app.refresh_bookings()
+    tree = app.bookings_tree
+    item = next((i for i in tree.get_children() if str(tree.item(i, "values")[0]) == str(booking_id)), None)
+    if not h.check("запись в списке", item):
+        return
+    tree.see(item)
+    for _ in range(5):
+        h.root.update()
+    label = app._bookings_no_phone_marks.get(item)
+    h.check("у записи без телефона - надпись «⚠ нет телефона» красным",
+            label is not None and label.cget("text") == "⚠ нет телефона"
+            and label.cget("fg") == app.BOOKINGS_NO_PHONE_COLOR, label and label.cget("text"))
+    if label is None:
+        return
+    bbox = tree.bbox(item, "phone")
+    h.check("надпись ровно поверх ячейки «Телефон»",
+            label.winfo_manager() == "place" and bbox
+            and (label.winfo_x(), label.winfo_y(), label.winfo_width(), label.winfo_height()) == tuple(bbox),
+            (bbox, label.winfo_x(), label.winfo_y(), label.winfo_width()))
+    with_phone = [i for i in tree.get_children() if app.bookings_raw[i]["phone"]]
+    h.check("у записей с телефоном надписи нет",
+            with_phone and not any(i in app._bookings_no_phone_marks for i in with_phone))
+    tree.selection_set(())
+    label.event_generate("<Button-1>", x=5, y=5)
+    for _ in range(3):
+        h.root.update()
+    h.check("клик по надписи выбирает строку, фон надписи - как у выбранной строки",
+            tree.selection() == (item,) and label.cget("bg") == "#d6e8fb", tree.selection())
+    columns = tree["displaycolumns"]
+    try:
+        tree["displaycolumns"] = [c for c in columns if c != "phone"]
+        tree.event_generate("<<ColumnsChanged>>")
+        for _ in range(3):
+            h.root.update()
+        h.check("колонку «Телефон» скрыли - надписи не видно", not label.winfo_manager())
+    finally:
+        tree["displaycolumns"] = columns
+        tree.event_generate("<<ColumnsChanged>>")
+        h.root.update()
+
+
 TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booking_region_continues,
          test_booking_pick_car_clears_error, test_warehouse_pick_car, test_work_pick_car,
          test_work_from_booking, test_work_new_car, test_work_opens_active_record, test_plate_hint_all_forms,
          test_warehouse_existing_car, test_warehouse_new_car, test_edit_data, test_delete_booking_with_work,
          test_positions, test_finance_category_follows_switch, test_users_and_roles,
-         test_locales, test_login]
+         test_locales, test_login, test_bookings_no_phone_red]
