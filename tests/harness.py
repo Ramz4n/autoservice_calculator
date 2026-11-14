@@ -21,10 +21,11 @@ import customtkinter as ctk
 import pymysql
 
 TABLES = ["works", "parts", "bookings", "warehouse_parts", "client_cars", "clients", "workers", "positions",
-          "worker_bonuses", "expenses", "worker_absences"]
+          "worker_bonuses", "expenses", "worker_absences", "users", "car_brands", "car_models", "keywords"]
 # Порядок удаления при уборке (сначала зависимые)
 CLEANUP_ORDER = ["parts", "works", "worker_bonuses", "worker_absences", "warehouse_parts", "bookings",
-                 "expenses", "client_cars", "clients", "workers", "positions"]
+                 "expenses", "client_cars", "clients", "workers", "positions", "users", "car_models", "car_brands",
+                 "keywords"]
 WATCH = ["works", "bookings", "warehouse_parts", "client_cars", "clients", "workers", "positions"]
 
 
@@ -202,8 +203,10 @@ class Harness:
     def find_button(self, parent, text):
         return next(b for b in self.find_widgets(parent, ctk.CTkButton) if b.cget("text") == text)
 
-    def booking_form(self, plate, brand=None, model=None, phone10=None, name=None, typed_live_first=None, save=True):
-        """«Записать клиента»: госномер (с уходом из поля), марка/модель, телефон, имя, «Завтра», «Записать»"""
+    def booking_form(self, plate, brand=None, model=None, phone10=None, name=None, typed_live_first=None, save=True,
+                     day=None, time=None):
+        """«Записать клиента»: госномер (с уходом из поля), марка/модель, телефон, имя, «Завтра» (или день day
+        в календаре), время time (кнопка), «Записать»"""
         app, root = self.app, self.root
         bw = app._ensure_booking_window()
         bw["open"]()
@@ -226,8 +229,17 @@ class Harness:
             phone_e._entry.event_generate("<FocusOut>")
         if name is not None:
             name_e.delete(0, "end"); name_e.insert(0, name)
-        self.find_button(bw["window"], app.tr("bookings.btn_tomorrow")).invoke()
+        if day is None:
+            self.find_button(bw["window"], app.tr("bookings.btn_tomorrow")).invoke()
+        else:
+            from tkcalendar import DateEntry
+            calendar = self.find_widgets(bw["window"], DateEntry)[0]
+            calendar.set_date(day)
+            calendar.event_generate("<<DateEntrySelected>>")
         root.update()
+        if time is not None:
+            self.find_button(bw["window"], time).invoke()
+            root.update()
         if save:
             self.find_button(bw["window"], app.tr("bookings.btn_book")).invoke()
             root.update()
@@ -333,6 +345,30 @@ class Harness:
         self.root.update()
         return True
 
+    def warehouse_select(self, part_id):
+        """Склад: выделить строку детали (как клик). False - строки нет в списке"""
+        app = self.app
+        app.switch_tab("warehouse")
+        app.refresh_warehouse()
+        item = next((i for i in app.warehouse_tree.get_children()
+                     if str(app.warehouse_tree.item(i, "values")[0]) == str(part_id)), None)
+        if item is None:
+            return False
+        app.warehouse_tree.selection_set(item)
+        return True
+
+    def new_windows(self, action):
+        """Выполнить действие и вернуть окна (CTkToplevel), которые оно открыло - и закрыть их"""
+        before = set(self.root.winfo_children())
+        action()
+        self.root.update()
+        opened = [x for x in self.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel)]
+        for win in opened:
+            if win.winfo_exists():
+                win.grab_release()
+                win.destroy()
+        return opened
+
     def works_add_from_warehouse(self, names):
         """«Добавить работу» → «Со склада» → отметить детали с этими названиями → «Добавить».
         Возвращает названия, которые были в окне выбора"""
@@ -401,7 +437,9 @@ class Harness:
         app = self.app
         app.switch_tab("statistics")
         app.generate_statistics(show_empty_message=False)
-        return {"brands": {b: (visits, round(total, 2)) for b, visits, cars, total in app._stats_brand_rows},
+        return {"monthly": {ym: (visits, round(total, 2)) for ym, visits, total in app._stats_monthly_rows},
+                "summary": app.stats_summary_label.cget("text"),
+                "brands": {b: (visits, round(total, 2)) for b, visits, cars, total in app._stats_brand_rows},
                 "clients": {n: (visits, round(total, 2)) for n, phone, visits, total in app._stats_client_rows},
                 "works": {n: (count, round(total, 2)) for n, count, total in app._stats_work_rows}}
 
@@ -443,6 +481,32 @@ class Harness:
         finally:
             del menu.post
         return menu.entrycget(1, "label").strip(), menu.entrycget(0, "state")
+
+    def report_details(self, worker_name):
+        """«Отчёты» → сотрудник → «Подробно»: {"cars": {машина: (клиент, сумма, [(дата, работа, цена)])},
+        "footer": текст «машин / работ», "total": итог окна}. Окно закрывается"""
+        from tkinter import ttk
+        app = self.app
+        self.report()
+        item = next(i for i, w in app.summary_workers.items() if w["name"] == worker_name)
+        app.summary_tree.selection_set(item)
+        before = set(self.root.winfo_children())
+        app.show_master_report_details()
+        self.root.update()
+        win = next((x for x in self.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel)), None)
+        if win is None:
+            return None
+        tree = self.find_widgets(win, ttk.Treeview)[0]
+        cars = {}
+        for node in tree.get_children():
+            _, client, _, total = tree.item(node, "values")
+            rows = [tuple(tree.item(c, "values")[i] for i in (0, 2)) + (self.money(tree.item(c, "values")[3]),)
+                    for c in tree.get_children(node)]
+            cars[tree.item(node, "text")] = (client, self.money(total), rows)
+        labels = [w.cget("text") for w in self.find_widgets(win, ctk.CTkLabel)]
+        win.grab_release()
+        win.destroy()
+        return {"cars": cars, "labels": labels, "total": self.money(labels[-1] if labels else "")}
 
     def delete_expense_in_finances(self, expense_id):
         """«Финансы» → выбрать строку → «Удалить»"""
@@ -520,6 +584,22 @@ class Harness:
         return (not lock["unlocked"] and all(str(e.cget("state")) == "disabled" for e in lock["entries"])
                 and all(e.get_date() == date.today() for e in lock["entries"])
                 and lock["button"].cget("text") == self.app.tr("reports.period_locked_btn"))
+
+    def bookings_select(self, booking_id):
+        """«Записи»: выделить строку записи (как клик). False - строки нет в списке"""
+        app = self.app
+        app.switch_tab("bookings")
+        app.refresh_bookings()
+
+        def find():
+            return next((i for i in app.bookings_tree.get_children()
+                         if str(app.bookings_tree.item(i, "values")[0]) == str(booking_id)), None)
+        item = find()
+        if item is None:
+            return False
+        app.bookings_tree.selection_set(item)
+        app.bookings_tree.see(item)
+        return True
 
     def complete_booking(self, booking_id):
         """«Записи» → ПКМ → «Выполнено»"""

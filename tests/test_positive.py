@@ -417,8 +417,229 @@ def test_booking_pick_car_clears_error(h):
         win.withdraw(); bw["overlay"].withdraw(); win.grab_release()
 
 
+def test_users_and_roles(h):
+    """Настройки → Пользователи: добавить (повтор логина - нельзя), вход по паролю, сменить пароль,
+    заблокировать (не входит) / разблокировать, удалить; себя не заблокировать и не удалить.
+    Роль «пользователь»: в меню нет «Отчётов», «Финансов», «Статистики», в настройках нет «Пользователей»"""
+    import customtkinter as ctk
+    app, db, root = h.app, h.app.db, h.root
+    app.refresh_users_list()
+
+    def add(login, password, role="user"):
+        app.new_user_login.delete(0, "end"); app.new_user_login.insert(0, login)
+        app.new_user_pass.delete(0, "end"); app.new_user_pass.insert(0, password)
+        app.new_user_name.delete(0, "end"); app.new_user_name.insert(0, "Тест " + login)
+        app.new_user_role.set(role)
+        n = len(h.dialogs)
+        app._add_user_from_tab()
+        return h.dialogs_since(n)
+
+    def select(login):
+        app.refresh_users_list()
+        item = next((i for i in app.users_tree.get_children() if app.users_tree.item(i, "values")[0] == login), None)
+        if item:
+            app.users_tree.selection_set(item)
+        return item
+
+    add("autotest_user", "пароль-1")
+    uid = h.q("SELECT id, role, is_active FROM users WHERE username = 'autotest_user'")
+    if not h.check("пользователь добавлен (роль «пользователь», активен), есть в списке",
+                   uid and uid[0][1:] == ("user", 1) and select("autotest_user"), uid):
+        return
+    uid = uid[0][0]
+    h.check("вход: верный пароль - да, неверный - нет",
+            db.verify_user("autotest_user", "пароль-1") and not db.verify_user("autotest_user", "чужой"))
+    dialogs = add("autotest_user", "другой")
+    h.check("тот же логин второй раз - ошибка, второго нет",
+            any(d[0] == "showerror" for d in dialogs)
+            and h.q("SELECT COUNT(*) FROM users WHERE username = 'autotest_user'")[0][0] == 1)
+    before = h.q("SELECT COUNT(*) FROM users")[0][0]
+    dialogs = add("autotest_empty", "")
+    h.check("без пароля - предупреждение, не добавлен",
+            any(d[0] == "showwarning" for d in dialogs) and h.q("SELECT COUNT(*) FROM users")[0][0] == before)
+
+    # Сменить пароль: несовпадение - не меняется, совпадение - вход с новым
+    select("autotest_user")
+    before_win = set(root.winfo_children())
+    app._users_tab_change_password()
+    root.update()
+    win = next((x for x in root.winfo_children() if x not in before_win and isinstance(x, ctk.CTkToplevel)), None)
+    if h.check("окно смены пароля открылось", win):
+        win.pwd1.set("пароль-2"); win.pwd2.set("другой")
+        win._save()
+        h.check("пароли не совпадают - не сменён", db.verify_user("autotest_user", "пароль-1"))
+        win.pwd2.set("пароль-2")
+        win._save()
+        root.update()
+        h.check("пароль сменён: новый подходит, старый нет",
+                db.verify_user("autotest_user", "пароль-2") and not db.verify_user("autotest_user", "пароль-1"))
+        if win.winfo_exists():
+            win.destroy()
+
+    select("autotest_user")
+    app._users_tab_toggle_active()
+    h.check("заблокирован - войти нельзя", not db.verify_user("autotest_user", "пароль-2")
+            and h.q("SELECT is_active FROM users WHERE id = %s", (uid,)) == ((0,),))
+    select("autotest_user")
+    app._users_tab_toggle_active()
+    h.check("разблокирован - вход снова работает", db.verify_user("autotest_user", "пароль-2"))
+
+    # Себя - нельзя (текущий пользователь - autotest_admin)
+    add("autotest_admin", "пароль-а", "admin")
+    admin_id = h.q("SELECT id FROM users WHERE username = 'autotest_admin'")[0][0]
+    real_user = app.current_user
+    app.current_user = dict(real_user, id=admin_id)
+    try:
+        for label, action in (("заблокировать", app._users_tab_toggle_active), ("удалить", app._users_tab_delete)):
+            select("autotest_admin")
+            n = len(h.dialogs)
+            h.answers[:] = [True]
+            action()
+            h.answers[:] = []
+            h.check(f"себя {label} нельзя - предупреждение, активен",
+                    any(d[0] == "showwarning" for d in h.dialogs_since(n))
+                    and h.q("SELECT is_active FROM users WHERE id = %s", (admin_id,)) == ((1,),))
+    finally:
+        app.current_user = real_user
+
+    select("autotest_user")
+    h.answers[:] = [False]
+    app._users_tab_delete()
+    h.check("удаление, ответ «Нет» - остался", h.q("SELECT id FROM users WHERE id = %s", (uid,)))
+    select("autotest_user")
+    h.answers[:] = [True]
+    app._users_tab_delete()
+    h.answers[:] = []
+    h.check("удалён - нет в базе и в списке", not h.q("SELECT id FROM users WHERE id = %s", (uid,))
+            and not select("autotest_user"))
+
+    # Роли (вторую копию программы в тестах не запустить - CustomTkinter зацикливается на перерисовке,
+    # поэтому проверяем само правило, по которому строится меню)
+    user_tabs = set(app.menu_tabs_for("user"))
+    h.check("роль «пользователь»: нет «Отчётов», «Финансов», «Статистики»; есть работа, записи, склад",
+            not user_tabs & {"reports", "expenses", "statistics"} and {"works", "bookings", "warehouse"} <= user_tabs,
+            user_tabs)
+    h.check("роль «пользователь»: нет вкладки «Пользователи»; админ - есть",
+            not app.is_admin_role("user") and app.is_admin_role("admin") and hasattr(app, "users_tab_frame"))
+    user_settings = app.settings_tabs_for("user")
+    h.check("роль «пользователь»: в «Настройках» нет «Сотрудников» и «Пользователей», восстанавливать из копии нельзя",
+            "workers" not in user_settings and "users" not in user_settings and not app.can_restore_backup("user")
+            and {"cars", "keywords", "spareparts", "backup"} <= set(user_settings), user_settings)
+    h.check("администратору - «Сотрудники», «Пользователи» и восстановление есть",
+            {"workers", "users"} <= set(app.settings_tabs_for("admin")) and app.can_restore_backup("admin"))
+    names = {app.tr("settings.workers_tab"), app.tr("settings.users_tab")}
+    h.check("у администратора в программе вкладки «Сотрудники» и «Пользователи» на месте",
+            names <= set(app.add_notebook._tab_dict), list(app.add_notebook._tab_dict))
+    real_user = app.current_user
+    app.current_user = dict(real_user, role="user")
+    try:
+        n = len(h.dialogs)
+        app._do_restore_backup()
+        h.check("пользователю «Восстановить» не срабатывает (нет даже выбора файла)", not h.dialogs_since(n))
+    finally:
+        app.current_user = real_user
+    admin_tabs = [tab for _, tab in app.menu_items]
+    h.check("у администратора в меню все вкладки (как правило для «admin»)",
+            admin_tabs == app.menu_tabs_for("admin") and {"reports", "expenses", "statistics"} <= set(admin_tabs),
+            admin_tabs)
+
+
+def test_locales(h):
+    """Переводы: во всех 5 языках один и тот же набор текстов, подстановки ({name}, {count}...) те же, пустых нет;
+    каждый текст, который программа берёт по ключу, есть в русском. Иначе в интерфейсе вместо текста -
+    технический ключ вроде works.vin_conflict_title"""
+    import json, os, re
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    langs = ["ru", "en", "sr", "hy", "ka"]
+    data = {l: json.load(open(os.path.join(base, "config", "locales", f"{l}.json"), encoding="utf-8")) for l in langs}
+    ru = set(data["ru"])
+    for lang in langs[1:]:
+        keys = set(data[lang])
+        h.check(f"переводы {lang}: те же тексты, что в русском", keys == ru,
+                {"нет": sorted(ru - keys)[:10], "лишние": sorted(keys - ru)[:10]})
+    holder = re.compile(r"\{(\w+)\}")
+    bad = [(lang, key) for key in ru for lang in langs[1:]
+           if key in data[lang] and set(holder.findall(data[lang][key])) != set(holder.findall(data["ru"][key]))]
+    h.check("подстановки ({name}, {count}...) во всех языках те же", not bad, bad[:10])
+    empty = [(lang, key) for lang in langs for key, value in data[lang].items() if not str(value).strip()]
+    h.check("пустых текстов нет", not empty, empty[:10])
+    used = set()
+    for name in ("autoservice_calculator.py", "login_window.py"):
+        text = open(os.path.join(base, name), encoding="utf-8").read()
+        used |= {k for k in re.findall(r'\btr\(\s*["\']([a-z_]+\.[A-Za-z0-9_.]+)["\']', text)}
+    # Ключ, собранный в коде (f"staff.short_{kind}"), - проверяем все его варианты
+    prefixes = {k for k in used if k.endswith("_")}
+    used = (used - prefixes) | {p + kind for p in prefixes for kind in ("day_off", "vacation", "sick")}
+    missing = sorted(k for k in used if k not in ru)
+    h.check("все тексты, которые берёт программа, есть в переводах", not missing, missing)
+
+
+def test_login(h):
+    """Окно входа, кнопка «Войти» (логика без окна - второе главное окно в тестах не запустить):
+    верный пароль - вход и запоминается логин; неверный - ошибка, пароль стирается; пустой - ошибка;
+    заблокированный - не входит"""
+    import login_window
+    app, db = h.app, h.app.db
+    settings_path = h.m.SETTINGS_FILE
+    with open(settings_path, encoding="utf-8") as f:
+        settings_before = f.read()
+
+    class Var:
+        def __init__(self, value=""):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
+    class Label:
+        text = ""
+
+        def configure(self, text=""):
+            self.text = text
+
+    class Form:
+        """Поля окна входа"""
+        def __init__(self, login, password):
+            self.username_var, self.password_var = Var(login), Var(password)
+            self.error_label = Label()
+            self.password_entry = type("Entry", (), {"focus": lambda self: None})()
+            self.db, self.tr = db, app.tr
+            self.logged_user, self.quitted = None, False
+
+        def quit(self):
+            self.quitted = True
+
+    def login(name, password):
+        form = Form(name, password)
+        login_window.LoginWindow._do_login(form)
+        return form
+
+    try:
+        db.create_user("autotest_login", "пароль-вход", "Тест Вход", "user")
+        ok = login("autotest_login", "пароль-вход")
+        h.check("верный пароль - вход, пользователь с ролью", ok.quitted and ok.logged_user
+                and ok.logged_user["role"] == "user" and not ok.error_label.text, ok.logged_user)
+        h.check("логин запомнен для следующего входа", login_window._load_settings().get("last_username") == "autotest_login")
+        bad = login("autotest_login", "неверный")
+        h.check("неверный пароль - ошибка, не вошёл, пароль стёрт",
+                not bad.quitted and bad.error_label.text == app.tr("login.error_invalid") and bad.password_var.get() == "")
+        empty = login("", "")
+        h.check("пустые логин и пароль - ошибка", not empty.quitted and empty.error_label.text == app.tr("login.error_empty"))
+        uid = h.q("SELECT id FROM users WHERE username = 'autotest_login'")[0][0]
+        db.set_user_active(uid, False)
+        blocked = login("autotest_login", "пароль-вход")
+        h.check("заблокированный - не входит", not blocked.quitted and blocked.error_label.text == app.tr("login.error_invalid"))
+    finally:
+        with open(settings_path, "w", encoding="utf-8") as f:
+            f.write(settings_before)
+
+
 TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booking_region_continues,
          test_booking_pick_car_clears_error, test_warehouse_pick_car, test_work_pick_car,
          test_work_from_booking, test_work_new_car, test_work_opens_active_record, test_plate_hint_all_forms,
          test_warehouse_existing_car, test_warehouse_new_car, test_edit_data, test_delete_booking_with_work,
-         test_positions, test_finance_category_follows_switch]
+         test_positions, test_finance_category_follows_switch, test_users_and_roles,
+         test_locales, test_login]

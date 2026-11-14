@@ -609,17 +609,12 @@ class AutoServiceApp:
             text_color="gray"
         ).pack(pady=(0, 18))
 
-        # Пункты меню
-        _is_admin = self.current_user.get("role") == "admin"
-        self.menu_items = [
-            (self.tr("menu.add_work"), "works"),
-            (self.tr("menu.bookings"), "bookings"),
-            (self.tr("menu.warehouse"), "warehouse"),
-            (self.tr("menu.staff"), "staff"),
-            *([(self.tr("menu.reports"), "reports"), (self.tr("menu.expenses"), "expenses"), (self.tr("menu.statistics"), "statistics")] if _is_admin else []),
-            #("Поиск деталей", "parts_search"),
-            (self.tr("menu.settings"), "settings")
-        ]
+        # Пункты меню (что видит роль - menu_tabs_for)
+        menu_labels = {"works": "menu.add_work", "bookings": "menu.bookings", "warehouse": "menu.warehouse",
+                       "staff": "menu.staff", "reports": "menu.reports", "expenses": "menu.expenses",
+                       "statistics": "menu.statistics", "settings": "menu.settings"}
+        self.menu_items = [(self.tr(menu_labels[tab]), tab)
+                           for tab in self.menu_tabs_for(self.current_user.get("role"))]
 
         self.menu_buttons = {}
         self.current_tab = "works"
@@ -735,9 +730,14 @@ class AutoServiceApp:
         # Показываем первую вкладку по умолчанию
         self.works_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Подвкладка работников
-        self.add_notebook.add(self.tr("settings.workers_tab"))
-        self.workers_frame = self.add_notebook.tab(self.tr("settings.workers_tab"))
+        # Подвкладка работников (только администратору). Пользователю её не показываем, но строим в скрытой
+        # рамке: списки сотрудников и должностей обновляются из других вкладок
+        settings_tabs = self.settings_tabs_for(self.current_user.get("role"))
+        if "workers" in settings_tabs:
+            self.add_notebook.add(self.tr("settings.workers_tab"))
+            self.workers_frame = self.add_notebook.tab(self.tr("settings.workers_tab"))
+        else:
+            self.workers_frame = ctk.CTkFrame(self.add_frame)   # не показывается
         self.setup_workers_tab()
 
         # Подвкладка марок и моделей
@@ -761,7 +761,7 @@ class AutoServiceApp:
         self.setup_language_tab()
 
         # Подвкладка пользователей (только для admin)
-        if self.current_user.get("role") == "admin":
+        if "users" in settings_tabs:
             self.add_notebook.add(self.tr("settings.users_tab"))
             self.users_tab_frame = self.add_notebook.tab(self.tr("settings.users_tab"))
             self.setup_users_tab()
@@ -809,6 +809,33 @@ class AutoServiceApp:
 
         # Вызываем обработчик смены вкладки
         self.on_tab_changed()
+
+    @staticmethod
+    def is_admin_role(role):
+        return role == "admin"
+
+    @classmethod
+    def menu_tabs_for(cls, role):
+        """Вкладки меню для роли: «Отчёты», «Финансы», «Статистика» (деньги) - только администратору"""
+        tabs = ["works", "bookings", "warehouse", "staff"]
+        if cls.is_admin_role(role):
+            tabs += ["reports", "expenses", "statistics"]
+        return tabs + ["settings"]
+
+    @classmethod
+    def settings_tabs_for(cls, role):
+        """Подвкладки «Настроек» для роли: «Сотрудники» (уволить, должности) и «Пользователи» - только
+        администратору"""
+        tabs = ["workers"] if cls.is_admin_role(role) else []
+        tabs += ["cars", "keywords", "spareparts", "language"]
+        if cls.is_admin_role(role):
+            tabs.append("users")
+        return tabs + ["backup", "about"]
+
+    @classmethod
+    def can_restore_backup(cls, role):
+        """Восстановить из копии (заменить все данные) - только администратор"""
+        return cls.is_admin_role(role)
 
     def on_tab_changed(self):
         """Обработчик переключения вкладок"""
@@ -3927,16 +3954,17 @@ class AutoServiceApp:
         self.worker_combo.set(selected or self.tr("works.select_master"))
 
     def works_select_master(self, worker_id):
-        """Поставить мастера наряда в список. Мастер уволен - добавляем его в список с пометкой «уволен»
-        (наряд остаётся за ним; другого мастера можно выбрать)"""
+        """Поставить мастера наряда в список. Его нет в списке (уволен - с пометкой «уволен», или переведён
+        в должность не «с машинами») - добавляем в список: наряд остаётся за ним, другого можно выбрать"""
         for name, wid in self.workers_data.items():
             if wid == worker_id:
                 self.worker_combo.set(name)
                 return
-        name = self.db.get_worker_name(worker_id)
-        if not name:
+        worker = self.db.get_worker(worker_id)
+        if not worker:
             return
-        label = self.tr("workers.fired_suffix", name=name)
+        label = (self.tr("workers.fired_suffix", name=worker["full_name"]) if worker["fired"]
+                 else worker["full_name"])
         self.workers_data[label] = worker_id
         self.worker_combo.configure(values=[self.tr("works.select_master")] + list(self.workers_data))
         self.worker_combo.set(label)
@@ -5840,6 +5868,16 @@ class AutoServiceApp:
         self.refresh_warehouse()
         self.restore_placeholder(self.warehouse_search_entry)
 
+    def warehouse_part_in_work(self, part_id):
+        """Деталь уже в наряде («установлена») - на складе её не меняем (статус, оплата, правка, удаление):
+        иначе склад и наряд разойдутся (её предложат в другой наряд, удалят из-под наряда).
+        Предупреждает и возвращает True"""
+        part = self.db.get_warehouse_part_by_id(part_id)
+        if not part or part.get("status") != "установлена":
+            return False
+        messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_part_in_work"))
+        return True
+
     def update_part_status(self, new_status):
         """Обновить статус выбранной запчасти"""
         selection = self.warehouse_tree.selection()
@@ -5849,6 +5887,8 @@ class AutoServiceApp:
 
         values = self.warehouse_tree.item(selection[0], "values")
         part_id = int(values[0])
+        if self.warehouse_part_in_work(part_id):
+            return
         current_status = values[7]  # колонка статуса (уже переведённая для отображения)
 
         # Защита от смены статуса "выдано"
@@ -5874,6 +5914,8 @@ class AutoServiceApp:
 
         values = self.warehouse_tree.item(selection[0], "values")
         part_id = int(values[0])
+        if self.warehouse_part_in_work(part_id):
+            return
 
         self.db.update_warehouse_part_paid(part_id, is_paid)
         self.refresh_warehouse()
@@ -5941,6 +5983,8 @@ class AutoServiceApp:
 
         values = self.warehouse_tree.item(selection[0], "values")
         part_id = int(values[0])
+        if self.warehouse_part_in_work(part_id):
+            return
 
         # Получаем данные запчасти из БД
         part_data = self.db.get_warehouse_part_by_id(part_id)
@@ -6080,6 +6124,8 @@ class AutoServiceApp:
         values = self.warehouse_tree.item(selection[0], "values")
         part_id = int(values[0])
         part_name = values[3]
+        if self.warehouse_part_in_work(part_id):
+            return
 
         if messagebox.askyesno(self.tr("common.confirm"), self.tr("warehouse.msg_confirm_delete_part", part_name=part_name)):
             self.db.delete_warehouse_part(part_id)
@@ -7305,8 +7351,10 @@ class AutoServiceApp:
         btn_row.pack(fill=tk.X, pady=(0, 10))
         ctk.CTkButton(btn_row, text=self.tr("backup.now"), fg_color="green", hover_color="darkgreen",
                      command=lambda: self._do_backup_now(silent=False)).pack(side=tk.LEFT, padx=(0, 10))
-        ctk.CTkButton(btn_row, text=self.tr("backup.restore"), fg_color="#c62828", hover_color="#b71c1c",
-                     command=self._do_restore_backup).pack(side=tk.LEFT)
+        # Восстановление заменяет все данные - только администратору
+        if self.can_restore_backup(self.current_user.get("role")):
+            ctk.CTkButton(btn_row, text=self.tr("backup.restore"), fg_color="#c62828", hover_color="#b71c1c",
+                         command=self._do_restore_backup).pack(side=tk.LEFT)
 
     def _browse_backup_folder(self):
         """Выбрать папку для бэкапов (обычно -- синхронизируемая папка Google
@@ -7399,7 +7447,9 @@ class AutoServiceApp:
         return made_any
 
     def _do_restore_backup(self):
-        """Восстановить БД и настройки из выбранного .zip-бэкапа."""
+        """Восстановить БД и настройки из выбранного .zip-бэкапа (только администратор)."""
+        if not self.can_restore_backup(self.current_user.get("role")):
+            return
         settings = self.load_settings()
         folder = settings.get('backup_folder') or LOCAL_BACKUP_DIR
 
@@ -7998,8 +8048,9 @@ class AutoServiceApp:
         self._stats_monthly_rows = [(ym, int(visits), float(total)) for ym, visits, total in monthly_rows]
         self._redraw_stats_monthly(self._stats_monthly_rows)
 
-        # Сводка
-        total_visits = sum(r[1] for r in self._stats_brand_rows)
+        # Сводка. Визиты - по всем нарядам периода (как в динамике по месяцам): в таблице марок машин без марки
+        # нет, и раньше их визиты в «Всего визитов» терялись
+        total_visits = sum(r[1] for r in self._stats_monthly_rows)
         total_clients = len(self._stats_client_rows)
         total_brands = len(self._stats_brand_rows)
         self.stats_summary_label.configure(text=self.tr(
@@ -8686,21 +8737,23 @@ class AutoServiceApp:
 
             # Получаем данные записи для уведомления
             booking = self.db.get_booking_by_id(booking_id)
+            # Уже выполнена - ничего не делаем: иначе клиенту снова уйдёт «машина готова»
+            if booking and booking.get("status") == "completed":
+                messagebox.showinfo(self.tr("common.info"), self.tr("bookings.msg_already_completed"))
+                return
 
             self.db.update_booking_status(booking_id, "completed")
             self.db.mark_work_completed(booking_id)
             self.refresh_bookings()
 
-            # Помечаем использованные складские запчасти как "выдано"
-            if work:
-                car_number = work[8]
-                if car_number:
-                    wh_parts = self.db.get_warehouse_parts_by_car_number(car_number, status="установлена")
-                    for wh_part in wh_parts:
-                        self.db.update_warehouse_part_status(wh_part[0], "выдано")
-                        self.db.update_warehouse_part_paid(wh_part[0], True)
-                    if wh_parts:
-                        self.refresh_warehouse()
+            # Запчасти нарядов этой записи - "выдано" и оплачены (не все "установлена" этой машины:
+            # у неё может быть новый наряд "в работе" со своими деталями)
+            wh_parts = self.db.get_installed_parts_for_booking(booking_id, work[8])
+            for part_id in wh_parts:
+                self.db.update_warehouse_part_status(part_id, "выдано")
+                self.db.update_warehouse_part_paid(part_id, True)
+            if wh_parts:
+                self.refresh_warehouse()
 
             # Отправляем уведомление клиенту (Telegram и/или SMS)
             if booking:

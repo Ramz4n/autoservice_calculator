@@ -10,10 +10,22 @@ from datetime import date
 
 PLATES = ["Т301ТТ799", "Т302ТТ799", "Т303ТТ799", "Т304ТТ799", "Т305ТТ799", "Т306ТТ799", "Т307ТТ799",
           "Т308ТТ799", "Т309ТТ799", "Т310ТТ799", "Т311ТТ799", "Т312ТТ799", "Т313ТТ799", "Т314ТТ799",
-          "Т315ТТ799"]
+          "Т315ТТ799", "Т316ТТ799", "Т317ТТ799",
+          "Т318ТТ799", "Т319ТТ799", "Т320ТТ799", "Т321ТТ799", "Т322ТТ799",
+          "Т323ТТ799", "Т324ТТ799", "Т325ТТ799",
+          "Т326ТТ799", "Т327ТТ799", "Т328ТТ799", "Т329ТТ799", "Т330ТТ799", "Т331ТТ799", "Т332ТТ799",
+          "Т333ТТ799", "Т334ТТ799", "Т335ТТ799", "Т336ТТ799",
+          "Т337ТТ799", "Т338ТТ799", "Т339ТТ799"]
 PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+79000000305", "+79000000306",
           "+79000000307", "+79000000308", "+79000000309", "+79000000310", "+79000000311", "+79000000312",
-          "+79000000313", "+79000000314", "+79000000315", "+79000000316", "+79000000317", "+79000000318"]
+          "+79000000313", "+79000000314", "+79000000315", "+79000000316", "+79000000317", "+79000000318",
+          "+79000000319", "+79000000320",
+          "+79000000321", "+79000000322", "+79000000323",
+          "+79000000324", "+79000000325", "+79000000326",
+          "+79000000327", "+79000000328",
+          "+79000000329", "+79000000330", "+79000000331", "+79000000332", "+79000000334", "+79000000335",
+          "+79000000336", "+79000000337", "+79000000338", "+79000000339",
+          "+79000000340", "+79000000341", "+79000000342"]
 MASTER = "Тест Мастер"
 STAFF_POSITION, STAFF = "Тест-администратор", "Тест Админ"   # должность НЕ «с машинами»
 
@@ -977,8 +989,1062 @@ def test_master_percent_change(h):
         app.percent_var.set(old)
 
 
+def test_warehouse_part_in_work_locked(h):
+    """Деталь уже в наряде («установлена»): на складе её нельзя удалить, изменить, перевести «На складе» /
+    «Выдано», отметить оплату - иначе склад и наряд разойдутся (меняется через наряд). Убрали из наряда -
+    снова можно"""
+    app = h.app
+    work_id, booking_id, _ = save_work(h, "т316тт799", "ТестЗамок", "Модель", "9000000319", "Тест Замок",
+                                       "Тест работа замка", 700)
+    if not h.check("наряд «в работе»", work_id):
+        return
+    h.warehouse_form("т316тт799", part="Тест деталь в наряде", price="900")
+    part = h.warehouse_part("Тест деталь в наряде")
+    h.warehouse_set_status(part[0], "на складе")
+    app.open_booking_in_add_work(booking_id)
+    h.root.update()
+    h.works_add_from_warehouse(["Тест деталь в наряде"])
+    app.add_work()
+    h.root.update()
+    part = h.warehouse_part("Тест деталь в наряде")
+    if not h.check("деталь «установлена» в наряде", part[1] == "установлена" and part[2] == work_id, part):
+        return
+
+    def state():
+        return h.q("SELECT status, work_id, is_paid, part_name, price FROM warehouse_parts WHERE id = %s", (part[0],))
+
+    before = state()
+    for label, action in (("«На складе»", lambda: app.update_part_status("на складе")),
+                          ("«Выдано»", lambda: app.update_part_status("выдано")),
+                          ("«Оплачено»", lambda: app.set_warehouse_part_paid(True)),
+                          ("«Удалить»", app.delete_warehouse_part)):
+        h.warehouse_select(part[0])
+        n = len(h.dialogs)
+        h.answers[:] = [True, True]
+        action()
+        h.root.update()
+        h.answers[:] = []
+        h.check(f"склад, деталь в наряде: {label} - предупреждение «в наряде», деталь не изменилась",
+                any(d[0] == "showwarning" and "наряд" in d[2] for d in h.dialogs_since(n)) and state() == before,
+                (h.dialogs_since(n), state()))
+    h.warehouse_select(part[0])
+    n = len(h.dialogs)
+    opened = h.new_windows(app.edit_warehouse_part)
+    h.check("склад, деталь в наряде: «Изменить» - окно не открывается, предупреждение",
+            not opened and any(d[0] == "showwarning" and "наряд" in d[2] for d in h.dialogs_since(n)), opened)
+
+    # Убрали из наряда - деталь снова «на складе», её можно менять и удалять
+    app.open_booking_in_add_work(booking_id)
+    h.root.update()
+    h.works_remove_part("Тест деталь в наряде")
+    app.add_work()
+    h.root.update()
+    h.check("убрали из наряда - «на складе»", h.warehouse_part("Тест деталь в наряде")[1] == "на складе")
+    h.warehouse_select(part[0])
+    h.answers[:] = [True]
+    app.delete_warehouse_part()
+    h.answers[:] = []
+    h.check("деталь со склада (не в наряде) удаляется", not h.warehouse_part("Тест деталь в наряде"))
+    h.complete_booking(booking_id)
+    app.clear_work_form()
+
+
+def test_start_work_from_booking(h):
+    """«Записи» → «Начать работу»: открывается «Добавить работу» с клиентом и машиной записи; сохранили -
+    наряд привязан к этой записи, она «в работе», новой записи нет. Начать работу можно только у записи
+    «в ожидании» и не просроченной; «Выполнено» без работ - нельзя"""
+    from datetime import timedelta
+    app, db = h.app, h.app.db
+    h.booking_form("т317тт799", "ТестСтарт", "Модель", "9000000320", "Тест Начать Работу")
+    car = h.car("Т317ТТ799")
+    booking = h.q("SELECT id FROM bookings WHERE car_id = %s", (car[0],)) if car else ()
+    if not h.check("запись «в ожидании» создана", booking, booking):
+        return
+    booking_id = booking[0][0]
+
+    n = len(h.dialogs)
+    app.get_selected_booking_id = lambda: booking_id
+    app.mark_booking_completed()
+    h.check("«Выполнено» без работ - предупреждение, запись «в ожидании»",
+            any(d[0] == "showwarning" and "не добавлено ни одной работы" in d[2] for d in h.dialogs_since(n))
+            and h.q("SELECT status FROM bookings WHERE id = %s", (booking_id,)) == (("waiting",),))
+
+    if not h.check("запись видна в «Записях»", h.bookings_select(booking_id)):
+        return
+    app.start_work_from_booking()
+    h.root.update()
+    h.check("«Начать работу» - вкладка «Добавить работу» с этой записью",
+            app.current_tab == "works" and app.selected_booking_id == booking_id
+            and app.car_number_entry.get().upper() == "Т317ТТ799"
+            and app.client_name_entry.get() == "Тест Начать Работу",
+            (app.current_tab, app.selected_booking_id, app.car_number_entry.get(), app.client_name_entry.get()))
+    bookings_before = h.q("SELECT COUNT(*) FROM bookings")[0][0]
+    app.refresh_workers_combo()
+    app.worker_combo.set(MASTER)
+    h.add_work_item("Тест работа по записи", 1100)
+    app.add_work()
+    h.root.update()
+    work = h.q("SELECT booking_id, car_id FROM works WHERE description = 'Тест работа по записи'")
+    h.check("наряд привязан к записи и её машине, новой записи нет",
+            work == ((booking_id, car[0]),) and h.q("SELECT COUNT(*) FROM bookings")[0][0] == bookings_before,
+            work)
+    h.check("запись «в работе»", h.q("SELECT status FROM bookings WHERE id = %s", (booking_id,)) == (("in_progress",),))
+
+    # Повторно «Начать работу» - только для «в ожидании»
+    h.bookings_select(booking_id)
+    n = len(h.dialogs)
+    app.start_work_from_booking()
+    h.check("«Начать работу» у записи «в работе» - предупреждение",
+            any(d[0] == "showwarning" and "В ожидании" in d[2] for d in h.dialogs_since(n)))
+    h.complete_booking(booking_id)
+
+    # Просроченная (вчера, «в ожидании») - работу не начать
+    overdue = db.add_booking(date.today() - timedelta(days=1), "10:00", car[1], car[0])
+    n = len(h.dialogs)
+    if h.bookings_select(overdue):
+        app.start_work_from_booking()
+    else:
+        app.open_booking_in_add_work(overdue)
+    h.check("просроченная запись - работу не начать, предупреждение",
+            any(d[0] == "showwarning" and "просрочена" in d[2] for d in h.dialogs_since(n))
+            and not h.q("SELECT id FROM works WHERE booking_id = %s", (overdue,)))
+    app.clear_work_form()
+
+
+def test_switch_car_unsaved(h):
+    """«Добавить работу», клиент с двумя машинами: открыт наряд машины 1, дописали работу и нажали машину 2 -
+    вопрос «сохранить?»: «Отмена» - остаёмся, ничего не потеряно; «Нет» - правка не сохранена, открыта новая
+    запись машины 2; снова машина 1 - её наряд как в базе; «Да» - правка сохранена в наряд машины 1"""
+    app, db = h.app, h.app.db
+    client = db.get_or_create_client(full_name="Тест Переключение", phone="+79000000321")
+    db.get_or_create_car(client, "Kia", "Rio", "Т318ТТ799")
+    db.get_or_create_car(client, "Lada", "Vesta", "Т319ТТ799")
+    work_id, booking_id, _ = save_work(h, "т318тт799", None, None, None, None, "Тест работа машины 1", 1000)
+    if not h.check("наряд машины 1 «в работе»", work_id):
+        return
+    chips = app.client_cars_combo
+    amount = lambda: float(h.q("SELECT amount FROM works WHERE id = %s", (work_id,))[0][0])
+
+    def open_and_add(item):
+        app.open_booking_in_add_work(booking_id)
+        h.root.update()
+        h.add_work_item(item, 500)
+
+    def chip(number):
+        return next(v for v in chips._values if number in v)
+
+    open_and_add("Тест несохранённая")
+    h.answers[:] = [None]
+    n = len(h.dialogs)
+    chips._click(chip("Т319ТТ799"))
+    h.root.update()
+    h.check("машина 2 при несохранённой правке - вопрос «сохранить?»",
+            any(d[0] == "askyesnocancel" for d in h.dialogs_since(n)), h.dialogs_since(n))
+    h.check("«Отмена» - остались в наряде машины 1, дописанная работа на месте",
+            app.selected_booking_id == booking_id and app.car_number_entry.get().upper() == "Т318ТТ799"
+            and "Тест несохранённая" in [w for w, _ in app.works_list] and amount() == 1000)
+
+    h.answers[:] = [False]
+    chips._click(chip("Т319ТТ799"))
+    h.root.update()
+    h.check("«Нет» - правка не сохранена в наряд машины 1", amount() == 1000)
+    h.check("«Нет» - открыта новая запись машины 2 того же клиента",
+            not getattr(app, "editing_work_id", None) and app.car_number_entry.get().upper() == "Т319ТТ799"
+            and app.client_name_entry.get() == "Тест Переключение" and not app.works_list,
+            (app.car_number_entry.get(), app.works_list))
+    chips._click(chip("Т318ТТ799"))
+    h.root.update()
+    h.check("снова машина 1 - её наряд как в базе (без несохранённой работы)",
+            app.selected_booking_id == booking_id and [w for w, _ in app.works_list] == ["Тест работа машины 1"],
+            app.works_list)
+
+    h.add_work_item("Тест сохранённая", 500)
+    h.answers[:] = [True]
+    chips._click(chip("Т319ТТ799"))
+    h.root.update()
+    h.answers[:] = []
+    h.check("«Да» - правка сохранена в наряд машины 1 (1000 + 500)", amount() == 1500, amount())
+    h.check("после «Да» - открыта машина 2", app.car_number_entry.get().upper() == "Т319ТТ799")
+    h.complete_booking(booking_id)
+    app.clear_work_form()
+
+
+def test_same_vin_new_plate(h):
+    """«Добавить работу»: новый госномер, а VIN как у машины в базе (перерегистрация).
+    Тот же владелец: «Нет» - не сохранено; «Да» - у той же машины новый госномер, история с ней.
+    Другой человек: вопрос про нового владельца; «Отмена» - ничего; «Да» - госномер и история к нему"""
+    app = h.app
+    vin = "XTA21099TEST00001"
+    work_id, booking_id, _ = save_work(h, "т320тт799", "ТестВИН", "Модель", "9000000322", "Тест Владелец ВИН",
+                                       "Тест работа до перерегистрации", 600)
+    if not h.check("машина с работой", work_id):
+        return
+    h.complete_booking(booking_id)
+    car = h.car("Т320ТТ799")
+    h.q("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, car[0]))
+
+    def try_save(plate, phone10, name, answers):
+        h.answers[:] = list(answers)
+        n = len(h.dialogs)
+        last = h.q("SELECT COALESCE(MAX(id), 0) FROM works")[0][0]
+        h.works_form(plate, "ТестВИН", "Модель", phone10, name, master=None, save=False)
+        app.vin_var.set(vin)
+        app.refresh_workers_combo()
+        app.worker_combo.set(MASTER)
+        h.add_work_item("Тест работа после перерегистрации", 400)
+        app.add_work()
+        h.root.update()
+        h.answers[:] = []
+        new = h.q("SELECT id, booking_id FROM works WHERE id > %s", (last,))
+        if new:
+            h.complete_booking(new[0][1])
+        else:
+            app.clear_work_form()
+        return h.dialogs_since(n), new
+
+    dialogs, new = try_save("т321тт799", "9000000322", "Тест Владелец ВИН", [False])
+    h.check("тот же VIN и владелец: вопрос «та же машина?»; «Нет» - не сохранено, госномер прежний",
+            any(d[0] == "askyesno" and vin in d[2] for d in dialogs) and not new
+            and h.car("Т320ТТ799") and not h.car("Т321ТТ799"), dialogs)
+    dialogs, new = try_save("т321тт799", "9000000322", "Тест Владелец ВИН", [True])
+    moved = h.car("Т321ТТ799")
+    h.check("«Да» - у той же машины новый госномер, второй машины нет",
+            new and moved and moved[0] == car[0] and not h.car("Т320ТТ799")
+            and h.q("SELECT COUNT(*) FROM client_cars WHERE vin = %s", (vin,))[0][0] == 1, (moved, car))
+    h.check("история: старая и новая работа - у этой машины",
+            h.q("SELECT COUNT(*) FROM works WHERE car_id = %s", (car[0],))[0][0] == 2)
+
+    owner_before = moved[1]
+    dialogs, new = try_save("т322тт799", "9000000323", "Покупатель ВИН", [None])
+    h.check("другой человек: вопрос про нового владельца; «Отмена» - ничего не сохранено",
+            any(d[0] == "askyesnocancel" and vin in d[2] for d in dialogs) and not new
+            and h.car("Т321ТТ799") and h.car("Т321ТТ799")[1] == owner_before, dialogs)
+    dialogs, new = try_save("т322тт799", "9000000323", "Покупатель ВИН", [True])
+    sold = h.car("Т322ТТ799")
+    buyer = h.q("SELECT id FROM clients WHERE phone = '+79000000323'")
+    h.check("«Да» - та же машина с новым госномером у покупателя, вся история - его",
+            new and sold and sold[0] == car[0] and buyer and sold[1] == buyer[0][0]
+            and {r[0] for r in h.q("SELECT client_id FROM works WHERE car_id = %s", (car[0],))} == {buyer[0][0]},
+            (sold, buyer))
+
+
+def test_report_details(h):
+    """«Отчёты» → «Подробно»: работы мастера по машинам (клиент, дата, работа, цена), итог окна = сумма
+    в его строке сводки; работа «в работе» (не выполнена) в «Подробно» не попадает"""
+    app = h.app
+    add_test_worker(h, "Тест Подробный")
+    w1, b1, _ = save_work(h, "т323тт799", "ТестПодр", "Один", "9000000324", "Тест Клиент Один",
+                          "Тест замена масла", 1500, master="Тест Подробный")
+    h.app.open_booking_in_add_work(b1)
+    h.root.update()
+    h.add_work_item("Тест замена фильтра", 400)
+    app.add_work()
+    h.root.update()
+    h.complete_booking(b1)
+    w2, b2, _ = save_work(h, "т324тт799", "ТестПодр", "Два", "9000000325", "Тест Клиент Два",
+                          "Тест развал", 2200, master="Тест Подробный")
+    h.complete_booking(b2)
+    w3, b3, _ = save_work(h, "т325тт799", "ТестПодр", "Три", "9000000326", "Тест Клиент Три",
+                          "Тест не выполнена", 999, master="Тест Подробный")
+    if not h.check("три наряда сохранены, два выполнены", w1 and w2 and w3):
+        return
+
+    row = h.report()["rows"].get("Тест Подробный", {})
+    d = h.report_details("Тест Подробный")
+    if not h.check("«Подробно» открывается", d):
+        return
+    cars = {k.split("(")[0].replace("🚗", "").strip(): v for k, v in d["cars"].items()}
+    one, two = cars.get("ТестПодр Один Т323ТТ799"), cars.get("ТестПодр Два Т324ТТ799")
+    h.check("машина 1: клиент, две работы 1500 + 400, итог 1900",
+            one and one[0] == "Тест Клиент Один" and near(one[1], 1900)
+            and sorted((w, p) for _, w, p in one[2]) == [("Тест замена масла", 1500.0), ("Тест замена фильтра", 400.0)],
+            one)
+    h.check("машина 2: клиент, работа 2200", two and two[0] == "Тест Клиент Два" and near(two[1], 2200), two)
+    h.check("наряд «в работе» в «Подробно» не попал", "ТестПодр Три Т325ТТ799" not in cars, list(cars))
+    h.check("дата у работ - сегодня", all(r[0] == date.today().strftime("%d.%m.%Y") for v in cars.values() for r in v[2]))
+    h.check("итог окна 4100 = сумма мастера в сводке", near(d["total"], 4100) and near(row.get("total", 0), 4100),
+            (d["total"], row))
+    h.check("внизу: 2 машины, 2 наряда", app.tr("reports.footer_summary", cars=2, works=2) in d["labels"],
+            d["labels"])
+    h.complete_booking(b3)
+
+
+def test_change_worker_position(h):
+    """«Сменить должность»: мастера перевели в должность не «с машинами» - нет в «Добавить работу», его работы
+    в «Отчётах» (в группе новой должности), «Выписать выплату»; его открытый наряд открывается с ним (без
+    «уволен»); вернули в мастера - снова в списке"""
+    app = h.app
+    worker_id, master_position = add_test_worker(h, "Тест Переводимый")
+    w1, b1, _ = save_work(h, "т326тт799", "ТестПеревод", "Один", "9000000327", "Тест Перевод Один",
+                          "Тест работа до перевода", 1000, master="Тест Переводимый")
+    h.complete_booking(b1)
+    w2, b2, _ = save_work(h, "т327тт799", "ТестПеревод", "Два", "9000000328", "Тест Перевод Два",
+                          "Тест открытая работа", 500, master="Тест Переводимый")
+    if not h.check("выполненный и открытый наряды", w1 and w2):
+        return
+    before = h.report()
+
+    def change_to(position_name):
+        app.refresh_workers_list()
+        app.workers_tree.selection_set(str(worker_id))
+        app.worker_change_position_combo.set(position_name)
+        app.change_worker_position()
+        h.root.update()
+
+    change_to(STAFF_POSITION)
+    staff_position = h.q("SELECT id FROM positions WHERE name = %s", (STAFF_POSITION,))[0][0]
+    h.check("должность сменена", h.q("SELECT position_id FROM workers WHERE id = %s", (worker_id,))
+            == ((staff_position,),))
+    h.check("нет в «Добавить работу»", "Тест Переводимый" not in app.workers_data)
+    r = h.report()
+    row = r["rows"].get("Тест Переводимый", {})
+    group = app.summary_workers[next(i for i, w in app.summary_workers.items() if w["id"] == worker_id)]
+    h.check("«Отчёты»: работа 1000 осталась, он в группе новой должности, итоги как были",
+            row.get("count") == 1 and near(row.get("total", 0), 1000) and group["position"] == STAFF_POSITION
+            and all(near(r[k], before[k]) for k in ("income", "masters", "profit")), (row, group, before, r))
+    label, _ = h.report_menu("Тест Переводимый")
+    h.check("«Отчёты»: ему «Выписать выплату»", label.endswith(app.tr("reports.ctx_add_payment")), label)
+
+    app.open_booking_in_add_work(b2)
+    h.root.update()
+    h.check("его открытый наряд открывается с ним, без пометки «уволен»",
+            app.worker_combo.get() == "Тест Переводимый", app.worker_combo.get())
+    app.clear_work_form()
+
+    master_name = h.q("SELECT name FROM positions WHERE id = %s", (master_position,))[0][0]
+    change_to(master_name)
+    h.check("вернули в мастера - снова в «Добавить работу»", "Тест Переводимый" in app.workers_data)
+    h.complete_booking(b2)
+
+
+def test_backup_restore(h):
+    """Резервная копия → восстановление (Настройки → Резервная копия → «Восстановить»): данные как в копии,
+    программа просит перезапуск. «Нет» на вопросе - ничего. Битая копия - ошибка, а данные ОСТАЛИСЬ как были
+    (раньше таблицы очищались до вставки, и при ошибке база оставалась пустой)"""
+    import json, os, shutil, tempfile, zipfile
+    import backup as backup_module
+    app, m = h.app, h.m
+    folder = tempfile.mkdtemp(prefix="alexan_test_backup_")
+    real_ask, real_restart = m.filedialog.askopenfilename, app.restart_application
+    restarts = []
+    app.restart_application = lambda: restarts.append(1)
+
+    def counts():
+        return {t: h.q(f"SELECT COUNT(*) FROM `{t}`")[0][0] for t in backup_module.TABLES}
+
+    def restore(path, answers):
+        m.filedialog.askopenfilename = lambda **kw: path
+        h.answers[:] = list(answers)
+        n = len(h.dialogs)
+        app._do_restore_backup()
+        h.answers[:] = []
+        return h.dialogs_since(n)
+
+    try:
+        path = backup_module.create_backup(app.db, folder, m.SETTINGS_FILE, m.SPARE_PARTS_FILE)
+        saved = counts()
+        h.check("копия создана: файл .zip с базой и настройками",
+                os.path.exists(path) and {"db.json", "settings.json"} <= set(zipfile.ZipFile(path).namelist()))
+
+        # Изменения после копии
+        app.db.add_expense("Тест после копии", 123, date.today(), "Тест", False)
+        client = app.db.get_or_create_client(full_name="Тест После Копии", phone="+79000000329")
+        changed = counts()
+
+        dialogs = restore(path, [False])
+        h.check("«Нет» на вопросе - ничего не изменилось", counts() == changed and not restarts, dialogs)
+
+        # Битая копия: в данных две одинаковые строки - вставка падает на середине
+        broken = os.path.join(folder, "broken.zip")
+        with zipfile.ZipFile(path) as src:
+            dump = json.loads(src.read("db.json"))
+        table = next(t for t in ("clients", "client_cars", "works") if dump.get(t))
+        dump[table].append(dict(dump[table][0]))
+        with zipfile.ZipFile(broken, "w") as dst:
+            dst.writestr("db.json", json.dumps(dump, ensure_ascii=False))
+        dialogs = restore(broken, [True])
+        h.check("битая копия - ошибка «данные остались прежними», перезапуска нет",
+                any(d[0] == "showerror" and "остались прежними" in d[2] for d in dialogs) and not restarts, dialogs)
+        h.check("битая копия - данные остались как были (ничего не пропало)", counts() == changed,
+                {t: (changed[t], c) for t, c in counts().items() if c != changed[t]})
+        h.check("битая копия - клиент, добавленный после копии, на месте",
+                h.q("SELECT id FROM clients WHERE id = %s", (client,)))
+
+        dialogs = restore(path, [True])
+        h.check("восстановили - «готово» и перезапуск программы",
+                any(d[0] == "showinfo" for d in dialogs) and restarts, dialogs)
+        h.check("восстановили - данные как в копии (по всем таблицам)", counts() == saved,
+                {t: (saved[t], c) for t, c in counts().items() if c != saved[t]})
+        h.check("восстановили - того, что добавили после копии, нет",
+                not h.q("SELECT id FROM clients WHERE id = %s", (client,))
+                and not h.q("SELECT id FROM expenses WHERE description = 'Тест после копии'"))
+    finally:
+        m.filedialog.askopenfilename = real_ask
+        app.restart_application = real_restart
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_slot_capacity(h):
+    """«Записать клиента», мест на одно время = min(настройка, работающие мастера). Пока место есть -
+    записывает без вопросов; мест нет - «время занято» со списком машин: «Нет» - не записан,
+    «Да» - записан сверх мест (администратор решил сам)"""
+    from datetime import timedelta
+    app, db = h.app, h.app.db
+    slots = h.m.booking_time_slots()
+    # День через месяц и время, на которое ещё никто не записан
+    day = time = None
+    for d in range(30, 60):
+        candidate = date.today() + timedelta(days=d)
+        busy = {str(r[0])[:5] for r in h.q("SELECT booking_time FROM bookings WHERE booking_date = %s", (candidate,))}
+        free = [t for t in slots[1:] if t not in busy and not t.zfill(5) in busy]
+        if free:
+            day, time = candidate, free[0]
+            break
+    cap = db.day_capacity(day)["capacity"] if day else 0
+    if not h.check(f"есть свободное время ({day} {time}), мест на время: {cap}", time and 1 <= cap <= 3, cap):
+        return
+    plates = ["Т328ТТ799", "Т329ТТ799", "Т330ТТ799", "Т331ТТ799"]
+    for i, plate in enumerate(plates[:cap - 1]):
+        client = db.get_or_create_client(full_name=f"Тест Место {i}", phone=f"+7900000033{i}")
+        car = db.get_or_create_car(client, "ТестМесто", "Модель", plate)
+        db.add_booking(day, time, client, car)
+
+    def count():
+        return h.q("SELECT COUNT(*) FROM bookings WHERE booking_date = %s AND booking_time = %s", (day, time))[0][0]
+
+    n = len(h.dialogs)
+    h.booking_form("т331тт799", "ТестМесто", "Последнее", "9000000334", "Тест Последнее Место", day=day, time=time)
+    h.check(f"последнее ({cap}-е) место - записан без вопроса «занято»",
+            count() == cap and not any(d[0] == "askyesno" for d in h.dialogs_since(n)), (count(), h.dialogs_since(n)))
+
+    n = len(h.dialogs)
+    h.answers[:] = [False]
+    h.booking_form("т332тт799", "ТестМесто", "Лишний", "9000000335", "Тест Лишний", day=day, time=time)
+    h.answers[:] = []
+    asked = [d for d in h.dialogs_since(n) if d[0] == "askyesno"]
+    h.check("мест нет - вопрос «время занято» со списком машин; «Нет» - не записан",
+            asked and "Т331ТТ799" in asked[0][2] and count() == cap, (asked, count()))
+    h.answers[:] = [True]
+    h.booking_form("т332тт799", "ТестМесто", "Лишний", "9000000335", "Тест Лишний", day=day, time=time)
+    h.answers[:] = []
+    h.check("«Да» - записан сверх мест", count() == cap + 1, count())
+    h.check("другое время в тот же день - свободно", db.is_time_slot_available(day, next(t for t in slots if t != time)))
+
+
+def test_work_parts_mileage_vin(h):
+    """«Добавить работу»: запчасть вручную - в итоге наряда и в базе, но не в доходе и не в зарплате мастера;
+    ✕ в строке («Нет» - осталась, «Да» - убрана, итог пересчитан); пробег - в наряде и у машины;
+    VIN короче 17 - вопрос («Нет» - не сохранено); другой VIN у машины - «оставить» / «заменить» / отмена"""
+    app = h.app
+    percent = h.master_percent()
+    base = h.report()
+    h.works_form("т333тт799", "ТестЗапч", "Модель", "9000000336", "Тест Запчасть Вручную", master=None, save=False)
+    app.refresh_workers_combo()
+    app.worker_combo.set(MASTER)
+    h.add_work_item("Тест работа с запчастью", 1000)
+    h.add_work_item("Тест лишняя работа", 300)
+    app.part_name_entry.insert(0, "Тест колодки")
+    app.part_price_entry.delete(0, "end"); app.part_price_entry.insert(0, "2500")
+    app.add_part_to_list()
+    h.check("запчасть вручную в списке, итог 1000 + 300 + 2500",
+            app.parts_list == [("Тест колодки", 2500.0)] and "3.800,00" in app.works_total_label.cget("text"),
+            (app.parts_list, app.works_total_label.cget("text")))
+
+    extra = app.works_tree.get_children()[1]
+    h.answers[:] = [False]
+    app.remove_work_from_list(extra)
+    h.check("✕ у работы, «Нет» - осталась", len(app.works_list) == 2)
+    h.answers[:] = [True]
+    app.remove_work_from_list(extra)
+    h.answers[:] = []
+    h.check("✕ у работы, «Да» - убрана, итог 3500",
+            [w for w, _ in app.works_list] == ["Тест работа с запчастью"] and "3.500,00" in app.works_total_label.cget("text"),
+            app.works_total_label.cget("text"))
+
+    app.mileage_entry.insert(0, "123456")
+    app.vin_var.set("XTA2109")
+    h.answers[:] = [False]
+    n = len(h.dialogs)
+    app.add_work()
+    h.root.update()
+    h.check("VIN короче 17 - вопрос; «Нет» - не сохранено",
+            any(d[0] == "askyesno" and "VIN" in d[2] for d in h.dialogs_since(n)) and not h.car("Т333ТТ799"))
+    app.vin_var.set("XTA21099TEST00333")
+    h.answers[:] = []
+    app.add_work()
+    h.root.update()
+    car = h.car("Т333ТТ799")
+    work = h.q("SELECT id, booking_id, mileage, amount FROM works WHERE description = 'Тест работа с запчастью'")
+    if not h.check("наряд сохранён", car and work, work):
+        return
+    work_id, booking_id, mileage, amount = work[0]
+    h.check("пробег 123456 - в наряде и у машины",
+            mileage == 123456 and str(h.q("SELECT mileage FROM client_cars WHERE id = %s", (car[0],))[0][0])
+            .replace(" ", "") == "123456", mileage)
+    h.check("запчасть сохранена в наряде с ценой; сумма работ наряда - 1000 (без запчасти)",
+            h.q("SELECT part_name, part_price FROM parts WHERE work_id = %s", (work_id,)) == (("Тест колодки", 2500),)
+            and float(amount) == 1000, amount)
+    h.complete_booking(booking_id)
+    r = h.report()
+    h.check("«Отчёты»: доход +1000 и мастеру процент от 1000 - запчасть не входит",
+            near(r["income"] - base["income"], 1000) and near(r["masters"] - base["masters"], 1000 * percent / 100),
+            (base, r))
+
+    # Другой VIN у машины: «оставить» / «заменить» / отмена (окно выбора подменяем ответом)
+    real = app.ask_vin_overwrite
+    asked = []
+    try:
+        for answer, expect, label in ((None, "XTA21099TEST00333", "отмена - не сохранено"),
+                                      ("keep", "XTA21099TEST00333", "«оставить старый» - VIN прежний"),
+                                      ("overwrite", "XTA21099TEST00999", "«заменить» - VIN новый")):
+            app.ask_vin_overwrite = lambda old, new, a=answer: (asked.append((old, new)), a)[1]
+            before = h.q("SELECT COUNT(*) FROM works WHERE car_id = %s", (car[0],))[0][0]
+            h.works_form("т333тт799", master=None, save=False)
+            app.worker_combo.set(MASTER)
+            h.add_work_item("Тест работа VIN " + str(answer), 200)
+            app.vin_var.set("XTA21099TEST00999")
+            app.add_work()
+            h.root.update()
+            saved = h.q("SELECT COUNT(*) FROM works WHERE car_id = %s", (car[0],))[0][0] - before
+            vin = h.q("SELECT vin FROM client_cars WHERE id = %s", (car[0],))[0][0]
+            h.check(f"другой VIN: окно со старым и новым VIN; {label}",
+                    vin == expect and saved == (0 if answer is None else 1)
+                    and asked and asked[-1] == ("XTA21099TEST00333", "XTA21099TEST00999"), (vin, saved, asked))
+            new = h.q("SELECT booking_id FROM works WHERE car_id = %s AND booking_id IS NOT NULL "
+                      "ORDER BY id DESC LIMIT 1", (car[0],))
+            if saved and new:
+                h.complete_booking(new[0][0])
+            app.clear_work_form()
+    finally:
+        app.ask_vin_overwrite = real
+
+
+def test_warehouse_edit_search_goto(h):
+    """Склад: поиск (деталь, телефон), фильтр по статусу; «Изменить» обычной детали (название, количество,
+    цена, статус, примечание; количество буквами - не сохраняется); «Выдано» → «На складе» с вопросом;
+    «Перейти к записи» - вкладка «Записи», выделена запись машины"""
+    import customtkinter as ctk
+    app = h.app
+    h.booking_form("т334тт799", "ТестСклад", "Поиск", "9000000337", "Тест Склад Поиск")
+    booking = h.q("SELECT b.id FROM bookings b JOIN client_cars cc ON cc.id = b.car_id "
+                  "WHERE cc.car_number = 'Т334ТТ799'")
+    h.warehouse_form("т334тт799", part="Тест деталь поиска", qty="1", price="700")
+    part = h.warehouse_part("Тест деталь поиска")
+    if not h.check("запись и деталь «в пути»", booking and part and part[1] == "в пути", (booking, part)):
+        return
+    part_id, booking_id = part[0], booking[0][0]
+
+    def shown():
+        return [str(app.warehouse_tree.item(i, "values")[0]) for i in app.warehouse_tree.get_children()]
+
+    app.switch_tab("warehouse")
+    for text, label in (("тест деталь поиска", "по названию детали"), ("9000000337", "по телефону"),
+                        ("т334тт799", "по госномеру")):
+        app.warehouse_search_entry.delete(0, "end"); app.warehouse_search_entry.insert(0, text)
+        app.refresh_warehouse()
+        h.check(f"склад, поиск {label} - находит деталь", str(part_id) in shown(), shown()[:5])
+    app.warehouse_search_entry.delete(0, "end"); app.warehouse_search_entry.insert(0, "Т334ТТ799")
+    app._warehouse_set_status(app.warehouse_status_label("на складе"))
+    h.check("фильтр «На складе» - детали «в пути» нет", str(part_id) not in shown())
+    app._warehouse_set_status(app.warehouse_status_label("в пути"))
+    h.check("фильтр «В пути» - деталь есть", str(part_id) in shown())
+    app._warehouse_set_status(app.tr("bookings.filter_all"))
+    app.warehouse_search_entry.delete(0, "end")
+
+    def edit(name=None, qty=None, price=None, status=None, notes=None, answers=()):
+        h.warehouse_select(part_id)
+        before = set(h.root.winfo_children())
+        app.edit_warehouse_part()
+        h.root.update()
+        win = next((x for x in h.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel)), None)
+        if win is None:
+            return False
+        name_e, qty_e, price_e, notes_e = h.find_widgets(win, ctk.CTkEntry)[:2] + h.find_widgets(win, ctk.CTkEntry)[2:4]
+        for entry, value in ((name_e, name), (qty_e, qty), (price_e, price), (notes_e, notes)):
+            if value is not None:
+                entry.delete(0, "end"); entry.insert(0, value)
+        if status is not None:
+            h.find_widgets(win, ctk.CTkComboBox)[0].set(app.warehouse_status_label(status))
+        h.answers[:] = list(answers)
+        h.find_button(win, app.tr("common.save")).invoke()
+        h.root.update()
+        h.answers[:] = []
+        if win.winfo_exists():
+            win.grab_release()
+            win.destroy()
+        return True
+
+    row = lambda: h.q("SELECT part_name, quantity, price, status, notes FROM warehouse_parts WHERE id = %s",
+                      (part_id,))[0]
+    before = row()
+    n = len(h.dialogs)
+    edit(qty="abc")
+    h.check("«Изменить», количество буквами - предупреждение, не сохранено",
+            any(d[0] == "showwarning" for d in h.dialogs_since(n)) and row() == before)
+    edit(name="Тест деталь изменена", qty="2", price="1500", status="на складе", notes="Тест заметка")
+    r = row()
+    h.check("«Изменить»: название, количество 2, цена 1500, «на складе», примечание",
+            r[0] == "Тест деталь изменена" and r[1] == 2 and float(r[2]) == 1500 and r[3] == "на складе"
+            and r[4] == "Тест заметка", r)
+
+    h.warehouse_set_status(part_id, "выдано")
+    h.answers[:] = [False]
+    h.warehouse_set_status(part_id, "на складе")
+    h.answers[:] = []
+    h.check("«Выдано» → «На складе», ответ «Нет» - осталась «выдано»", row()[3] == "выдано")
+    h.answers[:] = [True]
+    h.warehouse_set_status(part_id, "на складе")
+    h.answers[:] = []
+    h.check("«Выдано» → «На складе», ответ «Да» - «на складе»", row()[3] == "на складе")
+
+    h.warehouse_select(part_id)
+    app.goto_booking_from_warehouse()
+    h.root.update()
+    selected = [str(app.bookings_tree.item(i, "values")[0]) for i in app.bookings_tree.selection()]
+    h.check("«Перейти к записи» - «Записи», выделена запись этой машины",
+            app.current_tab == "bookings" and selected == [str(booking_id)], (app.current_tab, selected))
+
+
+def test_staff_calendar_clicks(h):
+    """«Сотрудники» (расписание): клик по клеткам ставит выбранное в легенде; соседние дни склеиваются в один
+    период, клик по середине - период разрезается; другой вид - заменяет; тот же - снимает. Отпуск на будущий
+    день - в «Записать клиента» на ту дату работающих мастеров меньше. Отпуск сегодня - в сводке «отсутствуют»"""
+    from datetime import timedelta
+    app, db = h.app, h.app.db
+    worker_id, _ = add_test_worker(h, "Тест Расписание")
+    app.switch_tab("staff")
+    app.refresh_staff_tab()
+    today = date.today()
+    nxt = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+    app.staff_month = nxt
+    app.draw_staff_calendar()
+    app.staff_canvas.xview_moveto(0)
+    app.staff_canvas.yview_moveto(0)
+    h.root.update()
+    row = next((top, bottom) for top, bottom, wid, _ in app.staff_layout() if wid == worker_id)
+
+    class Click:
+        pass
+
+    def click(day):
+        event = Click()
+        event.x = app.STAFF_NAME_W + (day.day - 1) * app.STAFF_CELL + app.STAFF_CELL // 2
+        event.y = (row[0] + row[1]) // 2
+        app.on_staff_canvas_click(event)
+        h.root.update()
+
+    def periods():
+        return [(a.day, b.day, k) for a, b, k in h.q(
+            "SELECT date_from, date_to, kind FROM worker_absences WHERE worker_id = %s ORDER BY date_from", (worker_id,))]
+
+    d10, d11, d12 = (nxt.replace(day=d) for d in (10, 11, 12))
+    working = db.day_capacity(d11)["working"]
+    app.set_staff_brush("vacation")
+    for day in (d10, d11, d12):
+        click(day)
+    h.check("клик по трём дням подряд - один отпуск 10–12", periods() == [(10, 12, "vacation")], periods())
+    h.check("«Записать клиента» на 11-е: работающих мастеров на одного меньше",
+            db.day_capacity(d11)["working"] == working - 1 and any(n == "Тест Расписание"
+                                                                  for n, _ in db.day_capacity(d11)["absent"]))
+    click(d11)
+    h.check("клик по 11-му (тот же «отпуск») - снят, период разрезан на 10 и 12",
+            periods() == [(10, 10, "vacation"), (12, 12, "vacation")], periods())
+    h.check("11-е снова рабочее - места как были", db.day_capacity(d11)["working"] == working)
+    app.set_staff_brush("sick")
+    click(d10)
+    h.check("другой вид («больничный») по 10-му - заменил отпуск", periods() == [(10, 10, "sick"), (12, 12, "vacation")],
+            periods())
+    click(d10)
+    app.set_staff_brush("vacation")
+    click(d12)
+    h.check("снова тем же видом - сняты, отсутствий нет", periods() == [], periods())
+
+    # Сегодня в отпуске - в сводке вкладки и в «Добавить работу»
+    db.set_worker_day(worker_id, today, "vacation")
+    app.after_staff_change()
+    h.check("отпуск сегодня - в сводке «отсутствуют» с ним",
+            "Тест Расписание" in app.staff_summary_label.cget("text"), app.staff_summary_label.cget("text"))
+    h.check("и в «Добавить работу» - с пометкой отпуска",
+            any(v == worker_id and k != "Тест Расписание" for k, v in app.workers_data.items()))
+    db.set_worker_day(worker_id, today, None)
+    app.after_staff_change()
+
+
+def test_settings_dictionaries(h):
+    """Настройки: марки и модели, ключевые слова (виды работ), запчасти - добавить (повтор - нельзя), импорт
+    из файла, удалить; добавленное появляется в подсказках «Добавить работу» (и склада), удалённое - пропадает"""
+    import json, os, shutil, tempfile
+    app, m = h.app, h.m
+    folder = tempfile.mkdtemp(prefix="alexan_test_dict_")
+    real_ask = m.filedialog.askopenfilename
+    with open(m.SPARE_PARTS_FILE, encoding="utf-8") as f:
+        spare_parts_before = f.read()
+
+    def dialogs_of(action, answers=()):
+        h.answers[:] = list(answers)
+        n = len(h.dialogs)
+        action()
+        h.root.update()
+        h.answers[:] = []
+        return [d[0] for d in h.dialogs_since(n)]
+
+    def import_file(action, name, content):
+        path = os.path.join(folder, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        m.filedialog.askopenfilename = lambda **kw: path
+        return dialogs_of(action)
+
+    def brand_hints(text):
+        app.car_brand_entry.delete(0, "end"); app.car_brand_entry.insert(0, text)
+        app.on_brand_keyrelease(None)
+        return list(app.brand_listbox.get(0, "end")) if app.brand_listbox_visible else []
+
+    def model_hints(brand, text):
+        app.car_brand_entry.delete(0, "end"); app.car_brand_entry.insert(0, brand)
+        app.car_model_entry.delete(0, "end"); app.car_model_entry.insert(0, text)
+        app.on_model_keyrelease(None)
+        return list(app.model_listbox.get(0, "end")) if app.model_listbox_visible else []
+
+    def work_hints(text):
+        app.work_name_entry.delete(0, "end"); app.work_name_entry.insert(0, text)
+        app.on_work_name_keyrelease(None)
+        return list(app.work_keyword_listbox.get(0, "end")) if app.work_keyword_listbox_visible else []
+
+    def part_hints(text):
+        app.part_name_entry.delete(0, "end"); app.part_name_entry.insert(0, text)
+        app.on_part_name_keyrelease(None)
+        return list(app.part_keyword_listbox.get(0, "end")) if app.part_keyword_listbox_visible else []
+
+    try:
+        app.switch_tab("works")
+        app.clear_work_form()
+        # --- Марки и модели ---
+        app.refresh_brands_list()
+        app.brand_name_entry.insert(0, "ТестМаркаСправ")
+        dialogs_of(app.add_brand)
+        app.brand_name_entry.insert(0, "ТестМаркаСправ")
+        h.check("марка добавлена; повтор - ошибка", "showerror" in dialogs_of(app.add_brand)
+                and h.q("SELECT COUNT(*) FROM car_brands WHERE brand_name = 'ТестМаркаСправ'")[0][0] == 1)
+        app.refresh_brands_list()
+        app.brand_combo.set("ТестМаркаСправ")
+        app.model_name_entry.insert(0, "ТестМодельСправ")
+        dialogs_of(app.add_model)
+        app.model_name_entry.insert(0, "ТестМодельСправ")
+        h.check("модель добавлена; повтор у той же марки - ошибка", "showerror" in dialogs_of(app.add_model))
+        h.check("«Добавить работу»: марка в подсказках", "ТестМаркаСправ" in brand_hints("ТестМаркаС"))
+        h.check("«Добавить работу»: модель этой марки в подсказках",
+                "ТестМодельСправ" in model_hints("ТестМаркаСправ", "ТестМод"))
+
+        def select_brand(name):
+            app.refresh_brands_list()
+            index = list(app.brands_listbox.get(0, "end")).index(name)
+            app.brands_listbox.selection_clear(0, "end")
+            app.brands_listbox.selection_set(index)
+            app.on_brand_listbox_select(None)
+
+        select_brand("ТестМаркаСправ")
+        app.models_listbox.selection_set(list(app.models_listbox.get(0, "end")).index("ТестМодельСправ"))
+        dialogs_of(app.delete_model, [True])
+        h.check("модель удалена - пропала из подсказок",
+                "ТестМодельСправ" not in model_hints("ТестМаркаСправ", "ТестМод"))
+        select_brand("ТестМаркаСправ")
+        dialogs_of(app.delete_brand, [True])
+        h.check("марка удалена - пропала из подсказок", "ТестМаркаСправ" not in brand_hints("ТестМаркаС"))
+
+        kinds = import_file(app.import_from_file, "brands.json",
+                            json.dumps({"ТестИмпортМарка": ["ТестИмпМ1", "ТестИмпМ2"]}, ensure_ascii=False))
+        h.check("импорт марок из файла: марка с двумя моделями",
+                "showinfo" in kinds and "ТестИмпортМарка" in brand_hints("ТестИмпорт")
+                and {"ТестИмпМ1", "ТестИмпМ2"} <= set(model_hints("ТестИмпортМарка", "ТестИмп")), kinds)
+        kinds = import_file(app.import_from_file, "bad.json", "{не json")
+        h.check("импорт битого файла - ошибка", "showerror" in kinds, kinds)
+
+        # --- Ключевые слова (виды работ) ---
+        app.refresh_keywords_list()
+        app.keyword_entry.insert(0, "Тест ключевая работа")
+        dialogs_of(app.add_keyword_action)
+        app.keyword_entry.insert(0, "Тест ключевая работа")
+        h.check("ключевое слово добавлено; повтор - ошибка", "showerror" in dialogs_of(app.add_keyword_action))
+        h.check("«Добавить работу»: вид работ в подсказках", "Тест ключевая работа" in work_hints("Тест ключ"))
+        app.refresh_keywords_list()
+        item = next(i for i in app.keywords_tree.get_children()
+                    if app.keywords_tree.item(i, "values")[1] == "Тест ключевая работа")
+        app.keywords_tree.selection_set(item)
+        dialogs_of(app.delete_keyword_action, [True])
+        h.check("ключевое слово удалено - пропало из подсказок", "Тест ключевая работа" not in work_hints("Тест ключ"))
+        kinds = import_file(app.import_keywords_from_file, "kw.txt", "Тест импорт работа один\nТест импорт работа два\n")
+        h.check("импорт видов работ из txt - оба в подсказках",
+                {"Тест импорт работа один", "Тест импорт работа два"} <= set(work_hints("Тест импорт")), kinds)
+
+        # --- Запчасти (подсказки; список хранится в config/spare_parts.txt - вернём как был) ---
+        app.refresh_spare_parts_list()
+        app.spare_part_entry.insert(0, "Тест запчасть справ")
+        dialogs_of(app.add_spare_part_action)
+        app.spare_part_entry.insert(0, "тест ЗАПЧАСТЬ справ")
+        h.check("запчасть добавлена; повтор (другой регистр) - ошибка", "showerror" in dialogs_of(app.add_spare_part_action))
+        h.check("«Добавить работу»: запчасть в подсказках", "Тест запчасть справ" in part_hints("запчасть спр"))
+        app.wh_part_name_entry.delete(0, "end"); app.wh_part_name_entry.insert(0, "запчасть спр")
+        app.on_wh_part_name_keyrelease()
+        h.check("склад: запчасть в подсказках", "Тест запчасть справ" in app.wh_part_listbox.get(0, "end"))
+        h.check("запчасть записана в файл списка", "Тест запчасть справ" in open(m.SPARE_PARTS_FILE, encoding="utf-8").read())
+        app.refresh_spare_parts_list()
+        item = next(i for i in app.spare_parts_tree.get_children()
+                    if app.spare_parts_tree.item(i, "values")[0] == "Тест запчасть справ")
+        app.spare_parts_tree.selection_set(item)
+        dialogs_of(app.delete_spare_part_action, [True])
+        h.check("запчасть удалена - пропала из подсказок", "Тест запчасть справ" not in part_hints("запчасть спр"))
+        kinds = import_file(app.import_spare_parts_from_file, "parts.txt", "Тест импорт деталь А\nТест импорт деталь Б\n")
+        h.check("импорт запчастей из txt - обе в подсказках",
+                {"Тест импорт деталь А", "Тест импорт деталь Б"} <= set(part_hints("импорт деталь")), kinds)
+    finally:
+        m.filedialog.askopenfilename = real_ask
+        with open(m.SPARE_PARTS_FILE, "w", encoding="utf-8") as f:
+            f.write(spare_parts_before)
+        app.spare_parts_list = app.load_spare_parts()
+        app.refresh_spare_parts_list()
+        app.clear_work_form()
+        app.hide_add_part_form() if getattr(app, "add_part_form_visible", False) else None
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def window_texts(h, action):
+    """Открыть окно действием, вернуть (окно, все надписи в нём) - окно не закрывается"""
+    import customtkinter as ctk
+    before = set(h.root.winfo_children())
+    action()
+    h.wait(300)
+    win = next((x for x in h.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel)), None)
+    if win is None:
+        return None, []
+    return win, [str(w.cget("text")) for w in h.find_widgets(win, ctk.CTkLabel)]
+
+
+def close_window(win):
+    if win is not None and win.winfo_exists():
+        try:
+            win.grab_release()
+        except Exception:
+            pass
+        win.destroy()
+
+
+def test_info_windows_and_pdf(h):
+    """«Записи»: «Информация о записи» - суммы работ, запчастей, итого как в наряде; PDF наряда - файл
+    создаётся, в нём клиент, госномер, работы, запчасти, «Оплачено ранее» (не в итоге) и «ИТОГО К ОПЛАТЕ»;
+    «Информация о клиенте» - визиты и сумма за всё время"""
+    import os, shutil, tempfile
+    import customtkinter as ctk
+    import reportlab.platypus as platypus
+    app, m = h.app, h.m
+    plate = "т335тт799"
+    h.warehouse_form(plate, "ТестПДФ", "Модель", "9000000338", "Тест Клиент ПДФ", part="Тест шина ПДФ", price="3000",
+                     paid=True)
+    tire = h.warehouse_part("Тест шина ПДФ")
+    h.warehouse_set_status(tire[0], "на складе")
+    work_id, booking_id, _ = save_work(h, plate, None, None, None, None, "Тест работа ПДФ один", 1200)
+    if not h.check("наряд сохранён", work_id):
+        return
+    app.open_booking_in_add_work(booking_id)
+    h.root.update()
+    h.add_work_item("Тест работа ПДФ два", 800)
+    app.part_name_entry.insert(0, "Тест фильтр ПДФ")
+    app.part_price_entry.delete(0, "end"); app.part_price_entry.insert(0, "500")
+    app.add_part_to_list()
+    h.works_add_from_warehouse(["Тест шина ПДФ"])
+    app.add_work()
+    h.root.update()
+    h.complete_booking(booking_id)
+    money = lambda texts, label: next((h.money(texts[i + 1]) for i, t in enumerate(texts[:-1]) if t == label), None)
+
+    win, texts = window_texts(h, lambda: app.show_booking_info_window(booking_id))
+    try:
+        h.check("«Информация о записи»: работы 2000, запчасти 500 (шина оплачена ранее - 0), итого 2500",
+                money(texts, app.tr("works.section_works")) == 2000 and money(texts, app.tr("works.section_parts")) == 500
+                and money(texts, app.tr("bookings.sum_total")) == 2500, texts[:25])
+        h.check("«Информация о записи»: работы и запчасти списком",
+                all(any(n in t for t in texts) for n in ("Тест работа ПДФ один", "Тест работа ПДФ два",
+                                                         "Тест фильтр ПДФ", "Тест шина ПДФ")))
+
+        # PDF: файл - во временную папку; тексты - перехватываем то, что уходит в PDF
+        folder = tempfile.mkdtemp(prefix="alexan_test_pdf_")
+        path = os.path.join(folder, "naryad.pdf")
+        captured = []
+        real_save, real_build = m.filedialog.asksaveasfilename, platypus.SimpleDocTemplate.build
+
+        def walk(item):
+            if isinstance(item, platypus.Paragraph):
+                captured.append(item.getPlainText())
+            elif isinstance(item, platypus.Table):
+                for row in item._cellvalues:
+                    for cell in row:
+                        walk(cell) if not isinstance(cell, str) else captured.append(cell)
+            elif isinstance(item, (list, tuple)):
+                for x in item:
+                    walk(x)
+
+        def build(doc, flowables, *a, **kw):
+            walk(flowables)
+            return real_build(doc, flowables, *a, **kw)
+        m.filedialog.asksaveasfilename = lambda **kw: path
+        platypus.SimpleDocTemplate.build = build
+        try:
+            n = len(h.dialogs)
+            h.find_button(win, "📄  PDF").invoke()
+            h.root.update()
+        finally:
+            m.filedialog.asksaveasfilename = real_save
+            platypus.SimpleDocTemplate.build = real_build
+        ok_file = os.path.exists(path) and open(path, "rb").read(5) == b"%PDF-" and os.path.getsize(path) > 1000
+        h.check("PDF: файл создан, «сохранён» показан",
+                ok_file and any(d[0] == "showinfo" and "сохранён" in d[2] for d in h.dialogs_since(n)),
+                h.dialogs_since(n))
+        text = " | ".join(captured)
+        h.check("PDF: клиент, госномер, обе работы, запчасти",
+                all(x in text for x in ("Тест Клиент ПДФ", "Т335ТТ799", "Тест работа ПДФ один", "Тест работа ПДФ два",
+                                        "Тест фильтр ПДФ", "Тест шина ПДФ")), text[:400])
+        total_at = captured.index("ИТОГО К ОПЛАТЕ") if "ИТОГО К ОПЛАТЕ" in captured else -1
+        prepaid_at = next((i for i, t in enumerate(captured) if t.startswith("Оплачено ранее")), -1)
+        h.check("PDF: «ИТОГО К ОПЛАТЕ» 2500, «Оплачено ранее» 3000 отдельно",
+                total_at >= 0 and h.money(captured[total_at + 1]) == 2500
+                and prepaid_at >= 0 and h.money(captured[prepaid_at + 1]) == 3000,
+                captured[-12:])
+        shutil.rmtree(folder, ignore_errors=True)
+    finally:
+        close_window(win)
+
+    if h.check("запись видна в «Записях»", h.bookings_select(booking_id)):
+        win, texts = window_texts(h, app.show_client_info)
+        try:
+            h.check("«Информация о клиенте»: визитов 1, всего 2500",
+                    money(texts, app.tr("bookings.client_visits")) is not None
+                    and texts[texts.index(app.tr("bookings.client_visits")) + 1] == "1"
+                    and money(texts, app.tr("bookings.client_total")) == 2500, texts[:12])
+        finally:
+            close_window(win)
+
+
+def test_complete_twice(h):
+    """Повторное «Выполнено» у уже выполненной записи: сообщение «уже выполнена», клиенту второе уведомление
+    не уходит, дата выполнения та же, запчасти НОВОГО наряда той же машины («в работе») не становятся «выдано».
+    «Отменить» выполненную - нельзя (есть работы). Выполнили новый наряд - его запчасти «выдано»"""
+    app = h.app
+    plate = "т336тт799"
+    h.warehouse_form(plate, "ТестДважды", "Модель", "9000000339", "Тест Дважды", part="Тест деталь первая", price="400")
+    h.warehouse_form(plate, part="Тест деталь вторая", price="600")
+    first_part, second_part = h.warehouse_part("Тест деталь первая"), h.warehouse_part("Тест деталь вторая")
+    h.warehouse_set_status(first_part[0], "на складе")
+    h.warehouse_set_status(second_part[0], "на складе")
+
+    # Наряд 1 с первой деталью - выполнен
+    h.works_form(plate, master=None, save=False)
+    app.worker_combo.set(MASTER)
+    h.add_work_item("Тест работа первая", 1000)
+    h.works_add_from_warehouse(["Тест деталь первая"])
+    app.add_work()
+    h.root.update()
+    first = h.q("SELECT id, booking_id FROM works WHERE description = 'Тест работа первая'")
+    if not h.check("наряд 1 сохранён", first):
+        return
+    first_booking = first[0][1]
+    h.complete_booking(first_booking)
+    completed_at = h.q("SELECT completed_at FROM works WHERE id = %s", (first[0][0],))[0][0]
+    h.check("наряд 1 выполнен, его деталь «выдано»", h.warehouse_part("Тест деталь первая")[1] == "выдано")
+
+    # Наряд 2 той же машины со второй деталью - «в работе»
+    h.works_form(plate, master=None, save=False)
+    app.worker_combo.set(MASTER)
+    h.add_work_item("Тест работа вторая", 700)
+    h.works_add_from_warehouse(["Тест деталь вторая"])
+    app.add_work()
+    h.root.update()
+    second = h.q("SELECT id, booking_id FROM works WHERE description = 'Тест работа вторая'")
+    if not h.check("наряд 2 «в работе», его деталь «установлена»",
+                   second and second[0][1] != first_booking
+                   and h.warehouse_part("Тест деталь вторая")[1] == "установлена"):
+        return
+    second_booking = second[0][1]
+
+    sent = len(h.outgoing)
+    n = len(h.dialogs)
+    h.complete_booking(first_booking)
+    h.check("повторное «Выполнено» - сообщение «уже выполнена»",
+            any("уже выполнена" in d[2] for d in h.dialogs_since(n)), h.dialogs_since(n))
+    h.check("клиенту повторное уведомление не ушло", len(h.outgoing) == sent, h.outgoing[sent:])
+    h.check("деталь наряда 2 («в работе») осталась «установлена», не оплачена",
+            h.warehouse_part("Тест деталь вторая")[1:4:2] == ("установлена", 0), h.warehouse_part("Тест деталь вторая"))
+    h.check("дата выполнения наряда 1 не изменилась",
+            h.q("SELECT completed_at FROM works WHERE id = %s", (first[0][0],))[0][0] == completed_at)
+
+    n = len(h.dialogs)
+    app.get_selected_booking_id = lambda: first_booking
+    app.mark_booking_cancelled()
+    h.check("«Отменить» выполненную запись - нельзя, статус «выполнена»",
+            any(d[0] == "showwarning" for d in h.dialogs_since(n))
+            and h.q("SELECT status FROM bookings WHERE id = %s", (first_booking,)) == (("completed",),))
+
+    h.complete_booking(second_booking)
+    h.check("выполнили наряд 2 - его деталь «выдано» и оплачена",
+            h.warehouse_part("Тест деталь вторая")[1:4:2] == ("выдано", 1), h.warehouse_part("Тест деталь вторая"))
+    app.clear_work_form()
+
+
+def test_statistics_monthly(h):
+    """«Статистика» за другой период (пароль): динамика по месяцам - работа прошлого месяца в своём месяце,
+    сегодняшние - в этом; машина без марки в таблицу марок не попадает, но визит считается и в динамике,
+    и в «Всего визитов» сводки"""
+    from datetime import timedelta
+    import re
+    app, db = h.app, h.app.db
+    today = date.today()
+    prev = (today.replace(day=1) - timedelta(days=1)).replace(day=15)
+    ym_prev, ym_now = prev.strftime("%Y-%m"), today.strftime("%Y-%m")
+    h.q("DELETE FROM app_settings WHERE name = 'reports_password'")   # уборка вернёт прежний пароль
+    db.set_reports_password("тест-статистика")
+
+    def stats_period():
+        app.switch_tab("statistics")
+        h.passwords[:] = ["тест-статистика"]
+        app.toggle_period_lock("statistics")
+        h.set_period("statistics", prev.replace(day=1), today)
+        return h.stats()
+
+    def visits_in_summary(st):
+        return int(re.search(r"\d+", st["summary"]).group(0))
+
+    base = stats_period()
+    w1, b1, _ = save_work(h, "т337тт799", "ТестМесяц", "Один", "9000000340", "Тест Месяц Один", "Тест работа прошлого месяца", 1000)
+    w2, b2, _ = save_work(h, "т338тт799", "ТестМесяц", "Два", "9000000341", "Тест Месяц Два", "Тест работа этого месяца", 2000)
+    w3, b3, _ = save_work(h, "т339тт799", "ТестБезМарки", "Три", "9000000342", "Тест Без Марки", "Тест работа без марки", 500)
+    if not h.check("три наряда сохранены", w1 and w2 and w3):
+        return
+    for b in (b1, b2, b3):
+        h.complete_booking(b)
+    h.q("UPDATE works SET work_date = %s, completed_at = %s WHERE id = %s", (prev, prev, w1))
+    h.q("UPDATE client_cars SET car_brand = '' WHERE car_number = 'Т339ТТ799'")
+
+    st = stats_period()
+    d_prev = tuple(a - b for a, b in zip(st["monthly"].get(ym_prev, (0, 0)), base["monthly"].get(ym_prev, (0, 0))))
+    d_now = tuple(a - b for a, b in zip(st["monthly"].get(ym_now, (0, 0)), base["monthly"].get(ym_now, (0, 0))))
+    h.check(f"динамика: {ym_prev} +1 визит +1000, {ym_now} +2 визита +2500 (с машиной без марки)",
+            d_prev == (1, 1000) and d_now == (2, 2500), (d_prev, d_now))
+    h.check("марки: «ТестМесяц» - 2 визита 3000, машины без марки в таблице марок нет",
+            st["brands"].get("ТестМесяц") == (2, 3000.0) and "" not in st["brands"], st["brands"].get("ТестМесяц"))
+    total_monthly = sum(v for v, _ in st["monthly"].values())
+    h.check("«Всего визитов» в сводке = сумме визитов по месяцам (машина без марки тоже считается)",
+            visits_in_summary(st) == total_monthly, (st["summary"], total_monthly))
+    h.check("клиент машины без марки - в таблице клиентов", "Тест Без Марки" in st["clients"])
+    app.toggle_period_lock("statistics")
+
+
 TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_works_one_record,
          test_warehouse_chain, test_staff_payment, test_finance_entries, test_report_other_period,
          test_new_owner, test_fire_worker, test_cancel_booking_with_works,
          test_edit_completed_work, test_master_absence, test_position_cars_off_and_rename,
-         test_plate_change_keeps_links, test_master_percent_change]
+         test_plate_change_keeps_links, test_master_percent_change,
+         test_warehouse_part_in_work_locked, test_start_work_from_booking,
+         test_switch_car_unsaved, test_same_vin_new_plate, test_report_details,
+         test_change_worker_position, test_backup_restore, test_slot_capacity,
+         test_work_parts_mileage_vin, test_warehouse_edit_search_goto,
+         test_staff_calendar_clicks, test_settings_dictionaries, test_info_windows_and_pdf,
+         test_complete_twice, test_statistics_monthly]

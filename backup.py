@@ -126,10 +126,18 @@ def create_backup(db, backup_dir: str, settings_file: str, spare_parts_file: str
 
 
 def restore_backup(db, zip_path: str, settings_file: str, spare_parts_file: str) -> None:
-    """Восстановить БД и локальные файлы настроек из .zip-бэкапа."""
+    """Восстановить БД и локальные файлы настроек из .zip-бэкапа.
+    Если восстановление БД упало на середине (битая копия, ошибка вставки) - возвращаем данные, какие были:
+    TRUNCATE в MariaDB/MySQL фиксируется сразу, откат транзакции его не отменяет, и без этого база осталась бы
+    пустой или неполной. Настройки и запчасти тогда не трогаем"""
     with zipfile.ZipFile(zip_path, "r") as zf:
         dump = json.loads(zf.read(DB_DUMP_NAME).decode("utf-8"))
-        _restore_database(db, dump)
+        current = _dump_database(db)
+        try:
+            _restore_database(db, dump)
+        except Exception:
+            _restore_database(db, current)
+            raise
 
         if SETTINGS_NAME in zf.namelist():
             os.makedirs(os.path.dirname(settings_file), exist_ok=True)

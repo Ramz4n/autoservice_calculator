@@ -355,14 +355,14 @@ class Database:
         return [{"id": r[0], "full_name": r[1], "position_id": r[2], "position": r[3] or "", "is_master": bool(r[4]),
                  "fired": r[5] is not None} for r in rows]
 
-    def get_worker_name(self, worker_id):
-        """ФИО сотрудника (и уволенного) или None"""
+    def get_worker(self, worker_id):
+        """Сотрудник (и уволенный): dict(full_name, fired) или None"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT full_name FROM workers WHERE id = %s", (worker_id,))
+        cursor.execute("SELECT full_name, fired_at FROM workers WHERE id = %s", (worker_id,))
         row = cursor.fetchone()
         conn.close()
-        return row[0] if row else None
+        return {"full_name": row[0], "fired": row[1] is not None} if row else None
 
     def worker_history(self, worker_id):
         """Сколько у сотрудника работ и премий / выплат: (работ, выплат)"""
@@ -2525,6 +2525,24 @@ class Database:
         parts = cursor.fetchall()
         conn.close()
         return parts
+
+    def get_installed_parts_for_booking(self, booking_id, car_number=None):
+        """Детали «установлена» из нарядов этой записи (их отмечают «выдано» при «Выполнено»). Старые детали,
+        поставленные до привязки к наряду (work_id пусто), - по госномеру машины. Детали других нарядов той же
+        машины (новый наряд «в работе») сюда не попадают"""
+        car_number = normalize_plate(car_number) if car_number else None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT wp.id FROM warehouse_parts wp
+            LEFT JOIN works wk ON wk.id = wp.work_id
+            LEFT JOIN client_cars cc ON cc.id = wp.car_id
+            WHERE wp.status = 'установлена'
+              AND (wk.booking_id = %s OR (wp.work_id IS NULL AND UPPER(cc.car_number) = UPPER(%s)))
+        """, (booking_id, car_number or ""))
+        ids = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        return ids
 
     def update_warehouse_part_status(self, part_id, status, received_date=None):
         """Обновить статус запчасти"""
