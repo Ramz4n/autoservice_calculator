@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 # Импорт класса для работы с базой данных
 from database import Database
 import web_sync
-from plates import plate_problem, PLATE_EXAMPLE
+from plates import plate_problem, plate_may_continue, PLATE_EXAMPLE
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
 import backup as backup_module
@@ -1044,7 +1044,7 @@ class AutoServiceApp:
     FORM_CARD_BORDER = "#dfe3e8"
     FORM_STATE_BORDERS = {"found": "#66bb6a", "new": "#ffa726",   # машина найдена / новая машина
                           "error": "#e53935"}                      # ошибка (госномер с ошибкой)
-    FORM_STATE_COLORS = {"found": "#2e7d32", "new": "#ef6c00", "warn": "#ef6c00"}
+    FORM_STATE_COLORS = {"found": "#2e7d32", "new": "#ef6c00", "warn": "#ef6c00", "hint": "#2e7d32"}
     FORM_ERROR_BORDER = "#e53935"
 
     def form_content(self, window, width=470):
@@ -1730,98 +1730,256 @@ class AutoServiceApp:
                 tags=(str(u["id"]), tag))
 
     def setup_workers_tab(self):
-        """Настройка вкладки работников"""
-        # Главный контейнер
-        main_frame = ctk.CTkFrame(self.workers_frame)
+        """Настройки -> "Сотрудники": сотрудники с должностями (слева) и список должностей (справа).
+        Мастер - встроенная должность: только мастера берут работы и получают процент в "Отчётах" """
+        main_frame = ctk.CTkFrame(self.workers_frame, fg_color="transparent")
         main_frame.pack(fill=tk.BOTH, expand=True)
+        center = ctk.CTkFrame(main_frame, fg_color="transparent")
+        center.pack(anchor=tk.N, pady=10)
 
-        # Центрированный контейнер
-        center_container = ctk.CTkFrame(main_frame)
-        center_container.pack(anchor=tk.CENTER, pady=10)
+        # === Сотрудники ===
+        staff_col = ctk.CTkFrame(center)
+        staff_col.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        ctk.CTkLabel(staff_col, text=self.tr("workers.staff_title"),
+                     font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
 
-        # Верхняя панель - добавление работника
-        add_frame = ctk.CTkFrame(center_container)
-        add_frame.pack(fill=tk.X, pady=20)
+        add_frame = ctk.CTkFrame(staff_col, fg_color="transparent")
+        add_frame.pack(fill=tk.X, padx=10, pady=(0, 6))
+        ctk.CTkLabel(add_frame, text=self.tr("workers.full_name_label")).pack(side=tk.LEFT, padx=(0, 5))
+        self.worker_name_entry = ctk.CTkEntry(add_frame, width=260, fg_color="white", text_color="black")
+        self.worker_name_entry.pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkLabel(add_frame, text=self.tr("workers.position_label")).pack(side=tk.LEFT, padx=(0, 5))
+        self.worker_position_combo = ctk.CTkComboBox(add_frame, width=180, values=[], state="readonly")
+        self.worker_position_combo.pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkButton(add_frame, text=self.tr("common.add"), width=100, command=self.add_worker,
+                      fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT)
+        self.worker_name_entry.bind("<Return>", lambda e: self.add_worker())
 
-        ctk.CTkLabel(add_frame, text=self.tr("workers.full_name_label")).pack(side=tk.LEFT, padx=5, pady=5)
-        self.worker_name_entry = ctk.CTkEntry(add_frame, width=400, fg_color="white", text_color="black")
-        self.worker_name_entry.pack(side=tk.LEFT, padx=5, pady=5)
-
-        ctk.CTkButton(add_frame, text=self.tr("common.add"), command=self.add_worker, fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT, padx=5, pady=5)
-
-        # Список работников
-        list_frame = ctk.CTkFrame(center_container)
-        list_frame.pack(fill=tk.X, pady=10)
-
-        # Таблица работников (без колонки ID) - ширина по родительскому контейнеру
-        columns = ("name",)
-        self.workers_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
-        self.workers_tree.heading("name", text=self.tr("reports.col_master_name"))
-        self.workers_tree.column("name", width=500, stretch=True, anchor=tk.W)
-
+        list_frame = ctk.CTkFrame(staff_col, fg_color="transparent")
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10)
+        self.workers_tree = ttk.Treeview(list_frame, columns=("name", "position"), show="headings", height=15)
+        self.workers_tree.heading("name", text=self.tr("workers.col_name"))
+        self.workers_tree.heading("position", text=self.tr("workers.col_position"))
+        self.workers_tree.column("name", width=360, stretch=True, anchor=tk.W)
+        self.workers_tree.column("position", width=200, stretch=False, anchor=tk.W)
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.workers_tree.yview)
         self.workers_tree.configure(yscrollcommand=scrollbar.set)
-
-        # Настройка цветов для чередующихся строк (zebra stripes)
         self.workers_tree.tag_configure('oddrow', background='#ffffff')
         self.workers_tree.tag_configure('evenrow', background='#f0f0f0')
+        self.workers_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.workers_tree.bind("<<TreeviewSelect>>", self.on_worker_select)
 
-        self.workers_tree.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
+        # Должность выбранного сотрудника
+        change_frame = ctk.CTkFrame(staff_col, fg_color="transparent")
+        change_frame.pack(fill=tk.X, padx=10, pady=(8, 4))
+        ctk.CTkLabel(change_frame, text=self.tr("workers.change_position_label")).pack(side=tk.LEFT, padx=(0, 5))
+        self.worker_change_position_combo = ctk.CTkComboBox(change_frame, width=180, values=[], state="readonly")
+        self.worker_change_position_combo.pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkButton(change_frame, text=self.tr("workers.change_position_btn"), width=120,
+                      command=self.change_worker_position).pack(side=tk.LEFT)
+        ctk.CTkButton(staff_col, text=self.tr("workers.delete_selected"), command=self.delete_worker,
+                      fg_color="red", hover_color="darkred").pack(fill=tk.X, padx=10, pady=(4, 10))
 
-        # Кнопка удаления
-        ctk.CTkButton(center_container, text=self.tr("workers.delete_selected"),
-                   command=self.delete_worker, width=550, fg_color="red", hover_color="darkred").pack(anchor=tk.CENTER, pady=10)
+        # === Должности ===
+        pos_col = ctk.CTkFrame(center)
+        pos_col.pack(side=tk.LEFT, fill=tk.Y)
+        ctk.CTkLabel(pos_col, text=self.tr("workers.positions_title"),
+                     font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
+        pos_add = ctk.CTkFrame(pos_col, fg_color="transparent")
+        pos_add.pack(fill=tk.X, padx=10, pady=(0, 6))
+        self.position_name_entry = ctk.CTkEntry(pos_add, width=200, fg_color="white", text_color="black",
+                                                placeholder_text=self.tr("workers.position_placeholder"))
+        self.position_name_entry.pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(pos_add, text=self.tr("common.add"), width=100, command=self.add_position,
+                      fg_color="green", hover_color="darkgreen").pack(side=tk.LEFT)
+        self.position_name_entry.bind("<Return>", lambda e: self.add_position())
+        # Новая должность работает с машинами (автоэлектрик, кузовщик) - как мастер
+        self.position_cars_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(pos_col, text=self.tr("workers.position_works_with_cars"),
+                        variable=self.position_cars_var).pack(anchor="w", padx=10, pady=(0, 6))
+
+        pos_list = ctk.CTkFrame(pos_col, fg_color="transparent")
+        pos_list.pack(fill=tk.BOTH, expand=True, padx=10)
+        self.positions_tree = ttk.Treeview(pos_list, columns=("name", "cars", "count"), show="headings", height=15)
+        self.positions_tree.heading("name", text=self.tr("workers.col_position"))
+        self.positions_tree.heading("cars", text=self.tr("workers.col_works_with_cars"))
+        self.positions_tree.heading("count", text=self.tr("workers.col_position_count"))
+        self.positions_tree.column("name", width=190, anchor=tk.W)
+        self.positions_tree.column("cars", width=110, anchor=tk.CENTER, stretch=False)
+        self.positions_tree.column("count", width=110, anchor=tk.CENTER, stretch=False)
+        self.positions_tree.tag_configure('master', font=("Segoe UI", 12, "bold"))
+        self.positions_tree.pack(fill=tk.BOTH, expand=True)
+
+        pos_buttons = ctk.CTkFrame(pos_col, fg_color="transparent")
+        pos_buttons.pack(fill=tk.X, padx=10, pady=(8, 4))
+        ctk.CTkButton(pos_buttons, text=self.tr("workers.rename_position_btn"), width=130,
+                      command=self.rename_position).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(pos_buttons, text=self.tr("workers.toggle_cars_btn"), width=150,
+                      command=self.toggle_position_cars).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(pos_buttons, text=self.tr("workers.delete_position_btn"), width=110, command=self.delete_position,
+                      fg_color="red", hover_color="darkred").pack(side=tk.LEFT)
+        ctk.CTkLabel(pos_col, text=self.tr("workers.positions_hint"), text_color="gray", justify=tk.LEFT,
+                     wraplength=330, anchor="w").pack(fill=tk.X, padx=10, pady=(4, 10))
+
+    def refresh_positions(self):
+        """Список должностей и выпадающие списки должностей на вкладке"""
+        self.positions = self.db.get_positions()
+        for item in self.positions_tree.get_children():
+            self.positions_tree.delete(item)
+        for position in self.positions:
+            self.positions_tree.insert("", tk.END, iid=str(position["id"]),
+                                       values=(position["name"], "✓" if position["is_master"] else "",
+                                               position["workers"]),
+                                       tags=("master",) if position["is_master"] else ())
+        names = [p["name"] for p in self.positions]
+        for combo in (self.worker_position_combo, self.worker_change_position_combo):
+            current = combo.get()
+            combo.configure(values=names)
+            combo.set(current if current in names else (names[0] if names else ""))
+
+    def position_id_by_name(self, name):
+        return next((p["id"] for p in getattr(self, "positions", []) if p["name"] == name), None)
+
+    def after_workers_change(self):
+        """Сотрудники / должности поменялись - обновить всё, что от них зависит"""
+        self.refresh_workers_list()
+        self.refresh_workers_combo()
+        if hasattr(self, "staff_canvas"):
+            self.refresh_staff_tab()
 
     def add_worker(self):
-        """Добавить работника"""
+        """Добавить сотрудника с выбранной должностью"""
         name = self.worker_name_entry.get().strip()
         if not name:
             messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_enter_name"))
             return
-
-        if self.db.add_worker(name):
-            messagebox.showinfo(self.tr("common.success"), self.tr("workers.msg_added", name=name))
+        position_id = self.position_id_by_name(self.worker_position_combo.get())
+        if self.db.add_worker(name, position_id):
+            messagebox.showinfo(self.tr("common.success"),
+                                self.tr("workers.msg_added", name=name, position=self.worker_position_combo.get()))
             self.worker_name_entry.delete(0, tk.END)
-            self.refresh_workers_list()
-            self.refresh_workers_combo()
+            self.after_workers_change()
         else:
             messagebox.showerror(self.tr("common.error"), self.tr("workers.msg_already_exists"))
 
-    def delete_worker(self):
-        """Удалить работника"""
+    def selected_worker(self):
+        """(id, ФИО) выбранного в таблице сотрудника или None (с предупреждением)"""
         selected = self.workers_tree.selection()
         if not selected:
-            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_select_to_delete"))
-            return
-
+            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_select_worker"))
+            return None
         item = self.workers_tree.item(selected[0])
-        worker_id = item['tags'][0]  # ID хранится в тегах
-        worker_name = item['values'][0]  # Имя в первой колонке
+        return int(selected[0]), item['values'][0]
 
-        if messagebox.askyesno(self.tr("common.confirm"),
-                               self.tr("workers.msg_confirm_delete", name=worker_name)):
+    def on_worker_select(self, event=None):
+        """Выбрали сотрудника - в списке "Должность" его текущая должность"""
+        selected = self.workers_tree.selection()
+        if selected:
+            self.worker_change_position_combo.set(self.workers_tree.item(selected[0])['values'][1])
+
+    def change_worker_position(self):
+        worker = self.selected_worker()
+        if not worker:
+            return
+        worker_id, worker_name = worker
+        position_name = self.worker_change_position_combo.get()
+        position_id = self.position_id_by_name(position_name)
+        if position_id is None:
+            return
+        self.db.set_worker_position(worker_id, position_id)
+        messagebox.showinfo(self.tr("common.success"),
+                            self.tr("workers.msg_position_changed", name=worker_name, position=position_name))
+        self.after_workers_change()
+
+    def delete_worker(self):
+        """Удалить сотрудника"""
+        worker = self.selected_worker()
+        if not worker:
+            return
+        worker_id, worker_name = worker
+        if messagebox.askyesno(self.tr("common.confirm"), self.tr("workers.msg_confirm_delete", name=worker_name)):
             self.db.delete_worker(worker_id)
             messagebox.showinfo(self.tr("common.success"), self.tr("workers.msg_deleted"))
-            self.refresh_workers_list()
-            self.refresh_workers_combo()
+            self.after_workers_change()
 
     def refresh_workers_list(self):
-        """Обновить список работников"""
+        """Обновить таблицу сотрудников (и должностей)"""
+        self.refresh_positions()
         for item in self.workers_tree.get_children():
             self.workers_tree.delete(item)
-
-        row_index = 0
-        for worker in self.db.get_all_workers():
-            worker_id, worker_name = worker
-
-            # Определяем тег для чередующихся строк
+        for row_index, worker in enumerate(self.db.get_staff()):
             row_tag = 'oddrow' if row_index % 2 == 0 else 'evenrow'
+            self.workers_tree.insert("", tk.END, iid=str(worker["id"]),
+                                     values=(worker["full_name"], worker["position"]), tags=(row_tag,))
 
-            # Вставляем только имя в таблицу, ID сохраняем в тегах вместе с цветом
-            self.workers_tree.insert("", tk.END, values=(worker_name,), tags=(worker_id, row_tag))
+    def selected_position(self):
+        selected = self.positions_tree.selection()
+        if not selected:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_select_position"))
+            return None
+        return next((p for p in self.positions if str(p["id"]) == selected[0]), None)
 
-            row_index += 1
+    def add_position(self):
+        name = self.position_name_entry.get().strip()
+        if not name:
+            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_enter_position"))
+            return
+        if not self.db.add_position(name, self.position_cars_var.get()):
+            messagebox.showerror(self.tr("common.error"), self.tr("workers.msg_position_exists"))
+            return
+        self.position_name_entry.delete(0, tk.END)
+        self.position_cars_var.set(False)
+        self.refresh_positions()
+
+    def toggle_position_cars(self):
+        """Включить / выключить у выбранной должности "работает с машинами" """
+        position = self.selected_position()
+        if not position:
+            return
+        turn_on = not position["is_master"]
+        question = "workers.msg_confirm_cars_on" if turn_on else "workers.msg_confirm_cars_off"
+        if not messagebox.askyesno(self.tr("common.confirm"), self.tr(question, name=position["name"])):
+            return
+        if self.db.set_position_works_with_cars(position["id"], turn_on) == "last":
+            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_last_car_position"))
+            return
+        self.after_workers_change()
+
+    def rename_position(self):
+        position = self.selected_position()
+        if not position:
+            return
+        dialog = ctk.CTkInputDialog(text=self.tr("workers.rename_position_prompt", name=position["name"]),
+                                    title=self.tr("workers.rename_position_btn"))
+        name = (dialog.get_input() or "").strip()
+        if not name or name == position["name"]:
+            return
+        if not self.db.rename_position(position["id"], name):
+            messagebox.showerror(self.tr("common.error"), self.tr("workers.msg_position_exists"))
+            return
+        self.after_workers_change()
+
+    def delete_position(self):
+        position = self.selected_position()
+        if not position:
+            return
+        if position["is_master"] and sum(p["is_master"] for p in self.positions) == 1:
+            # Последняя должность "с машинами" - не спрашиваем "удалить?", сразу объясняем, почему нельзя
+            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_last_car_position"))
+            return
+        if position["workers"]:
+            messagebox.showwarning(self.tr("common.attention"),
+                                   self.tr("workers.msg_position_has_workers", name=position["name"],
+                                           count=position["workers"]))
+            return
+        if not messagebox.askyesno(self.tr("common.confirm"),
+                                   self.tr("workers.msg_confirm_delete_position", name=position["name"])):
+            return
+        if self.db.delete_position(position["id"]) == "master":
+            messagebox.showwarning(self.tr("common.attention"), self.tr("workers.msg_last_car_position"))
+            return
+        self.refresh_positions()
 
     # ===== ВКЛАДКА "СОТРУДНИКИ" (РАСПИСАНИЕ) =====
 
@@ -1920,7 +2078,9 @@ class AutoServiceApp:
 
     def refresh_staff_tab(self):
         """Перечитать сотрудников и расписание"""
-        self.staff_workers = self.db.get_all_workers()
+        staff = self.db.get_staff()
+        self.staff_workers = [(w["id"], w["full_name"]) for w in staff]
+        self.staff_positions = {w["id"]: w["position"] for w in staff}
         self.update_staff_summary()
         self.draw_staff_calendar()
 
@@ -1941,6 +2101,22 @@ class AutoServiceApp:
     STAFF_NAME_W = 170
     STAFF_CELL = 28
     STAFF_HEAD = 40
+    STAFF_GROUP = 22   # строка-заголовок должности ("Мастера", "Администраторы")
+
+    def staff_layout(self):
+        """Строки календаря сверху вниз: заголовок должности, её сотрудники, следующая должность...
+        [(y верх, y низ, worker_id или None, имя или название должности)]"""
+        rows, y, last_position = [], self.STAFF_HEAD, object()
+        positions = getattr(self, "staff_positions", {})
+        for worker_id, name in self.staff_workers:
+            position = positions.get(worker_id, "")
+            if position != last_position:
+                rows.append((y, y + self.STAFF_GROUP, None, position))
+                y += self.STAFF_GROUP
+                last_position = position
+            rows.append((y, y + self.STAFF_CELL, worker_id, name))
+            y += self.STAFF_CELL
+        return rows
 
     def draw_staff_calendar(self):
         """Нарисовать календарь месяца: строки - сотрудники, столбцы - дни"""
@@ -1954,7 +2130,8 @@ class AutoServiceApp:
         today = date.today()
         name_w, cell, head = self.STAFF_NAME_W, self.STAFF_CELL, self.STAFF_HEAD
         width = name_w + days_in_month * cell
-        height = head + len(self.staff_workers) * cell
+        rows = self.staff_layout()
+        height = rows[-1][1] if rows else head
 
         # Шапка: число и день недели, выходные дни недели подкрашены
         for d in range(1, days_in_month + 1):
@@ -1968,9 +2145,13 @@ class AutoServiceApp:
                                fill="#c62828" if weekend else "#757575")
         canvas.create_rectangle(0, 0, name_w, head, fill="#fafafa", outline="#cfd8dc")
 
-        # Строки сотрудников
-        for row, (worker_id, name) in enumerate(self.staff_workers):
-            y = head + row * cell
+        # Строки: заголовок должности на всю ширину, под ним её сотрудники
+        for y, y_end, worker_id, name in rows:
+            if worker_id is None:
+                canvas.create_rectangle(0, y, width, y_end, fill="#eceff1", outline="#cfd8dc")
+                canvas.create_text(8, (y + y_end) / 2, text=(name or "—").upper(), anchor="w",
+                                   font=("Arial", 9, "bold"), fill="#546e7a")
+                continue
             canvas.create_rectangle(0, y, name_w, y + cell, fill="white", outline="#cfd8dc")
             canvas.create_text(8, y + cell / 2, text=name, anchor="w", font=("Arial", 10), width=name_w - 12)
             worker_days = schedule.get(worker_id, {})
@@ -1997,10 +2178,9 @@ class AutoServiceApp:
         """Клик по клетке календаря - поставить выбранное в легенде (или снять)"""
         x = self.staff_canvas.canvasx(event.x)
         y = self.staff_canvas.canvasy(event.y)
-        row = int((y - self.STAFF_HEAD) // self.STAFF_CELL)
-        if y < self.STAFF_HEAD or row >= len(self.staff_workers):
-            return
-        worker_id = self.staff_workers[row][0]
+        worker_id = next((wid for y_top, y_end, wid, _ in self.staff_layout() if y_top <= y < y_end), None)
+        if worker_id is None:
+            return   # шапка, заголовок должности или ниже таблицы
 
         col = int((x - self.STAFF_NAME_W) // self.STAFF_CELL)
         days_in_month = pycalendar.monthrange(self.staff_month.year, self.staff_month.month)[1]
@@ -3333,8 +3513,7 @@ class AutoServiceApp:
         if not name:
             self.client_name_entry.focus_set()
         if same:
-            self.works_set_lookup_state("found", self.tr("works.lookup_car_found",
-                                                         name=car["owner_name"] or self.tr("common.no_name")))
+            self.works_set_lookup_state("found", self.car_found_text(dict(car, client_name=car["owner_name"])))
         else:
             self.works_set_lookup_state("new", self.tr("works.lookup_owner_change",
                                                        owner=car["owner_name"] or self.tr("common.no_name")))
@@ -3345,16 +3524,15 @@ class AutoServiceApp:
         return {"name": self.client_name_entry, "phone": self.client_phone_entry, "brand": self.car_brand_entry,
                 "model": self.car_model_entry, "number": self.car_number_entry, "vin": self.vin_entry}
 
-    CAR_NUMBER_LIVE_MIN = 8   # с какой длины госномера искать прямо при вводе (номер введён целиком)
 
     def works_check_record_plate_change(self, car_number, record_number):
         """В открытой записи госномер сменили. Это госномер другой машины из базы - иначе работа молча
         переедет на чужую машину: спрашиваем, открыть ли запись для той машины, или вернуть госномер.
         Госномера в базе нет - считаем, что исправили опечатку"""
-        clients = self.db.get_all_clients_by_car_number(car_number)
-        if not clients:
+        result = self.find_car_by_plate(car_number)
+        if result["status"] != "found":
             return
-        other = clients[0]
+        other = result["car"]
         car = " ".join(x for x in (other.get("car_brand"), other.get("car_model")) if x) or car_number.upper()
         owner = other.get("client_name") or self.tr("common.no_name")
         open_other = messagebox.askyesno(
@@ -3425,12 +3603,26 @@ class AutoServiceApp:
             if getattr(self, "works_lookup_state", None) == "new" \
                     and getattr(self, "works_lookup_text", "") == self.tr("works.lookup_new_car"):
                 self.works_set_lookup_state(None)
+        # Подсказка "есть в базе - Enter, чтобы подставить" для другого номера - убираем
+        hint = getattr(self, "_works_plate_hint", None)
+        if hint and hint[0] != car_number.upper():
+            self._works_plate_hint = None
+            if getattr(self, "works_lookup_text", "") == hint[1]:
+                self.works_set_lookup_state(None)
         if car_number.upper() != getattr(self, "_works_looked_up_number", None):
             self._works_looked_up_number = None
         elif self._works_looked_up_number:
             return  # этот номер уже искали (например, открыто окно выбора владельца)
 
-        if not car_number or len(car_number) < 3 or (live and len(car_number) < self.CAR_NUMBER_LIVE_MIN):
+        result = self.find_car_by_plate(car_number, typing=live, key="Enter")
+        if result["status"] == "short":
+            return
+        # Х555ХХ77 - номер полный, но его ещё могут дописать до Х555ХХ777: во время ввода ничего не подставляем
+        # (иначе подставится чужая машина, поле закроется, а курсор уйдёт в "Пробег") - только подсказка;
+        # подставим по Enter или когда уйдут из поля
+        if result["status"] == "hint":
+            self._works_plate_hint = (car_number.upper(), result["text"])
+            self.works_set_lookup_state("found", result["text"])
             return
 
         # У этой машины уже есть запись в работе - открываем её (с её работами и мастером)
@@ -3441,10 +3633,8 @@ class AutoServiceApp:
         if self.car_brand_entry.get().strip() or self.car_model_entry.get().strip():
             return  # Поля уже заполнены, не перезаписываем
 
-        # Ищем всех клиентов по госномеру
-        clients = self.db.get_all_clients_by_car_number(car_number)
-
-        if not clients:
+        clients = result.get("owners", [])
+        if result["status"] == "new":
             if not live:
                 self.works_set_lookup_state("new", self.tr("works.lookup_new_car"))
                 self._works_new_car_number = car_number.upper()   # для этого номера - стёрли / поменяли: убрать
@@ -3457,6 +3647,42 @@ class AutoServiceApp:
         else:
             # Несколько клиентов - показываем окно выбора
             self.show_client_selection_dialog(clients, car_number)
+
+    PLATE_MIN_TYPING = 6   # с какой длины искать госномер прямо во время ввода
+    PLATE_MIN = 3          # и когда номер уже ввели (ушли из поля / Enter)
+
+    def find_car_by_plate(self, plate, typing=False, key="Tab"):
+        """Поиск машины по госномеру - один для всех форм ("Добавить работу", "Записать клиента", склад,
+        проверки при сохранении). Формы только раскладывают результат по своим полям.
+        typing - номер ещё вводят (поиск по мере ввода), key - чем в этой форме подставить (Tab / Enter).
+        Возвращает dict(status, number, ...):
+          "short" - номер ещё короткий, искать рано;
+          "hint"  - номер вводят, он с регионом из двух цифр (Х555ХХ77) и такая машина есть, но его могут
+                    дописать до Х555ХХ777: подставлять рано, text - подсказка "Есть в базе: ... Tab - подставить";
+          "found" - машина есть: car (car_id, марка, модель, VIN, пробег, владелец client_id / client_name /
+                    client_phone), owners - все записи по номеру, text - "✓ Hyundai Tucson — Иван";
+          "new"   - такой машины в базе нет"""
+        number = (plate or "").strip()
+        if len(number) < (self.PLATE_MIN_TYPING if typing else self.PLATE_MIN):
+            return {"status": "short", "number": number}
+        owners = self.db.get_all_clients_by_car_number(number)
+        if not owners:
+            return {"status": "new", "number": number}
+        car = owners[0]
+        if typing and plate_may_continue(number):
+            return {"status": "hint", "number": number, "car": car,
+                    "text": self.tr("plates.lookup_hint", number=number.upper(), car=self.car_title(car), action=key,
+                                    name=car.get("client_name") or self.tr("common.no_name"))}
+        return {"status": "found", "number": number, "car": car, "owners": owners, "text": self.car_found_text(car)}
+
+    def car_title(self, car):
+        """Марка и модель одной строкой: "Hyundai Tucson" """
+        return " ".join(x for x in (car.get("car_brand"), car.get("car_model")) if x)
+
+    def car_found_text(self, car):
+        """Строка "машина найдена" - одинаковая во всех формах: "✓ Hyundai Tucson — Иван" """
+        return self.tr("plates.car_found", car=self.car_title(car) or self.tr("works.new_car"),
+                       name=car.get("client_name") or self.tr("common.no_name"))
 
     def works_open_car_record(self, car_number):
         """Ввели (или поправили) госномер машины, у которой уже есть запись в работе - открываем эту запись,
@@ -3531,8 +3757,7 @@ class AutoServiceApp:
                                   "filled": self.autofilled_diff(fields, before)}
         self.works_phone_fill = {"digits": phone_mask_digits(self.client_phone_entry.get()), "filled": {}}
         self.works_mark_autofilled(before)
-        name = client_info.get("client_name") or self.tr("common.no_name")
-        self.works_set_lookup_state("found", self.tr("works.lookup_car_found", name=name))
+        self.works_set_lookup_state("found", self.car_found_text(client_info))
         self.works_lock_filled()
         # Всё подставили - курсор сразу в "Пробег"
         self.mileage_entry.focus_set()
@@ -3702,8 +3927,9 @@ class AutoServiceApp:
 
     def refresh_workers_combo(self):
         """Обновить выпадающий список работников. Кто сегодня по расписанию отсутствует -
-        в конце списка с пометкой ("Иванов — отпуск"). Выбранный мастер сохраняется"""
-        workers = self.db.get_all_workers()
+        в конце списка с пометкой ("Иванов — отпуск"). Выбранный мастер сохраняется.
+        Только должность "Мастер" - администраторы и другие работы не берут"""
+        workers = self.db.get_masters()
         today = date.today()
         try:
             schedule = self.db.get_worker_schedule(today, today)
@@ -4375,7 +4601,7 @@ class AutoServiceApp:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"))
             return
         # Машины с таким госномером ещё нет - проверить номер (пропущена первая буква, не те буквы)
-        if not self.db.get_car_info_by_number(car_number) and not self.confirm_new_plate(
+        if self.find_car_by_plate(car_number)["status"] != "found" and not self.confirm_new_plate(
                 car_number, entry=self.car_number_entry):
             return
 
@@ -4891,7 +5117,7 @@ class AutoServiceApp:
                                                    self.form_entry(row, width=160, placeholder_text="А123БВ777"), 160)
         self.wh_phone_entry = self.works_cell(row, 1, self.tr("bookings.add_window_phone"), self.form_entry(row, width=200))
         # Машина ищется сама по мере ввода (как в "Записать клиента"), кнопка "Найти" не нужна
-        self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.search_car_for_warehouse())
+        self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.search_car_for_warehouse(typing=True))
         self.wh_car_number_entry.bind('<FocusOut>', lambda e: self.search_car_for_warehouse())
         # Госномер с ошибкой - красным сразу при вводе ("не по образцу" - когда ушли из поля)
         self.wh_car_number_entry.bind('<KeyRelease>', lambda e: self.wh_update_plate_error(), add="+")
@@ -5094,14 +5320,16 @@ class AutoServiceApp:
             self.wh_phone_cars_combo.pack_forget()
             self.fit_form_window(self.add_part_form_frame)
 
-    def search_car_for_warehouse(self):
-        """Поиск машины по госномеру для склада - по мере ввода (с 6 символов), как в "Записать клиента" """
+    def search_car_for_warehouse(self, typing=False):
+        """Поиск машины по госномеру для склада - по мере ввода (с 6 символов), как в "Записать клиента".
+        typing - номер ещё вводят: Х555ХХ77 не подставляем (могут дописать до Х555ХХ777), только подсказка"""
         car_number = self.wh_car_number_entry.get().strip()
         self._wh_phone_unmark_if_changed()
         if car_number and car_number.upper() == getattr(self, "wh_searched_number", None):
             return  # этот госномер уже искали - не дёргаем базу на каждое нажатие (Tab, стрелки)
-        self.wh_searched_number = car_number.upper() if len(car_number) >= 6 else None
-        if len(car_number) < 6:
+        result = self.find_car_by_plate(car_number, typing, key="Enter")
+        self.wh_searched_number = car_number.upper() if result["status"] in ("found", "new") else None
+        if result["status"] == "short":
             self.wh_selected_car_id = None
             # Госномер стёрли - телефон, подставленный по нему (если не правили), тоже убираем
             plate_phone = getattr(self, "wh_plate_phone", None)
@@ -5117,18 +5345,22 @@ class AutoServiceApp:
             self.hide_new_car_form()
             return
 
-        car_info = self.db.get_car_info_by_number(car_number)
+        car_info = result["car"] if result["status"] == "found" else None
         # Телефон, подставленный по прошлому госномеру (если его не правили руками) - убираем
         plate_phone = getattr(self, "wh_plate_phone", None)
         if plate_phone and self.wh_phone_entry.get() == plate_phone:
             self.set_phone_value(self.wh_phone_entry, "")
         self.wh_plate_phone = None
+        if result["status"] == "hint":
+            # Подставим, когда уйдут из поля или нажмут Enter - тогда этот номер ищется заново
+            self.wh_selected_car_id = None
+            self.set_wh_car_status(result["text"], "hint")
+            self.hide_new_car_form()
+            return
         if car_info:
             self.wh_selected_car_id = car_info.get("car_id")
             # Телефон - в поле рядом, здесь только машина и владелец (как во вкладке "Добавить работу")
-            car_title = " ".join(x for x in (car_info.get('car_brand'), car_info.get('car_model')) if x)
-            info_text = f"✓ {car_title} — {car_info.get('client_name') or self.tr('common.no_name')}"
-            self.set_wh_car_status(info_text, "found")
+            self.set_wh_car_status(result["text"], "found")
             self.hide_new_car_form()
             # Телефон владельца - в поле телефона (если там ещё ничего не набрано)
             owner_phone = car_info.get("client_phone") or ""
@@ -5411,9 +5643,9 @@ class AutoServiceApp:
 
         # Если госномер введён, но машина не найдена — пробуем найти автоматически
         if car_number and car_id is None:
-            car_info = self.db.get_car_info_by_number(car_number)
-            if car_info:
-                car_id = car_info.get("car_id")
+            result = self.find_car_by_plate(car_number)
+            if result["status"] == "found":
+                car_id = result["car"].get("car_id")
                 self.wh_selected_car_id = car_id
 
         # Форма новой машины открыта (например, поиском по телефону), а госномер не введён
@@ -5917,6 +6149,8 @@ class AutoServiceApp:
         # Настройка цветов для чередующихся строк (zebra stripes)
         self.summary_tree.tag_configure('oddrow', background='#ffffff')
         self.summary_tree.tag_configure('evenrow', background='#f0f0f0')
+        # Строка должности ("МАСТЕРА", "АДМИНИСТРАТОРЫ") - с итогами по ней
+        self.summary_tree.tag_configure('group', background='#e3eaf0', font=("Segoe UI", 12, "bold"))
 
         summary_scrollbar = ttk.Scrollbar(summary_table_frame, orient=tk.VERTICAL, command=self.summary_tree.yview)
         self.summary_tree.configure(yscrollcommand=summary_scrollbar.set)
@@ -6140,41 +6374,71 @@ class AutoServiceApp:
         for item in self.summary_tree.get_children():
             self.summary_tree.delete(item)
 
-        # Сводка
-        summary = self.db.get_summary_by_period(date_from, date_to)
+        # Сводка: весь штат по должностям (как в "Настройки -> Сотрудники"). Работы и % - у тех, у кого были
+        # работы за период (это мастера); премии и выплаты - у всех. Премии и выплаты уже лежат в расходах
+        # ("Финансы"), поэтому итоги внизу (доход - расходы - % мастерам = прибыль) сходятся
+        works_by_worker = {row[0]: (row[1], float(row[2]), row[3])
+                           for row in self.db.get_summary_by_period(date_from, date_to)}
         bonus_sums = self.db.get_bonuses_sum_by_period(date_from, date_to)
+        staff = self.db.get_staff()
+        known = {w["id"] for w in staff}
         self.summary_bonus_data = {}
+        self.summary_workers = {}
         grand_total = 0
         total_percent_sum = 0
-        summary_row_index = 0
-        for row in summary:
-            worker_id, name, total, count = row
-            total = float(total)  # MariaDB возвращает Decimal
-            grand_total += total
-            worker_share = total * percent / 100
-            total_percent_sum += worker_share
 
-            # Определяем тег для чередующихся строк
-            row_tag = 'oddrow' if summary_row_index % 2 == 0 else 'evenrow'
+        groups = []   # [(должность, мастер?, [строки])]
+        for worker in staff:
+            if not groups or groups[-1][0] != worker["position"]:
+                groups.append((worker["position"], worker["is_master"], []))
+            groups[-1][2].append(worker)
 
-            # Премии мастера за выбранный период (сумма в колонке, разбивка по датам - во всплывающей подсказке)
-            bonus_total = bonus_sums.get(worker_id, 0)
-            if bonus_total:
-                self.summary_bonus_data[str(worker_id)] = self.db.get_bonuses_by_worker_and_period(worker_id, date_from, date_to)
-                bonus_text = self.format_currency(bonus_total)
-            else:
-                bonus_text = "-"
+        for position, is_master, workers in groups:
+            # Мастера - по заработанному (как раньше), остальные - по ФИО
+            if is_master:
+                workers = sorted(workers, key=lambda w: -works_by_worker.get(w["id"], (None, 0, 0))[1])
+            rows = []
+            group_total = group_share = group_bonus = 0
+            for worker in workers:
+                _, total, count = works_by_worker.get(worker["id"], (None, 0.0, 0))
+                share = total * percent / 100
+                bonus_total = bonus_sums.get(worker["id"], 0)
+                grand_total += total
+                total_percent_sum += share
+                group_total += total
+                group_share += share
+                group_bonus += bonus_total
+                rows.append((worker, total, count, share, bonus_total))
 
-            # ID мастера сохраняем в тегах вместе с цветом (для контекстного меню "Подробно"/"Выписать премию")
-            self.summary_tree.insert("", tk.END, values=(
-                name,
-                count,
-                self.format_currency(total),
-                self.format_currency(worker_share),
-                bonus_text
-            ), tags=(str(worker_id), row_tag))
+            group_id = self.summary_tree.insert("", tk.END, values=(
+                (position or "—").upper(),
+                sum(r[2] for r in rows) if is_master or group_total else "",
+                self.format_currency(group_total) if is_master or group_total else "",
+                self.format_currency(group_share) if is_master or group_total else "",
+                self.format_currency(group_bonus) if group_bonus else "-"
+            ), tags=("group",))
+            for index, (worker, total, count, share, bonus_total) in enumerate(rows):
+                worker_id = worker["id"]
+                if bonus_total:
+                    self.summary_bonus_data[str(worker_id)] = self.db.get_bonuses_by_worker_and_period(
+                        worker_id, date_from, date_to)
+                has_works = bool(count)
+                item = self.summary_tree.insert("", tk.END, values=(
+                    "    " + worker["full_name"],
+                    count if is_master or has_works else "",
+                    self.format_currency(total) if is_master or has_works else "",
+                    self.format_currency(share) if is_master or has_works else "",
+                    self.format_currency(bonus_total) if bonus_total else "-"
+                ), tags=(str(worker_id), 'oddrow' if index % 2 == 0 else 'evenrow'))
+                self.summary_workers[item] = {"id": worker_id, "name": worker["full_name"], "position": position,
+                                              "is_master": is_master, "works": has_works}
 
-            summary_row_index += 1
+        # Работы сотрудников, которых уже нет в списке (не должно быть - удаление сотрудника удаляет его работы),
+        # всё равно учитываем в итогах, чтобы сумма сходилась с работами за период
+        for worker_id, (name, total, count) in works_by_worker.items():
+            if worker_id not in known:
+                grand_total += total
+                total_percent_sum += total * percent / 100
 
         # Получаем расходы и доходы за период
         total_expenses = float(self.db.get_total_expenses_by_period(date_from, date_to))
@@ -6200,12 +6464,26 @@ class AutoServiceApp:
         profit_color = "#2e7d32" if net_profit >= 0 else "#c62828"  # Зелёный если >= 0, красный если < 0
         self.profit_label.configure(text=self.tr("reports.profit_label", amount=self.format_currency(net_profit)), text_color=profit_color)
 
+    def summary_selected_worker(self):
+        """Выбранный в сводке сотрудник: dict(id, name, position, is_master, works) или None"""
+        selection = self.summary_tree.selection()
+        if not selection:
+            return None
+        return getattr(self, "summary_workers", {}).get(selection[0])
+
     def show_summary_context_menu(self, event):
-        """Показать контекстное меню для строки сводки по мастеру"""
+        """Контекстное меню строки сводки: "Подробно" (работы) и "Выписать премию" (мастеру) /
+        "Выписать выплату" (другим должностям). На строке должности меню нет"""
         item = self.summary_tree.identify_row(event.y)
-        if item:
-            self.summary_tree.selection_set(item)
-            self.summary_context_menu.post(event.x_root, event.y_root)
+        if not item or item not in getattr(self, "summary_workers", {}):
+            return
+        self.summary_tree.selection_set(item)
+        worker = self.summary_workers[item]
+        menu = self.summary_context_menu
+        menu.entryconfigure(0, state="normal" if worker["works"] or worker["is_master"] else "disabled")
+        menu.entryconfigure(1, label="  💰  " + self.tr("reports.ctx_add_bonus" if worker["is_master"]
+                                                        else "reports.ctx_add_payment"))
+        menu.post(event.x_root, event.y_root)
 
     def show_add_bonus_window(self):
         """Показать окно начисления премии выбранному мастеру"""
@@ -6214,12 +6492,14 @@ class AutoServiceApp:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_master"))
             return
 
-        item = self.summary_tree.item(selection[0])
-        worker_id = item['tags'][0]
-        worker_name = item['values'][0]
+        worker = self.summary_selected_worker()
+        if not worker:
+            return
+        worker_id, worker_name, is_master = worker["id"], worker["name"], worker["is_master"]
 
         bonus_window = ctk.CTkToplevel(self.root)
-        bonus_window.title(self.tr("reports.bonus_window_title", name=worker_name))
+        bonus_window.title(self.tr("reports.bonus_window_title" if is_master else "reports.payment_window_title",
+                                   name=worker_name))
         bonus_window.geometry("380x260")
         bonus_window.transient(self.root)
         bonus_window.attributes("-topmost", True)
@@ -6254,16 +6534,22 @@ class AutoServiceApp:
             # Премия начисляется вместе со связанным расходом в "Финансы" одной транзакцией
             # (см. Database.add_worker_bonus) - поэтому удаление расхода на вкладке "Финансы"
             # удалит и премию из отчётов
-            added = self.db.add_worker_bonus(
-                int(worker_id), amount, bonus_date,
-                self.tr("finances.bonus_description", name=worker_name),
-                self.tr("finances.category_bonus")
-            )
+            # Мастеру - премия ("Премии мастерам"), другим должностям - выплата ("Зарплата сотрудникам")
+            if is_master:
+                description = self.tr("finances.bonus_description", name=worker_name)
+                category = self.tr("finances.category_bonus")
+            else:
+                description = self.tr("finances.payment_description", name=worker_name, position=worker["position"])
+                category = self.tr("finances.category_staff_salary")
+            added = self.db.add_worker_bonus(int(worker_id), amount, bonus_date, description, category)
             if added:
                 if hasattr(self, 'expenses_tree'):
                     self.refresh_expenses()
 
-                messagebox.showinfo(self.tr("common.success"), self.tr("reports.msg_bonus_added", name=worker_name, amount=self.format_currency(amount)), parent=bonus_window)
+                messagebox.showinfo(self.tr("common.success"),
+                                    self.tr("reports.msg_bonus_added" if is_master else "reports.msg_payment_added",
+                                            name=worker_name, amount=self.format_currency(amount)),
+                                    parent=bonus_window)
                 bonus_window.destroy()
                 self.generate_report(show_empty_message=False)
             else:
@@ -6283,9 +6569,10 @@ class AutoServiceApp:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_master"))
             return
 
-        item = self.summary_tree.item(selection[0])
-        worker_id = item['tags'][0]
-        worker_name = item['values'][0]
+        worker = self.summary_selected_worker()
+        if not worker:
+            return
+        worker_id, worker_name = worker["id"], worker["name"]
 
         date_from = getattr(self, 'report_date_from', None)
         date_to = getattr(self, 'report_date_to', None)
@@ -8862,11 +9149,18 @@ class AutoServiceApp:
         plate_fill = [None]
         plate_fill_fields = {"name": name_entry, "phone": phone_entry}
 
-        def check_car_number(*args):
-            """Проверка госномера - ищем существующее авто и владельца"""
+        plate_hint = [None]   # номер, для которого показана подсказка "есть в базе - Tab, чтобы подставить"
+
+        def check_car_number(event=None):
+            """Проверка госномера - ищем существующее авто и владельца.
+            Во время ввода (KeyRelease) номер с регионом из двух цифр (Х555ХХ77) не подставляем - его могут
+            дописать до Х555ХХ777: только подсказка; подставим, когда уйдут из поля (или по Enter)"""
+            typing = event is not None and getattr(event, "type", None) == tk.EventType.KeyRelease
             car_num = car_number_entry.get().strip().upper()
             if plate_fill[0] and plate_fill[0]["number"] == car_num:
                 return  # этот госномер уже найден и подставлен
+            if plate_hint[0] and plate_hint[0] != car_num:
+                plate_hint[0] = None
             if plate_fill[0]:
                 # Госномер поправили - имя и телефон прежнего владельца убираем
                 filled = plate_fill[0]["filled"]
@@ -8874,9 +9168,17 @@ class AutoServiceApp:
                 self.undo_autofill(plate_fill_fields, filled)
                 if "phone" in filled:
                     phone_fill[0] = None
-            if len(car_num) >= 6:
-                car_info = self.db.get_car_info_by_number(car_num)
-                if car_info:
+            result = self.find_car_by_plate(car_num, typing)
+            if result["status"] != "short":
+                if result["status"] == "hint":
+                    plate_hint[0] = car_num
+                    car_found_by_number[0] = False
+                    found_car_id[0] = None
+                    set_car_state("hint", result["text"])
+                    return
+                if result["status"] == "found":
+                    car_info = result["car"]
+                    plate_hint[0] = None
                     before = self.snapshot_fields(plate_fill_fields)
                     car_found_by_number[0] = True
                     found_car_id[0] = car_info.get('car_id')
@@ -8886,10 +9188,7 @@ class AutoServiceApp:
                     car_model = car_info.get('car_model', '')
 
                     # Показываем информацию, поля марки/модели скрываем
-                    info_text = self.tr("bookings.add_window_car_found", brand=car_brand, model=car_model)
-                    if owner_name:
-                        info_text += f" — {owner_name}"
-                    set_car_state("found", info_text)
+                    set_car_state("found", result["text"])
 
                     # Заполняем марку/модель (скрытые, но для сохранения)
                     brand_entry.delete(0, tk.END)
@@ -9274,6 +9573,9 @@ class AutoServiceApp:
 
         def save_booking():
             """Сохранить запись"""
+            if plate_hint[0] and plate_hint[0] == car_number_entry.get().strip().upper():
+                check_car_number()   # номер так и не дописали - это та машина: подставляем и показываем
+                return
             name = name_entry.get().strip()
             phone_raw = phone_entry.get().strip()
             date_str = date_entry.get_date().strftime("%d.%m.%Y")

@@ -30,6 +30,12 @@ def normalize_plate(plate):
     return plate
 
 
+def plate_may_continue(plate):
+    """Российский номер с регионом из двух цифр (Х555ХХ77) - полный, но к нему ещё может дописаться
+    цифра региона (Х555ХХ777). Пока номер вводят, такую машину нельзя подставлять сразу"""
+    return bool(re.fullmatch(rf"[{PLATE_LETTERS}]\d{{3}}[{PLATE_LETTERS}]{{2}}\d{{2}}", normalize_plate(plate)))
+
+
 def plate_search_key(text):
     """Часть госномера для поиска "по мере ввода": заглавными, без пробелов, латиница -> кириллица"""
     return re.sub(r"\s", "", str(text or "")).upper().translate(PLATE_LATIN_TO_CYR)

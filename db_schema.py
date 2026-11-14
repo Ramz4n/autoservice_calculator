@@ -204,6 +204,19 @@ TABLES = {
         ) ENGINE=InnoDB
     ''',
 
+    # Должности сотрудников (workers.position_id). is_master = 1 - "Мастер": только мастера берут работы
+    # в "Добавить работу", получают процент в "Отчётах" и считаются в "Записать клиента" (мест на время).
+    # Должность мастера одна, удалить её нельзя (переименовать можно)
+    'positions': '''
+        CREATE TABLE IF NOT EXISTS positions (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL UNIQUE,
+            is_master TINYINT(1) NOT NULL DEFAULT 0,
+            sort_order INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB
+    ''',
+
     # Расписание сотрудников: выходной, отпуск, больничный (период date_from..date_to)
     'worker_absences': '''
         CREATE TABLE IF NOT EXISTS worker_absences (
@@ -284,4 +297,11 @@ MIGRATIONS = [
     "WHERE part_name <> TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' '))",
     "UPDATE warehouse_parts SET part_name = TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' ')) "
     "WHERE part_name <> TRIM(REGEXP_REPLACE(part_name, '[[:space:]]+', ' '))",
+    # Должности сотрудников: раньше в программе были только мастера - должность "Мастер" создаётся одна
+    # (если её ещё нет), и все сотрудники без должности становятся мастерами. Ничего не удаляется
+    "ALTER TABLE workers ADD COLUMN IF NOT EXISTS position_id INT DEFAULT NULL",
+    "INSERT INTO positions (name, is_master, sort_order) SELECT 'Мастер', 1, 0 FROM DUAL "
+    "WHERE NOT EXISTS (SELECT 1 FROM positions WHERE is_master = 1)",
+    "UPDATE workers SET position_id = (SELECT id FROM positions WHERE is_master = 1 ORDER BY id LIMIT 1) "
+    "WHERE position_id IS NULL",
 ]

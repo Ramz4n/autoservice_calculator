@@ -117,6 +117,16 @@ class Database:
                     "Данные не изменены и не удалены, но отчёты и редактирование записей работать не будут.\n\n"
                     f"Ошибка: {e}")
 
+        # Должности: ADD COLUMN IF NOT EXISTS есть только в MariaDB - на MySQL добавляем поле обычной командой
+        # и повторяем заполнение (все сотрудники без должности - мастера)
+        if not self._column_exists(cursor, "workers", "position_id"):
+            try:
+                cursor.execute("ALTER TABLE workers ADD COLUMN position_id INT DEFAULT NULL")
+                for migration_sql in MIGRATIONS[-2:]:
+                    cursor.execute(migration_sql)
+            except MySQLError as e:
+                print(f"Не удалось добавить должности сотрудникам: {e}")
+
         # Госномера - в одном написании: заглавными, без пробелов, российские - кириллицей
         # (A123BC77 латиницей и "А 123 ВС 77" -> А123ВС77), иначе поиск их не находит
         for car_id, number in plate_fixes:
@@ -190,18 +200,141 @@ class Database:
 
     # --- Методы для работы с работниками ---
 
-    def add_worker(self, full_name):
-        """Добавить работника"""
+    def add_worker(self, full_name, position_id=None):
+        """Добавить сотрудника с должностью (не указана - мастер)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("INSERT INTO workers (full_name) VALUES (%s)", (full_name,))
+            if position_id is None:
+                position_id = self._master_position_id(cursor)
+            cursor.execute("INSERT INTO workers (full_name, position_id) VALUES (%s, %s)", (full_name, position_id))
             conn.commit()
             return True
         except pymysql.IntegrityError:
             return False
         finally:
             conn.close()
+
+    # --- Должности ---
+
+    @staticmethod
+    def _master_position_id(cursor):
+        cursor.execute("SELECT id FROM positions WHERE is_master = 1 ORDER BY id LIMIT 1")
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def get_positions(self):
+        """Должности: [dict(id, name, is_master, workers)] - мастер первым, дальше по порядку и названию"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        # Должности "Мастер" нет (восстановили копию базы, сделанную до должностей) - создаём её снова,
+        # сотрудники без должности - мастера (как при обновлении базы)
+        if self._master_position_id(cursor) is None:
+            for migration_sql in MIGRATIONS[-2:]:
+                cursor.execute(migration_sql)
+            conn.commit()
+        cursor.execute("""
+            SELECT p.id, p.name, p.is_master, COUNT(w.id)
+            FROM positions p
+            LEFT JOIN workers w ON w.position_id = p.id
+            GROUP BY p.id, p.name, p.is_master, p.sort_order
+            ORDER BY p.is_master DESC, p.sort_order, p.name
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"id": r[0], "name": r[1], "is_master": bool(r[2]), "workers": r[3]} for r in rows]
+
+    def add_position(self, name, works_with_cars=False):
+        """Новая должность; works_with_cars - работает с машинами, как мастер (автоэлектрик и т.п.).
+        False - такая уже есть"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO positions (name, is_master) VALUES (%s, %s)",
+                           (name, 1 if works_with_cars else 0))
+            conn.commit()
+            return True
+        except pymysql.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def rename_position(self, position_id, name):
+        """Переименовать должность. False - такое название уже есть"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE positions SET name = %s WHERE id = %s", (name, position_id))
+            conn.commit()
+            return True
+        except pymysql.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def _is_last_car_position(self, cursor, position_id):
+        """Это единственная должность, которая работает с машинами (без неё некому брать работы)"""
+        cursor.execute("SELECT COUNT(*) FROM positions WHERE is_master = 1 AND id <> %s", (position_id,))
+        return cursor.fetchone()[0] == 0
+
+    def set_position_works_with_cars(self, position_id, works_with_cars):
+        """Включить / выключить "работает с машинами": "ok"; "last" - нельзя выключить у последней такой должности"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            if not works_with_cars and self._is_last_car_position(cursor, position_id):
+                return "last"
+            cursor.execute("UPDATE positions SET is_master = %s WHERE id = %s", (1 if works_with_cars else 0, position_id))
+            conn.commit()
+            return "ok"
+        finally:
+            conn.close()
+
+    def delete_position(self, position_id):
+        """Удалить должность: "ok"; "master" - последнюю должность, которая работает с машинами, удалить нельзя;
+        "has_workers" - в ней есть сотрудники (сначала переведите их в другую должность)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT is_master FROM positions WHERE id = %s", (position_id,))
+            row = cursor.fetchone()
+            if row and row[0] and self._is_last_car_position(cursor, position_id):
+                return "master"
+            cursor.execute("SELECT COUNT(*) FROM workers WHERE position_id = %s", (position_id,))
+            if cursor.fetchone()[0]:
+                return "has_workers"
+            cursor.execute("DELETE FROM positions WHERE id = %s", (position_id,))
+            conn.commit()
+            return "ok"
+        finally:
+            conn.close()
+
+    def set_worker_position(self, worker_id, position_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE workers SET position_id = %s WHERE id = %s", (position_id, worker_id))
+        conn.commit()
+        conn.close()
+
+    def get_staff(self):
+        """Все сотрудники с должностями: [dict(id, full_name, position_id, position, is_master)] -
+        сначала мастера, дальше по должностям, внутри - по ФИО. Без должности - считается мастером"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT w.id, w.full_name, p.id, p.name, COALESCE(p.is_master, 1)
+            FROM workers w
+            LEFT JOIN positions p ON p.id = w.position_id
+            ORDER BY COALESCE(p.is_master, 1) DESC, p.sort_order, p.name, w.full_name
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"id": r[0], "full_name": r[1], "position_id": r[2], "position": r[3] or "", "is_master": bool(r[4])}
+                for r in rows]
+
+    def get_masters(self):
+        """Только мастера (берут работы, получают процент): [(id, full_name)]"""
+        return [(w["id"], w["full_name"]) for w in self.get_staff() if w["is_master"]]
 
     def delete_worker(self, worker_id):
         """Удалить работника и все его записи"""
@@ -1430,11 +1563,11 @@ class Database:
 
     def day_capacity(self, day):
         """Сколько машин можно записать на одно время в этот день: настройка max_cars_per_slot, но не больше
-        мастеров, которые в этот день работают (выходной / отпуск / больничный во вкладке "Сотрудники").
+        мастеров (должность "Мастер"), которые в этот день работают (выходной / отпуск / больничный).
         Возвращает dict(capacity, setting, working, total, absent=[(имя, вид)]).
         Мастеров в программе нет - только настройка"""
         setting = max_cars_per_slot()
-        workers = self.get_all_workers()
+        workers = self.get_masters()   # машины чинят только мастера (не администраторы и т.п.)
         schedule = self.get_worker_schedule(day, day)
         absent = [(name, schedule[worker_id][day]) for worker_id, name in workers
                   if day in schedule.get(worker_id, {})]
@@ -2194,38 +2327,9 @@ class Database:
         conn.close()
         return cars
 
-    def get_car_info_by_number(self, car_number):
-        """Получить информацию о машине и владельце по госномеру"""
-        car_number = normalize_plate(car_number) if car_number else car_number
-        if not car_number:
-            return None
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT cc.id, cc.car_brand, cc.car_model, cc.car_number, cc.mileage, cc.vin,
-                   cl.full_name as client_name, cl.phone as client_phone
-            FROM client_cars cc
-            LEFT JOIN clients cl ON cc.client_id = cl.id
-            WHERE UPPER(cc.car_number) = UPPER(%s)
-            LIMIT 1
-        """, (car_number,))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            return {
-                "car_id": result[0],
-                "car_brand": result[1] or "",
-                "car_model": result[2] or "",
-                "car_number": result[3] or "",
-                "mileage": result[4] or "",
-                "vin": result[5] or "",
-                "client_name": result[6] or "",
-                "client_phone": result[7] or ""
-            }
-        return None
-
     def get_all_clients_by_car_number(self, car_number):
-        """Получить клиента по госномеру из client_cars"""
+        """Машина по госномеру с владельцем (поиск машины во всех формах - AutoServiceApp.find_car_by_plate):
+        [dict(client_name, client_phone, car_brand, car_model, vin, client_id, car_id, car_number, mileage)]"""
         car_number = normalize_plate(car_number) if car_number else car_number
         if not car_number:
             return []
@@ -2233,7 +2337,7 @@ class Database:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT cl.full_name as client_name, cl.phone as client_phone,
-                   cc.car_brand, cc.car_model, cc.vin, cc.client_id
+                   cc.car_brand, cc.car_model, cc.vin, cc.client_id, cc.id, cc.car_number, cc.mileage
             FROM client_cars cc
             LEFT JOIN clients cl ON cc.client_id = cl.id
             WHERE UPPER(cc.car_number) = UPPER(%s)
@@ -2249,7 +2353,10 @@ class Database:
                 "car_brand": row[2] or "",
                 "car_model": row[3] or "",
                 "vin": row[4] or "",
-                "client_id": row[5]
+                "client_id": row[5],
+                "car_id": row[6],
+                "car_number": row[7] or "",
+                "mileage": row[8] or ""
             })
         return clients
 
