@@ -4010,6 +4010,48 @@ class AutoServiceApp:
                 phone_entry.focus_set()
         return False
 
+    def works_phone_owner(self, phone_digits, client_id):
+        """Телефон из формы уже есть в базе у другого клиента (не client_id) - этот клиент, иначе None.
+        Тогда прежнему владельцу такой телефон записывать нельзя - будут две карточки с одним номером"""
+        if len(phone_digits or "") < 10:
+            return None
+        other = self.db.get_client_by_phone(phone_digits)
+        return other if other and other["id"] != client_id else None
+
+    def works_ask_new_owner(self, car, car_number, client_name, phone_digits, parent=None):
+        """В форме не тот человек, на кого записана машина. True - новый владелец (машина и история - к нему),
+        False - тот же человек (переписать его карточку), None - отмена.
+        "Тот же человек" не предлагаем, если сменились и имя, и телефон (почти всегда это другой человек),
+        и если телефон в базе у другого клиента (это он и есть)"""
+        kwargs = {"parent": parent} if parent else {}
+        number = car["car_number"] or car_number
+        old_name = car["owner_name"] or self.tr("common.no_name")
+        old_person = f"{old_name} ({car['owner_phone']})" if car["owner_phone"] else old_name
+        new_person = client_name or (("+7" + phone_digits[-10:]) if phone_digits else self.tr("common.no_name"))
+        if phone_digits and client_name:
+            new_person = f"{client_name} (+7{phone_digits[-10:]})"
+        title = self.tr("works.dialog_new_owner_title")
+
+        other = self.works_phone_owner(phone_digits, car["client_id"])
+        if other:
+            other_name = other["full_name"] or self.tr("common.no_name")
+            ok = messagebox.askokcancel(title, self.tr(
+                "works.dialog_phone_taken_body", number=number, old=old_person, phone="+7" + phone_digits[-10:],
+                other=other_name), **kwargs)
+            return True if ok else None
+
+        phone_changed = bool(phone_digits) and not self.works_same_person(phone_digits, "", car["owner_phone"], "")
+        if phone_changed and self.works_name_changed(client_name, car["owner_name"]):
+            ok = messagebox.askokcancel(title, self.tr(
+                "works.dialog_new_owner_only_body", number=number, old=old_person, new=new_person,
+                old_name=old_name), **kwargs)
+            return True if ok else None
+
+        cars = len(self.db.get_client_cars_by_client_id(car["client_id"]))
+        return messagebox.askyesnocancel(title, self.tr(
+            "works.dialog_new_owner_body", number=number, old=old_person, new=new_person, old_name=old_name,
+            cars=max(cars, 1)), default=messagebox.YES, **kwargs)
+
     def works_resolve_owner(self, car_number, vin, client_name, phone_digits):
         """Перед сохранением: та ли машина и тот ли владелец. Возвращает решение для works_owner_ids
         или None - сохранение отменили.
@@ -4039,6 +4081,14 @@ class AutoServiceApp:
                             number=car_number, new=new_person, new_name=new_name, old_name=old_name))
                 if answer is None:
                     self.vin_entry.focus_set()
+                    return None
+                other = None if answer else self.works_phone_owner(phone_digits, same_vin["client_id"])
+                if other:
+                    # "Тот же владелец", а телефон в базе у другого клиента - иначе будет два клиента с одним номером
+                    messagebox.showwarning(self.tr("works.dialog_same_vin_title"), self.tr(
+                        "works.msg_phone_taken", phone="+7" + phone_digits[-10:],
+                        other=other["full_name"] or self.tr("common.no_name"), old_name=old_name))
+                    self.client_phone_entry.focus_set()
                     return None
                 owner.update(car=same_vin, plate_from=same_vin["car_number"], lookup_by_car=False)
                 if answer:
@@ -4078,16 +4128,7 @@ class AutoServiceApp:
         if self.works_same_person(phone_digits, client_name, car["owner_phone"], car["owner_name"]):
             return owner
 
-        new_person = client_name or (("+7" + phone_digits) if phone_digits else self.tr("common.no_name"))
-        if phone_digits and client_name:
-            new_person = f"{client_name} (+7{phone_digits})"
-        old_person = car["owner_name"] or self.tr("common.no_name")
-        if car["owner_phone"]:
-            old_person = f"{old_person} ({car['owner_phone']})"
-        answer = messagebox.askyesnocancel(
-            self.tr("works.dialog_new_owner_title"),
-            self.tr("works.dialog_new_owner_body", number=car["car_number"] or car_number, old=old_person,
-                    new=new_person, old_name=car["owner_name"] or self.tr("common.no_name")))
+        answer = self.works_ask_new_owner(car, car_number, client_name, phone_digits)
         if answer is None:
             return None
         if answer:
@@ -9141,14 +9182,7 @@ class AutoServiceApp:
                 return
             if car and car["client_id"] and not self.works_same_person(
                     phone_digits[-10:], name, car["owner_phone"], car["owner_name"]):
-                old_person = car["owner_name"] or self.tr("common.no_name")
-                if car["owner_phone"]:
-                    old_person = f"{old_person} ({car['owner_phone']})"
-                answer = messagebox.askyesnocancel(
-                    self.tr("works.dialog_new_owner_title"),
-                    self.tr("works.dialog_new_owner_body", number=car["car_number"] or number, old=old_person,
-                            new=f"{name} ({phone})", old_name=car["owner_name"] or self.tr("common.no_name")),
-                    parent=add_window)
+                answer = self.works_ask_new_owner(car, number, name, phone_digits[-10:], parent=add_window)
                 if answer is None:
                     return
                 if answer:

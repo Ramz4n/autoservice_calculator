@@ -1934,6 +1934,22 @@ class Database:
         conn.close()
         return result[0] if result else None
 
+    def get_client_by_phone(self, phone):
+        """Клиент с этим телефоном (последние 10 цифр): {"id", "full_name", "phone"} или None"""
+        phone_digits = re.sub(r'\D', '', phone or "")[-10:]
+        if not phone_digits:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, full_name, phone FROM clients
+            WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 10) = %s
+            ORDER BY id LIMIT 1
+        """, (phone_digits,))
+        result = cursor.fetchone()
+        conn.close()
+        return {"id": result[0], "full_name": result[1] or "", "phone": result[2] or ""} if result else None
+
     def get_client_cars_by_client_id(self, client_id):
         """Машины клиента по его id (надёжнее имени: тёзки - разные клиенты)"""
         if not client_id:
