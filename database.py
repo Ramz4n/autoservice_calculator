@@ -1516,10 +1516,11 @@ class Database:
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
                    b.client_id, b.car_id,
                    (SELECT w.order_number FROM works w WHERE w.booking_id = b.id
-                    ORDER BY w.id DESC LIMIT 1) AS order_number, b.notes
+                    ORDER BY w.id DESC LIMIT 1) AS order_number, b.notes, bw.full_name AS master_name
                    FROM bookings b
                    LEFT JOIN clients c ON b.client_id = c.id
                    LEFT JOIN client_cars cc ON b.car_id = cc.id
+                   LEFT JOIN workers bw ON b.worker_id = bw.id
                    WHERE 1=1"""
         params = []
 
@@ -1636,15 +1637,43 @@ class Database:
         finally:
             conn.close()
 
-    def add_booking(self, booking_date, booking_time, client_id, car_id=None, status="waiting", notes=None):
-        """Добавить новую запись клиента. Возвращает ID записи или None при ошибке."""
+    def worker_busy_booking(self, worker_id, booking_date, booking_time):
+        """Активная запись («в ожидании», «в работе») этого мастера на это время: dict(id, client_name,
+        car_number, brand, model) или None - мастер свободен"""
+        if not worker_id:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT b.id, c.full_name, car.car_number, car.car_brand, car.car_model
+            FROM bookings b
+            LEFT JOIN clients c ON b.client_id = c.id
+            LEFT JOIN client_cars car ON b.car_id = car.id
+            WHERE b.worker_id = %s AND b.booking_date = %s AND b.booking_time = %s
+              AND b.status IN ('waiting', 'in_progress')
+            ORDER BY b.id LIMIT 1
+        """, (worker_id, booking_date, booking_time))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"id": row[0], "client_name": row[1] or "", "car_number": row[2] or "",
+                "brand": row[3] or "", "model": row[4] or ""}
+
+    def add_booking(self, booking_date, booking_time, client_id, car_id=None, status="waiting", notes=None,
+                    worker_id=None):
+        """Добавить новую запись клиента. worker_id - мастер (необязательно); мастер уже записан на это время -
+        запись не создаётся. Возвращает ID записи или None при ошибке."""
+        if worker_id and self.worker_busy_booking(worker_id, booking_date, booking_time):
+            print(f"Мастер {worker_id} уже записан на {booking_date} {booking_time}")
+            return None
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                INSERT INTO bookings (client_id, car_id, booking_date, booking_time, status, notes)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (client_id, car_id, booking_date, booking_time, status, notes))
+                INSERT INTO bookings (client_id, car_id, booking_date, booking_time, status, notes, worker_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (client_id, car_id, booking_date, booking_time, status, notes, worker_id or None))
             conn.commit()
             return cursor.lastrowid
         except Exception as e:
@@ -1709,10 +1738,12 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT b.booking_time, c.full_name, car.car_number, car.car_brand, car.car_model
+            SELECT b.booking_time, c.full_name, car.car_number, car.car_brand, car.car_model, b.notes, b.status,
+                   b.worker_id, w.full_name
             FROM bookings b
             LEFT JOIN clients c ON b.client_id = c.id
             LEFT JOIN client_cars car ON b.car_id = car.id
+            LEFT JOIN workers w ON b.worker_id = w.id
             WHERE b.booking_date = %s AND b.status IN ('waiting', 'in_progress')
             ORDER BY b.booking_time, b.id
         """, (booking_date,))
@@ -1720,12 +1751,16 @@ class Database:
         conn.close()
 
         by_time = {}
-        for booking_time, full_name, car_number, brand, model in results:
+        for booking_time, full_name, car_number, brand, model, notes, status, worker_id, worker_name in results:
             by_time.setdefault(str(booking_time).strip(), []).append({
                 'client_name': full_name or '',
                 'car_number': car_number or '',
                 'brand': brand or '',
-                'model': model or ''
+                'model': model or '',
+                'notes': (notes or '').strip(),
+                'status': status or '',
+                'worker_id': worker_id,
+                'worker_name': worker_name or ''
             })
         return by_time
 
@@ -1759,10 +1794,11 @@ class Database:
                    c.phone,
                    b.booking_date, b.booking_time, b.status, b.created_at,
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
-                   b.client_id, b.car_id, b.notes, cc.vin
+                   b.client_id, b.car_id, b.notes, cc.vin, b.worker_id, w.full_name
             FROM bookings b
             LEFT JOIN clients c ON b.client_id = c.id
             LEFT JOIN client_cars cc ON b.car_id = cc.id
+            LEFT JOIN workers w ON b.worker_id = w.id
             WHERE b.id = %s
         """, (booking_id,))
         row = cursor.fetchone()
@@ -1782,7 +1818,9 @@ class Database:
                 "client_id": row[10],
                 "car_id": row[11],
                 "notes": row[12],
-                "car_vin": row[13] or ""
+                "car_vin": row[13] or "",
+                "worker_id": row[14],
+                "worker_name": row[15] or ""
             }
         return None
 

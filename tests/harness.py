@@ -203,10 +203,16 @@ class Harness:
     def find_button(self, parent, text):
         return next(b for b in self.find_widgets(parent, ctk.CTkButton) if b.cget("text") == text)
 
+    def booking_master_button(self, window, master):
+        """Кнопка мастера в «Записать клиента» (текст - имя, у занятого / отсутствующего - с пометкой)"""
+        return next(b for b in self.find_widgets(window, ctk.CTkButton)
+                    if b.cget("text") == master or str(b.cget("text")).startswith(master + " —"))
+
     def booking_form(self, plate, brand=None, model=None, phone10=None, name=None, typed_live_first=None, save=True,
-                     day=None, time=None, to_catalog=True):
+                     day=None, time=None, to_catalog=True, master=None):
         """«Записать клиента»: госномер (с уходом из поля), марка/модель, телефон, имя, «Завтра» (или день day
-        в календаре), время time (кнопка), «Записать». to_catalog - как в works_form"""
+        в календаре), мастер master (кнопка с его именем - до выбора времени), время time (кнопка), «Записать».
+        to_catalog - как в works_form"""
         app, root = self.app, self.root
         if to_catalog and brand and model:
             self.ensure_catalog_car(brand, model)
@@ -239,6 +245,9 @@ class Harness:
             calendar.set_date(day)
             calendar.event_generate("<<DateEntrySelected>>")
         root.update()
+        if master is not None:
+            self.booking_master_button(bw["window"], master).invoke()
+            root.update()
         if time is not None:
             self.find_button(bw["window"], time).invoke()
             root.update()

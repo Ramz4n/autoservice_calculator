@@ -4,9 +4,11 @@
 from datetime import date, timedelta
 
 PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799",
-          "Т140ТТ799", "Т141ТТ799", "Т142ТТ799", "Т143ТТ799", "Т144ТТ799", "Т145ТТ799", "Т146ТТ799"]
+          "Т140ТТ799", "Т141ТТ799", "Т142ТТ799", "Т143ТТ799", "Т144ТТ799", "Т145ТТ799", "Т146ТТ799", "Т147ТТ799",
+          "Т148ТТ799", "Т149ТТ799"]
 PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108",
-          "+79000000140", "+79000000141", "+79000000142", "+79000000143", "+79000000144", "+79000000145", "+79000000146"]
+          "+79000000140", "+79000000141", "+79000000142", "+79000000143", "+79000000144", "+79000000145", "+79000000146", "+79000000147",
+          "+79000000148", "+79000000149"]
 
 
 def prepare(h):
@@ -897,7 +899,7 @@ def test_bookings_no_phone_red(h):
     for _ in range(3):
         h.root.update()
     h.check("клик по надписи выбирает строку, фон надписи - как у выбранной строки",
-            tree.selection() == (item,) and label.cget("bg") == "#d6e8fb", tree.selection())
+            tree.selection() == (item,) and label.cget("bg") == app.BOOKINGS_SELECTED_BG, tree.selection())
     columns = tree["displaycolumns"]
     try:
         tree["displaycolumns"] = [c for c in columns if c != "phone"]
@@ -911,6 +913,453 @@ def test_bookings_no_phone_red(h):
         h.root.update()
 
 
+def test_bookings_row_colors(h):
+    """«Записи»: каждая строка во всю ширину залита спокойным цветом своего статуса; у статуса один цвет
+    (без чередования через строку); цвета светлые (не «ядерные»); надпись «нет телефона» - того же цвета, что строка"""
+    app = h.app
+    app.switch_tab("bookings")
+    app.bookings_status_var.set(app.tr("bookings.filter_all"))
+    app.bookings_show_all_time = True
+    try:
+        app.refresh_bookings()
+        tree = app.bookings_tree
+        items = tree.get_children()
+        if not h.check("в списке есть записи", items):
+            return
+        wrong = []
+        shown = {}   # статус -> какие цвета фона у его строк на экране
+        for index, item in enumerate(items):
+            tags = tree.item(item, "tags")
+            status = next((t for t in tags if t in app.BOOKING_ROW_COLORS), None)
+            bg_tags = [t for t in tags if str(t).startswith("bg_")]
+            background = str(tree.tag_configure(f"bg_{status}", "background"))
+            if bg_tags != [f"bg_{status}"] or background != app.BOOKING_ROW_COLORS[status]:
+                wrong.append((index, tags))
+            shown.setdefault(status, set()).add(background)
+        h.check("у каждой строки фон своего статуса", not wrong, wrong[:5])
+        h.check("у строк одного статуса один цвет (нет чередования через строку)",
+                all(len(c) == 1 for c in shown.values()), shown)
+
+        def light(color):
+            r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+            return min(r, g, b) >= 0xd8 and max(r, g, b) - min(r, g, b) <= 0x28
+        colors = list(app.BOOKING_ROW_COLORS.values())
+        h.check("цвета строк спокойные: светлые и неяркие", all(light(c) for c in colors), colors)
+        h.check("цвета разных статусов различаются", len(set(colors)) == len(colors))
+        h.check("выбранная строка отличается от всех цветов статусов", app.BOOKINGS_SELECTED_BG not in colors)
+        for _ in range(3):
+            h.root.update()
+        marks = [(item, label) for item, label in app._bookings_no_phone_marks.items() if label.winfo_manager()]
+        tree.selection_set(())
+        app._bookings_place_no_phone_marks()
+        h.check("надпись «нет телефона» - цветом своей строки",
+                all(label.cget("bg") == app._bookings_row_background(tree.item(item, "tags")) for item, label in marks))
+    finally:
+        app.bookings_show_all_time = False
+        app.refresh_bookings()
+
+
+def test_bookings_middle_click_scroll(h):
+    """«Записи»: нажали колесо мыши - значок ⇕ на месте нажатия; мышь ниже значка - список едет вниз, выше - вверх,
+    дальше - быстрее, рядом со значком - стоит; без движения прокрутка остаётся включённой и выключается
+    повторным колесом / Esc / щелчком; нажали-повели-отпустили - выключается сразу; работает и над «нет телефона»"""
+    import types as _types
+    app = h.app
+    app.switch_tab("bookings")
+    app.bookings_status_var.set(app.tr("bookings.filter_all"))
+    app.bookings_show_all_time = True
+    tree, auto = app.bookings_tree, app.bookings_autoscroll
+    tree.configure(height=3)   # чтобы точно было что прокручивать
+    real_pointer, real_shown = auto.pointer, auto.still_shown
+    try:
+        app.refresh_bookings()
+        for _ in range(3):
+            h.root.update()
+        if not h.check("в списке больше 3 записей - есть что прокручивать",
+                       len(tree.get_children()) > 3 and auto.can_scroll(), len(tree.get_children())):
+            return
+        tree.yview_moveto(0)
+        h.root.update()
+        x0, y0 = tree.winfo_rootx() + 200, tree.winfo_rooty() + 60
+        press = _types.SimpleNamespace(x_root=x0, y_root=y0)
+        pointer = [(x0, y0)]
+        auto.pointer = lambda: pointer[0]
+        auto.still_shown = lambda: tree.winfo_viewable()   # окно тестов может быть не в фокусе
+
+        auto.on_press(press)
+        h.root.update()
+        h.check("нажали колесо - прокрутка включена, значок на месте нажатия",
+                auto.active and auto.marker is not None and auto.marker.winfo_exists()
+                and abs(auto.marker.winfo_rootx() + auto.MARKER_SIZE // 2 - x0) <= 2
+                and abs(auto.marker.winfo_rooty() + auto.MARKER_SIZE // 2 - y0) <= 2,
+                auto.marker and auto.marker.geometry())
+        h.check("курсор - стрелки вверх-вниз", str(tree.cget("cursor")) == "sb_v_double_arrow", tree.cget("cursor"))
+
+        pointer[0] = (x0, y0 + auto.DEAD_ZONE - 2)
+        auto.tick(dt=1.0)
+        h.check("мышь рядом со значком - список стоит", tree.yview()[0] == 0.0, tree.yview())
+
+        pointer[0] = (x0, y0 + 40)
+        auto.tick(dt=0.5)
+        first_slow = tree.yview()[0]
+        h.check("мышь ниже значка - список поехал вниз", first_slow > 0.0, tree.yview())
+        h.check("курсор - стрелка вниз", str(tree.cget("cursor")) == "sb_down_arrow")
+        h.check("дальше от значка - быстрее", auto.rate(200) > auto.rate(40) > 0 and auto.rate(-200) < 0)
+
+        pointer[0] = (x0, y0 - 40)
+        auto.tick(dt=0.5)
+        h.check("мышь выше значка - список поехал вверх", tree.yview()[0] < first_slow, (first_slow, tree.yview()))
+        h.check("курсор - стрелка вверх", str(tree.cget("cursor")) == "sb_up_arrow")
+
+        # Нажали-повели-отпустили - выключилась, значок убран, курсор прежний
+        auto.on_release()
+        h.root.update()
+        h.check("повели и отпустили колесо - прокрутка выключена, значка нет",
+                not auto.active and auto.marker is None)
+        h.check("курсор вернулся обычный", str(tree.cget("cursor")) == "", tree.cget("cursor"))
+
+        # Нажали и отпустили, не двигая, - остаётся; сама едет по таймеру
+        tree.yview_moveto(0)
+        pointer[0] = (x0, y0)
+        auto.on_press(press)
+        auto.on_release()
+        h.check("щёлкнули колесом без движения - прокрутка осталась включённой", auto.active)
+        pointer[0] = (x0, y0 + 150)
+        h.wait(500)
+        h.check("мышь ниже - список едет сам, пока прокрутка включена", tree.yview()[0] > 0.0, tree.yview())
+        h.check("шаг прокрутки с перерисовкой быстрый (программа отвечает)", 0 < auto.last_step_ms < 150,
+                round(auto.last_step_ms, 1))
+        auto.on_press(press)
+        h.check("ещё раз колесо - выключена", not auto.active and auto.marker is None)
+
+        auto.on_press(press)
+        tree.event_generate("<KeyPress-Escape>")
+        h.root.update()
+        h.check("Esc - выключена", not auto.active and auto.marker is None)
+
+        auto.on_press(press)
+        app.root.event_generate("<ButtonPress-1>", x=10, y=10)
+        h.root.update()
+        h.check("щелчок левой кнопкой - выключена", not auto.active)
+
+        auto.on_press(press)
+        app.switch_tab("works")
+        h.wait(200)
+        h.check("ушли на другую вкладку - выключена", not auto.active and auto.marker is None)
+        app.switch_tab("bookings")
+
+        # Над надписью «нет телефона» - то же самое
+        labels = list(app._bookings_no_phone_marks.values())
+        if labels:
+            h.check("надпись «нет телефона» тоже включает прокрутку колесом",
+                    "on_press" in str(labels[0].bind("<ButtonPress-2>")) or labels[0].bind("<ButtonPress-2>"))
+    finally:
+        auto.stop()
+        auto.pointer, auto.still_shown = real_pointer, real_shown
+        tree.configure(height=15)
+        app.bookings_show_all_time = False
+        app.refresh_bookings()
+
+
+def test_tables_middle_click_scroll(h):
+    """Прокрутка колесом мыши - во всех таблицах программы: нажатие колеса над каждой таблицей и списком
+    включает прокрутку (и в окнах, открытых потом); в окне-диалоге щелчки идут значку, а после выключения
+    диалог снова модальный; график «Расписание» - вверх-вниз и влево-вправо"""
+    import tkinter as tk
+    from tkinter import ttk
+    from autoscroll import MiddleClickAutoscroll
+    app = h.app
+    names = ["users_tree", "workers_tree", "positions_tree", "warehouse_tree", "summary_tree", "keywords_tree",
+             "spare_parts_tree", "expenses_tree", "brand_stats_tree", "client_stats_tree", "work_stats_tree",
+             "monthly_stats_tree", "bookings_tree", "brands_listbox", "models_listbox", "staff_canvas"]
+    missing = []
+    for name in names:
+        widget = getattr(app, name, None)
+        if widget is None:
+            missing.append(name + " (нет)")
+            continue
+        if not widget.winfo_ismapped():
+            # На скрытой вкладке нажать нельзя (Windows не передаёт щелчки скрытым) - проверяем привязку
+            if not (widget.bind("<ButtonPress-2>") or widget.bind_class(widget.winfo_class(), "<ButtonPress-2>")):
+                missing.append(name + " (скрыт, привязки нет)")
+            continue
+        widget.event_generate("<ButtonPress-2>", x=5, y=5, rootx=widget.winfo_rootx() + 5,
+                              rooty=widget.winfo_rooty() + 5)
+        auto = MiddleClickAutoscroll._instances.get(widget)
+        if auto is None:
+            missing.append(name)
+        else:
+            auto.stop()
+    h.check("нажатие колеса доходит до всех таблиц и списков", not missing, missing)
+
+    # Окно, открытое потом (как «Подробно»), модальное: таблица в нём тоже прокручивается колесом
+    dialog = tk.Toplevel(h.root)
+    dialog.geometry("400x200+50+50")
+    tree = ttk.Treeview(dialog, columns=("a",), show="headings")
+    tree.pack(fill="both", expand=True)
+    for i in range(80):
+        tree.insert("", "end", values=(f"строка {i}",))
+    try:
+        dialog.update()
+        dialog.grab_set()
+        x0, y0 = tree.winfo_rootx() + 100, tree.winfo_rooty() + 80
+        tree.event_generate("<ButtonPress-2>", x=100, y=80, rootx=x0, rooty=y0)
+        auto = MiddleClickAutoscroll._instances.get(tree)
+        if h.check("в новом окне колесо включило прокрутку", auto and auto.active):
+            auto.still_shown = lambda: True
+            auto.pointer = lambda: (x0, y0 + 120)
+            h.root.update()
+            h.check("щелчки, пока прокрутка включена, идут значку (не в таблицу)",
+                    auto.marker is not None and auto.marker.grab_current() == auto.marker,
+                    auto.marker and auto.marker.grab_current())
+            auto.tick(dt=0.5)
+            h.check("таблица в новом окне прокрутилась вниз", tree.yview()[0] > 0, tree.yview())
+            tree.event_generate("<ButtonPress-2>", x=100, y=80, rootx=x0, rooty=y0)
+            h.root.update()
+            h.check("колесо ещё раз - выключена", not auto.active and auto.marker is None)
+            h.check("после выключения окно снова модальное", dialog.grab_current() == dialog, dialog.grab_current())
+    finally:
+        try:
+            dialog.grab_release()
+        except tk.TclError:
+            pass
+        dialog.destroy()
+
+    # «Сотрудники» → расписание: холст меньше графика - прокрутка в обе стороны
+    app.switch_tab("staff")
+    app.refresh_staff_tab()
+    canvas = app.staff_canvas
+    auto = MiddleClickAutoscroll._instances.get(canvas)
+    h.root.update()
+    # График больше окна: рисунок шире и выше, чем видно (так бывает, когда сотрудников много)
+    canvas.configure(scrollregion=(0, 0, canvas.winfo_width() * 3, canvas.winfo_height() * 3))
+    canvas.xview_moveto(0)
+    canvas.yview_moveto(0)
+    h.root.update()
+    try:
+        if not h.check("график шире и выше окна - есть что прокручивать",
+                       auto and auto.can_scroll_x() and canvas.yview() != (0.0, 1.0),
+                       (canvas.xview(), canvas.yview(), canvas.cget("scrollregion"), canvas.winfo_width(),
+                        canvas.winfo_ismapped(), app.staff_content_size)):
+            return
+        auto.still_shown = lambda: True
+        x0, y0 = canvas.winfo_rootx() + 100, canvas.winfo_rooty() + 40
+        auto.start(x0, y0)
+        h.check("в графике - значок и курсор в четыре стороны", auto.active and str(canvas.cget("cursor")) == "fleur",
+                canvas.cget("cursor"))
+        auto.pointer = lambda: (x0 + 80, y0 + 80)
+        auto.tick(dt=0.5)
+        h.check("мышь правее и ниже - график поехал вправо и вниз",
+                canvas.xview()[0] > 0 and canvas.yview()[0] > 0, (canvas.xview(), canvas.yview()))
+        right, down = canvas.xview()[0], canvas.yview()[0]
+        auto.pointer = lambda: (x0 - 80, y0)
+        auto.tick(dt=0.2)
+        h.check("мышь левее - влево, по высоте стоит", canvas.xview()[0] < right and canvas.yview()[0] == down,
+                (canvas.xview(), canvas.yview()))
+        h.check("курсор - стрелка влево", str(canvas.cget("cursor")) == "sb_left_arrow")
+        auto.stop()
+        h.check("выключена - курсор прежний", not auto.active and str(canvas.cget("cursor")) == "",
+                canvas.cget("cursor"))
+    finally:
+        if auto:
+            auto.stop()
+            auto.__dict__.pop("still_shown", None)
+            auto.__dict__.pop("pointer", None)
+        app.draw_staff_calendar()
+        app.switch_tab("bookings")
+
+
+def test_booking_with_master(h):
+    """«Записать клиента»: запись к мастеру - мастер сохраняется; на это время он помечен «занят» и недоступен,
+    другой мастер на то же время - можно; мастер виден в «Записях», в подсказке времени и подставляется
+    в «Добавить работу»"""
+    app, db = h.app, h.app.db
+    master_a, master_b = "Тест Мастер Записи А", "Тест Мастер Записи Б"
+    for name in (master_a, master_b):
+        db.add_worker(name)
+    id_a = h.q("SELECT id FROM workers WHERE full_name = %s", (master_a,))[0][0]
+    day = date.today() + timedelta(days=1)
+    slot = h.m.booking_time_slots()[-1]
+
+    h.booking_form("т148тт799", "Kia", "Rio", "9000000148", "Тест Мастер Один", day=day, time=slot, master=master_a)
+    row = h.q("SELECT b.id, b.worker_id FROM bookings b JOIN client_cars cc ON cc.id = b.car_id "
+              "WHERE cc.car_number = 'Т148ТТ799'")
+    if not h.check("запись сохранена с мастером А", row and row[0][1] == id_a, row):
+        return
+    booking_id = row[0][0]
+
+    # Снова открыли форму на это время: А - «занят» и недоступен, Б - свободен
+    bw = app._ensure_booking_window()
+    bw["open"]()
+    h.wait(300)
+    try:
+        from tkcalendar import DateEntry
+        calendar = h.find_widgets(bw["window"], DateEntry)[0]
+        calendar.set_date(day)
+        calendar.event_generate("<<DateEntrySelected>>")
+        h.root.update()
+        h.find_button(bw["window"], slot).invoke()
+        h.root.update()
+        btn_a = h.booking_master_button(bw["window"], master_a)
+        btn_b = h.booking_master_button(bw["window"], master_b)
+        h.check("мастер А на это время - «занят», кнопка недоступна",
+                btn_a.cget("text") == app.tr("bookings.master_busy_suffix", name=master_a)
+                and str(btn_a.cget("state")) == "disabled", (btn_a.cget("text"), btn_a.cget("state")))
+        h.check("мастер Б свободен", btn_b.cget("text") == master_b and str(btn_b.cget("state")) == "normal")
+        h.check("кнопка «Любой» есть", any(b.cget("text") == app.tr("bookings.master_any")
+                                         for b in h.find_widgets(bw["window"], h.m.ctk.CTkButton)))
+    finally:
+        bw["window"].withdraw(); bw["overlay"].withdraw(); bw["window"].grab_release()
+
+    by_time = db.get_bookings_by_date(day).get(slot, [])
+    h.check("в подсказке времени - мастер записи",
+            any(b["worker_id"] == id_a and b["worker_name"] == master_a for b in by_time), by_time)
+
+    # Другая машина на то же время к мастеру Б - записывается
+    h.booking_form("т149тт799", "Kia", "Rio", "9000000149", "Тест Мастер Два", day=day, time=slot, master=master_b)
+    row_b = h.q("SELECT w.full_name FROM bookings b JOIN client_cars cc ON cc.id = b.car_id "
+                "JOIN workers w ON w.id = b.worker_id WHERE cc.car_number = 'Т149ТТ799'")
+    h.check("к мастеру Б на то же время - записано", row_b and row_b[0][0] == master_b, row_b)
+
+    # «Записи»: колонка «Мастер»
+    app.switch_tab("bookings")
+    app.refresh_bookings()
+    tree = app.bookings_tree
+    item = next((i for i in tree.get_children() if str(tree.item(i, "values")[0]) == str(booking_id)), None)
+    h.check("в «Записях» в колонке «Мастер» - мастер А",
+            item and tree.set(item, "master") == master_a, item and tree.item(item, "values"))
+
+    # «Начать работу»: мастер записи подставлен в «Добавить работу»
+    app.switch_tab("works")
+    app.clear_work_form()
+    app.refresh_bookings_combo()
+    choice = next((text for text, info in app.bookings_data.items() if info["id"] == booking_id), None)
+    if h.check("запись есть в списке «Добавить работу»", choice):
+        app.booking_combo.set(choice)
+        app.on_booking_select(choice)
+        h.root.update()
+        h.check("мастер записи подставлен в «Добавить работу»", app.workers_data.get(app.worker_combo.get()) == id_a,
+                app.worker_combo.get())
+        app.clear_work_form()
+
+    # «Записи» → «Редактировать наряд» (наряда ещё нет): мастер записи тоже подставлен
+    app.switch_tab("bookings")
+    app.refresh_bookings()
+    item = next((i for i in tree.get_children() if str(tree.item(i, "values")[0]) == str(booking_id)), None)
+    if h.check("запись есть в «Записях»", item):
+        tree.selection_set(item)
+        app.edit_booking_in_add_work()
+        h.root.update()
+        h.check("«Редактировать наряд»: мастер записи подставлен в «Добавить работу»",
+                app.workers_data.get(app.worker_combo.get()) == id_a, app.worker_combo.get())
+        app.clear_work_form()
+
+
+def test_period_follows_new_day(h):
+    """«Отчёты», «Статистика»: программа открыта через полночь - даты «только сегодня» сами переходят
+    на новый день, открытая вкладка пересчитывается; период, открытый паролем, не меняется"""
+    app = h.app
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    week_ago = today - timedelta(days=7)
+
+    def set_dates(tab, day):
+        for entry in app.period_locks[tab]["entries"]:
+            state = str(entry.cget("state"))
+            entry.configure(state="normal")
+            entry.set_date(day)
+            entry.configure(state=state)
+
+    def dates(tab):
+        return [e.get_date() for e in app.period_locks[tab]["entries"]]
+
+    app.switch_tab("reports")
+    h.check("таймер смены дня запущен", getattr(app, "_watched_day", None) == today)
+    h.check("в тот же день ничего не меняется", app.on_day_changed(today) is False)
+    stats_lock = app.period_locks["statistics"]
+    try:
+        # «Вчера» программу открыли: на закрытых вкладках вчерашняя дата; в «Статистике» период открыт паролем
+        set_dates("reports", yesterday)
+        app.report_date_from = None
+        stats_lock["unlocked"] = True
+        for entry in stats_lock["entries"]:
+            entry.configure(state="normal")
+        set_dates("statistics", week_ago)
+        app._watched_day = yesterday
+        changed = app.on_day_changed()
+        h.check("новый день замечен", changed is True and app._watched_day == today)
+        h.check("«Отчёты»: обе даты - сегодня", dates("reports") == [today, today], dates("reports"))
+        h.check("«Отчёты» (открытая вкладка) пересчитаны за сегодня",
+                app.report_date_from == today.strftime("%Y-%m-%d"), app.report_date_from)
+        h.check("«Отчёты»: даты по-прежнему закрыты паролем",
+                all(str(e.cget("state")) == "disabled" for e in app.period_locks["reports"]["entries"]))
+        h.check("«Статистика»: период, открытый паролем, не тронут",
+                stats_lock["unlocked"] and dates("statistics") == [week_ago, week_ago], dates("statistics"))
+        # Та же смена дня, когда «Статистика» закрыта паролем, - её даты тоже на сегодня
+        app.lock_period("statistics")
+        set_dates("statistics", yesterday)
+        app._watched_day = yesterday
+        app.on_day_changed()
+        h.check("«Статистика» (закрыта паролем): даты - сегодня", dates("statistics") == [today, today],
+                dates("statistics"))
+    finally:
+        app._watched_day = today
+        app.lock_period("statistics")
+        app.lock_period("reports")
+
+
+def test_booking_slot_tooltip(h):
+    """«Записать клиента»: наведение на время, где есть запись, - подсказка поверх окна записи (раньше
+    пряталась под ним): кто записан, машина и что делать (примечание)"""
+    import ctypes
+    from tkcalendar import DateEntry
+    app, db = h.app, h.app.db
+
+    def all_widgets(parent):
+        for child in parent.winfo_children():
+            yield child
+            yield from all_widgets(child)
+
+    day = date.today() + timedelta(days=1)
+    client = db.get_or_create_client(full_name="Тест Подсказка", phone="+79000000147")
+    car = db.get_or_create_car(client, "Kia", "Rio", "Т147ТТ799")
+    slot = h.m.booking_time_slots()[-1]
+    db.add_booking(day, slot, client, car, notes="Тест замена масла")
+    app.show_add_booking_window()
+    window = app._booking_window["window"]
+    try:
+        for _ in range(10):
+            h.root.update()
+        date_entry = next(w for w in all_widgets(window) if isinstance(w, DateEntry))
+        date_entry.set_date(day)
+        date_entry.event_generate("<<DateEntrySelected>>")
+        h.root.update()
+        btn = next(w for w in all_widgets(window)
+                   if isinstance(w, h.m.ctk.CTkButton) and w.cget("text") == slot)
+        btn._canvas.event_generate("<Enter>", x=5, y=5)
+        for _ in range(5):
+            h.root.update()
+        tips = [w for w in window.winfo_children() if w.winfo_class() == "Toplevel" and w.winfo_ismapped()]
+        if not h.check("подсказка появилась", tips, tips):
+            return
+        tip = tips[-1]
+        texts = " | ".join(w.cget("text") for w in all_widgets(tip) if w.winfo_class() == "Label")
+        h.check("в подсказке клиент, машина и примечание",
+                "Тест Подсказка" in texts and "Т147ТТ799" in texts and "Тест замена масла" in texts, texts)
+
+        class Point(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        user32 = ctypes.windll.user32
+        at_point = user32.GetAncestor(user32.WindowFromPoint(Point(tip.winfo_rootx() + 5, tip.winfo_rooty() + 5)), 2)
+        title = ctypes.create_unicode_buffer(200)
+        user32.GetWindowTextW(at_point, title, 200)
+        h.check("подсказка видна поверх окна записи", at_point == user32.GetAncestor(tip.winfo_id(), 2),
+                (tip.winfo_geometry(), "в этой точке окно:", title.value, window.winfo_geometry()))
+    finally:
+        window.tk.eval(window.protocol("WM_DELETE_WINDOW"))
+        h.root.update()
+
+
 TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booking_region_continues,
          test_booking_pick_car_clears_error, test_warehouse_pick_car, test_work_pick_car,
          test_work_from_booking, test_work_new_car, test_work_brand_from_catalog, test_car_hints_same_everywhere,
@@ -919,4 +1368,5 @@ TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booki
          test_work_opens_active_record, test_plate_hint_all_forms,
          test_warehouse_existing_car, test_warehouse_new_car, test_edit_data, test_delete_booking_with_work,
          test_positions, test_finance_category_follows_switch, test_users_and_roles,
-         test_locales, test_login, test_bookings_no_phone_red]
+         test_locales, test_login, test_bookings_no_phone_red, test_bookings_row_colors, test_bookings_middle_click_scroll, test_tables_middle_click_scroll,
+         test_booking_slot_tooltip, test_period_follows_new_day, test_booking_with_master]

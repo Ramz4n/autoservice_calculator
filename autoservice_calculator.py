@@ -36,6 +36,7 @@ from car_catalog import CarAutocomplete, catalog_car_names
 from input_rules import parse_money, parse_quantity, parse_percent, MONEY_MAX, QUANTITY_MAX
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
+from autoscroll import MiddleClickAutoscroll, enable_autoscroll
 import backup as backup_module
 
 # Стандартная длина VIN
@@ -782,6 +783,13 @@ class AutoServiceApp:
         # Окно "Записать клиента" строим заранее, когда программа уже открылась - потом оно открывается сразу
         self.root.after(2500, self._prebuild_booking_window)
         self.root.after(3500, self._prebuild_part_window)
+
+        # Программа открыта через полночь - даты «за сегодня» («Отчёты», «Статистика») переставим на новый день
+        self._watched_day = date.today()
+        self.root.after(self.DAY_CHECK_MS, self._watch_day_change)
+
+        # Нажали колесо мыши над любой таблицей или списком - прокрутка, как в браузере
+        enable_autoscroll(self.root)
 
         # Загрузка данных
         self.refresh_workers_list()
@@ -2121,6 +2129,8 @@ class AutoServiceApp:
         self.staff_canvas.bind("<MouseWheel>",
                                lambda e: self.staff_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
         self.staff_body.bind("<Configure>", self.fit_staff_canvas, add=True)
+        # Колесо мыши - прокрутка графика вверх-вниз и влево-вправо
+        MiddleClickAutoscroll(self.staff_canvas)
 
         self.refresh_staff_tab()
 
@@ -3335,10 +3345,15 @@ class AutoServiceApp:
             self.works_record_number = self.car_number_entry.get().strip()
             self.works_update_card_marks()
 
-            # Если по записи уже есть наряд - подставляем мастера, который его ведёт
+            # Если по записи уже есть наряд - подставляем мастера, который его ведёт;
+            # наряда нет - мастера, к которому клиента записали
             existing_work = self.db.get_work_by_booking_id(booking_info['id'])
             if existing_work:
                 self.works_select_master(existing_work[1])
+            else:
+                booked = self.db.get_booking_by_id(booking_info['id'])
+                if booked and booked.get("worker_id"):
+                    self.works_select_master(booked["worker_id"])
         else:
             self.selected_booking_id = None
             self.client_cars_combo.configure(values=[self.tr("works.new_car")])
@@ -6186,6 +6201,33 @@ class AutoServiceApp:
             entry.configure(state="disabled")
         lock["button"].configure(text=self.tr("reports.period_locked_btn"))
 
+    DAY_CHECK_MS = 60_000   # раз в минуту проверяем, не наступил ли новый день
+
+    def _watch_day_change(self):
+        try:
+            self.on_day_changed()
+        except Exception as e:
+            print(f"Не удалось обновить даты после смены дня: {e}")
+        try:
+            self.root.after(self.DAY_CHECK_MS, self._watch_day_change)
+        except tk.TclError:
+            pass   # программу закрыли
+
+    def on_day_changed(self, today=None):
+        """Наступил новый день: закрытые паролем периоды («только сегодня») - на новую дату; открытая сейчас
+        вкладка пересчитывается. Период, открытый паролем, не трогаем - его выбрали руками"""
+        today = today or date.today()
+        if today == getattr(self, "_watched_day", today):
+            return False
+        self._watched_day = today
+        for tab, lock in getattr(self, "period_locks", {}).items():
+            if lock["unlocked"]:
+                continue
+            self.lock_period(tab)
+            if getattr(self, "current_tab", None) == tab:
+                lock["refresh"]()
+        return True
+
     def toggle_period_lock(self, tab):
         """Кнопка у дат: ввести пароль и открыть выбор периода / снова закрыть"""
         lock = self.period_locks[tab]
@@ -8233,6 +8275,11 @@ class AutoServiceApp:
 
     BOOKING_STATUS_COLORS = {"waiting": "#f59e0b", "in_progress": "#3b82f6", "completed": "#22c55e",
                              "cancelled": "#e53935", "overdue": "#9e9e9e"}
+    # Фон всей строки записи - по статусу, спокойные светлые оттенки; у статуса ровно один цвет
+    # (без чередования через строку - иначе один статус выглядит как два разных цвета)
+    BOOKING_ROW_COLORS = {"waiting": "#fdf7e7", "in_progress": "#eef4fc", "completed": "#edf7f0",
+                          "cancelled": "#fcf0f0", "overdue": "#f3f4f6"}
+    BOOKINGS_SELECTED_BG = "#c4dbf3"   # выбранная строка - заметнее любого цвета статуса
 
     def setup_bookings_tab(self):
         """Вкладка "Записи": быстрые фильтры (сегодня / завтра / неделя / все), статусы с количеством,
@@ -8286,13 +8333,15 @@ class AutoServiceApp:
         table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
 
         # Порядок значений в строке не меняется (его читают другие функции); порядок показа - displaycolumns
-        columns = ("id", "order_number", "date", "time", "name", "phone", "username", "car", "notes", "status")
+        columns = ("id", "order_number", "date", "time", "name", "phone", "username", "car", "notes", "status",
+                   "master")
         style = ttk.Style()
         style.configure("Bookings.Treeview", rowheight=28, font=("Arial", 11), background="white",
                         fieldbackground="white", foreground="#263238", borderwidth=0, indent=0)
         style.configure("Bookings.Treeview.Heading", font=("Arial", 11, "bold"), foreground="#455a64",
                         background="#f5f7f9", relief="flat", padding=(6, 6))
-        style.map("Bookings.Treeview", background=[("selected", "#d6e8fb")], foreground=[("selected", "#0d1b2a")])
+        style.map("Bookings.Treeview", background=[("selected", self.BOOKINGS_SELECTED_BG)],
+                  foreground=[("selected", "#0d1b2a")])
         # В первой колонке - только цветная полоска статуса: без значка раскрытия дерева (он занимает место)
         style.layout("Bookings.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
             ("Treeitem.image", {"side": "left", "sticky": ""}), ("Treeitem.text", {"sticky": "nswe"})]})])
@@ -8312,6 +8361,7 @@ class AutoServiceApp:
         self.bookings_tree.heading("car", text=self.tr("bookings.col_car"))
         self.bookings_tree.heading("notes", text=self.tr("bookings.col_notes"))
         self.bookings_tree.heading("status", text=self.tr("bookings.col_status"))
+        self.bookings_tree.heading("master", text=self.tr("bookings.col_master"))
 
         self.bookings_tree.column("id", width=0, stretch=False, minwidth=0)
         self.bookings_tree.column("order_number", width=90)
@@ -8323,11 +8373,12 @@ class AutoServiceApp:
         self.bookings_tree.column("car", width=230)
         self.bookings_tree.column("notes", width=170)
         self.bookings_tree.column("status", width=110)
+        self.bookings_tree.column("master", width=130)
 
         # Видимость колонок (сохраняется в settings.json); id скрыт всегда; № наряда - в конце
         self.setup_toggleable_columns(self.bookings_tree, "bookings_hidden_columns",
-                                      ("date", "time", "name", "phone", "username", "car", "notes", "status",
-                                       "order_number"))
+                                      ("date", "time", "name", "phone", "username", "car", "master", "notes",
+                                       "status", "order_number"))
 
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.bookings_tree.yview)
 
@@ -8349,6 +8400,8 @@ class AutoServiceApp:
 
         # Tooltip с полным текстом примечания при наведении (если текст обрезан)
         TreeviewTooltip(self.bookings_tree, columns=["notes"])
+        # Нажали колесо мыши - прокрутка, как в браузере
+        self.bookings_autoscroll = MiddleClickAutoscroll(self.bookings_tree)
 
         # Статус - цветной полоской слева; текст строки обычный, сегодня - жирным, отменённые - серым
         self.bookings_status_images = {}
@@ -8357,11 +8410,13 @@ class AutoServiceApp:
             image.put(color, to=(0, 0, 6, 26))
             self.bookings_status_images[status] = image
         self.bookings_tree.tag_configure("today", font=("Arial", 11, "bold"))
-        # Просрочена: серый фон, серая полоска, строка зачёркнута
-        self.bookings_tree.tag_configure("overdue", background="#f3f4f6", font=("Arial", 11, "overstrike"))
+        # Просрочена: серая полоска, строка зачёркнута
+        self.bookings_tree.tag_configure("overdue", font=("Arial", 11, "overstrike"))
         # Отменена: строка зачёркнута и красным
         self.bookings_tree.tag_configure("cancelled", foreground="#c62828", font=("Arial", 11, "overstrike"))
-        self.bookings_tree.tag_configure("odd", background="#fafbfc")
+        # Фон строки по статусу: у строки ровно один тег фона - bg_<статус>
+        for status, background in self.BOOKING_ROW_COLORS.items():
+            self.bookings_tree.tag_configure(f"bg_{status}", background=background)
         self.bookings_raw = {}   # строка -> настоящие (не отформатированные) имя, телефон, Telegram
 
         # Меню по правому клику - светлое, как программа; удаление отдельно внизу
@@ -8414,6 +8469,7 @@ class AutoServiceApp:
         label.bind("<Double-1>", lambda e: self._bookings_double_click(as_tree_event(e)))
         label.bind("<Button-3>", lambda e: self.show_bookings_context_menu(as_tree_event(e)))
         label.bind("<MouseWheel>", lambda e: tree.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        self.bookings_autoscroll.attach(label)
         self._bookings_no_phone_marks[item] = label
 
     def _bookings_place_no_phone_marks(self):
@@ -8427,12 +8483,18 @@ class AutoServiceApp:
                 continue
             x, y, width, height = bbox
             tags = tree.item(item, "tags")
-            background = ("#d6e8fb" if item in selected else "#f3f4f6" if "overdue" in tags
-                          else "#fafbfc" if "odd" in tags else "white")
+            background = self.BOOKINGS_SELECTED_BG if item in selected else self._bookings_row_background(tags)
             style = " ".join(s for s, on in (("bold", "today" in tags),
                                              ("overstrike", "overdue" in tags or "cancelled" in tags)) if on)
             label.configure(bg=background, font=("Arial", 11, style) if style else ("Arial", 11))
             label.place(x=x, y=y, width=width, height=height)
+
+    def _bookings_row_background(self, tags):
+        """Цвет фона строки записи по её тегам (bg_<статус>)"""
+        for tag in tags:
+            if str(tag).startswith("bg_") and str(tag)[3:] in self.BOOKING_ROW_COLORS:
+                return self.BOOKING_ROW_COLORS[str(tag)[3:]]
+        return "white"
 
     def _bookings_search_keyrelease(self, event=None):
         """Поиск по мере ввода - с паузой, чтобы не обращаться к базе на каждую букву"""
@@ -8496,10 +8558,11 @@ class AutoServiceApp:
         items = sorted(self.bookings_tree.get_children(), key=sort_key, reverse=self.bookings_sort_desc)
         for index, item in enumerate(items):
             self.bookings_tree.move(item, "", index)
-            # Полоски через строку - читать длинный список легче
-            tags = [t for t in self.bookings_tree.item(item, "tags") if t != "odd"]
-            if index % 2 and "overdue" not in tags:
-                tags.append("odd")
+            # Фон - цветом статуса на всю строку, один цвет на статус
+            tags = [t for t in self.bookings_tree.item(item, "tags") if not str(t).startswith("bg_")]
+            status = next((t for t in tags if t in self.BOOKING_ROW_COLORS), None)
+            if status:
+                tags.append(f"bg_{status}")
             self.bookings_tree.item(item, tags=tags)
 
         arrow = " ▼" if self.bookings_sort_desc else " ▲"
@@ -8568,7 +8631,7 @@ class AutoServiceApp:
                        "completed": self.tr("bookings.status_completed"),
                        "cancelled": self.tr("bookings.status_cancelled")}
         for booking in bookings:
-            booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number, notes = booking
+            booking_id, user_id, username, full_name, phone, booking_date, booking_time, status, car_info, client_id, car_id, order_number, notes, master_name = booking
             st = effective_status(status, booking_date)
             if wanted and st != wanted:
                 continue
@@ -8580,7 +8643,7 @@ class AutoServiceApp:
                 booking_id, order_number or "", date_str, booking_time or "", self.display_name(full_name),
                 self.display_phone(phone) or "⚠ " + self.tr("bookings.no_phone"),
                 f"@{username}" if username else "", car_info or "",
-                " ".join(str(notes or "").split()), status_text.get(st, st)
+                " ".join(str(notes or "").split()), status_text.get(st, st), master_name or ""
             ), tags=tags)
             self.bookings_raw[item] = {"name": full_name or "", "phone": phone or "", "username": username or ""}
             if not self.display_phone(phone):
@@ -9304,6 +9367,7 @@ class AutoServiceApp:
                 else:
                     btn.configure(state="normal", fg_color="white", text_color="black", hover_color="#dbe6f3",
                                   border_color="#c5cdd6")
+            draw_master_buttons()   # занятость мастеров - на это время
 
         def hide_slot_tooltip(event=None):
             if slot_tooltip[0]:
@@ -9327,10 +9391,21 @@ class AutoServiceApp:
             for b in bookings:
                 car = " ".join(x for x in (b['brand'], b['model'], b['car_number']) if x)
                 line = f"• {b['client_name'] or '—'}" + (f" — {car}" if car else "")
+                if b.get('worker_name'):
+                    line += " · " + self.tr("bookings.slot_master", name=self.display_name(b['worker_name']))
+                if b.get('status') == 'in_progress':
+                    line += f"  ({self.tr('bookings.filter_in_progress').lower()})"
                 tk.Label(frame, text=line, bg='#ffffe0', font=('Segoe UI', 10),
                          padx=8, pady=1, justify=tk.LEFT).pack(anchor=tk.W)
+                if b.get('notes'):   # что делать - примечание записи
+                    tk.Label(frame, text=b['notes'], bg='#ffffe0', fg='#555555', font=('Segoe UI', 9),
+                             padx=20, pady=0, justify=tk.LEFT, wraplength=360).pack(anchor=tk.W)
             tk.Frame(frame, bg='#ffffe0', height=4).pack()
             slot_tooltip[0] = tip
+            # Окно записи принадлежит затемнению (set_window_owner) - подсказке тоже нужен владелец в Windows,
+            # иначе она оказывается под окном записи и её не видно
+            self.set_window_owner(tip, add_window)
+            tip.lift()
 
         for i, slot in enumerate(TIME_SLOTS):
             # Ячейка с отступом сверху/справа - в угол ложится красный кружок с числом записей
@@ -9412,6 +9487,7 @@ class AutoServiceApp:
             free = [s for s in TIME_SLOTS if s not in past_slots]
             update_staff_label(booking_date)
             refresh_slot_counts()
+            rebuild_master_buttons(booking_date)
             # Выбранное время оставляем, если оно ещё доступно, иначе - первое свободное (лучше - где есть место)
             open_slots = [s for s in free if s not in full_slots] or free
             slot = selected_time[0] if selected_time[0] in free else (open_slots[0] if open_slots else None)
@@ -9433,6 +9509,115 @@ class AutoServiceApp:
             fit_window()
 
         date_entry.bind("<<DateEntrySelected>>", update_available_times)
+
+        # === МАСТЕР (необязательно): к кому записать. Мастер, уже записанный на это время, и мастер,
+        # который в этот день не работает, недоступны - к одному мастеру на одно время одна машина ===
+        _, master_body = section(self.tr("bookings.section_master"))
+        master_grid = ctk.CTkFrame(master_body, fg_color="transparent")
+        master_grid.pack(fill=tk.X)
+        master_cols = 3
+        master_grid.grid_columnconfigure(tuple(range(master_cols)), weight=1, uniform="master")
+        master_warning_label = ctk.CTkLabel(master_body, text="", font=("Arial", 13), text_color="#c62828",
+                                            anchor="w", justify=tk.LEFT, wraplength=440)
+        selected_master = [None]   # id выбранного мастера; None - «Любой»
+        master_buttons = {}        # id мастера (None - «Любой») -> кнопка
+        master_names = {}          # id -> имя
+        master_absent = {}         # id -> выходной / отпуск / больничный в выбранный день
+        masters_shown = [None]     # список мастеров, для которого построены кнопки
+
+        def busy_masters():
+            """Мастера, уже записанные на выбранное время: id -> запись"""
+            return {b["worker_id"]: b for b in slot_bookings.get(selected_time[0], []) if b.get("worker_id")}
+
+        def master_state(worker_id, busy):
+            if worker_id is None:
+                return "free"
+            if worker_id in master_absent:
+                return "absent"
+            return "busy" if worker_id in busy else "free"
+
+        def master_warning(worker_id, busy):
+            state = master_state(worker_id, busy)
+            name = master_names.get(worker_id, "")
+            if state == "absent":
+                return self.tr("bookings.master_absent_warning", name=name,
+                               date=date_entry.get_date().strftime("%d.%m.%Y"),
+                               kind=self.staff_kind_label(master_absent[worker_id]).lower())
+            if state == "busy":
+                return self.tr("bookings.master_busy_warning", name=name, time=selected_time[0])
+            return ""
+
+        def draw_master_buttons():
+            """Перекрасить кнопки мастеров под выбранные дату и время"""
+            busy = busy_masters()
+            for worker_id, btn in master_buttons.items():
+                state = master_state(worker_id, busy)
+                selected = worker_id == selected_master[0]
+                if worker_id is None:
+                    text = self.tr("bookings.master_any")
+                elif state == "absent":
+                    text = self.tr("works.worker_absent_suffix", name=master_names[worker_id],
+                                   kind=self.staff_kind_label(master_absent[worker_id]).lower())
+                elif state == "busy":
+                    text = self.tr("bookings.master_busy_suffix", name=master_names[worker_id])
+                else:
+                    text = master_names[worker_id]
+                if selected and state != "free":   # выбран, но на это время / в этот день нельзя
+                    look = dict(state="normal", fg_color="#fdecea", text_color="#c62828", hover_color="#f9d6d2",
+                                border_color="#c62828")
+                elif selected:
+                    look = dict(state="normal", fg_color="#1f538d", text_color="white", hover_color="#1f538d",
+                                border_color="#1f538d")
+                elif state != "free":
+                    look = dict(state="disabled", fg_color="#f1f3f5", text_color_disabled="#9aa3ab",
+                                border_color="#e3e7eb")
+                else:
+                    look = dict(state="normal", fg_color="white", text_color="black", hover_color="#dbe6f3",
+                                border_color="#c5cdd6")
+                btn.configure(text=text, **look)
+            warning = master_warning(selected_master[0], busy)
+            was_shown = bool(master_warning_label.winfo_manager())
+            if warning:
+                master_warning_label.configure(text="⚠ " + warning)
+                if not was_shown:
+                    master_warning_label.pack(fill=tk.X, pady=(6, 0))
+                    fit_window()
+            elif was_shown:
+                master_warning_label.pack_forget()
+                fit_window()
+
+        def select_master(worker_id):
+            selected_master[0] = worker_id
+            draw_master_buttons()
+
+        def rebuild_master_buttons(booking_date):
+            """Мастера и их расписание на выбранный день; кнопки пересоздаются, только если поменялся список"""
+            try:
+                masters = self.db.get_masters()
+                schedule = self.db.get_worker_schedule(booking_date, booking_date)
+            except Exception as e:
+                print(f"Не удалось загрузить мастеров: {e}")
+                masters, schedule = [], {}
+            master_absent.clear()
+            master_absent.update({wid: schedule[wid][booking_date] for wid, _ in masters
+                                  if booking_date in schedule.get(wid, {})})
+            master_names.clear()
+            master_names.update({wid: self.display_name(name) for wid, name in masters})
+            if selected_master[0] not in master_names:
+                selected_master[0] = None
+            if masters_shown[0] == masters:
+                return
+            masters_shown[0] = list(masters)
+            for btn in master_buttons.values():
+                btn.destroy()
+            master_buttons.clear()
+            for i, worker_id in enumerate([None] + [wid for wid, _ in masters]):
+                btn = ctk.CTkButton(master_grid, text="", height=30, font=("Arial", 13), corner_radius=8,
+                                    border_width=1, border_color="#c5cdd6",
+                                    command=lambda w=worker_id: select_master(w))
+                btn.grid(row=i // master_cols, column=i % master_cols, sticky="ew", padx=(0, 6), pady=(0, 6))
+                master_buttons[worker_id] = btn
+            fit_window()
 
         # === ПРИМЕЧАНИЕ (со списком ключевых слов, как в "Проделанные работы") ===
         _, notes_body = section(self.tr("bookings.section_notes"))
@@ -9567,6 +9752,24 @@ class AutoServiceApp:
                 messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_invalid_date"), parent=add_window)
                 return
 
+            # Мастер выбран: в этот день он должен работать, и на это время у него не должно быть другой машины
+            master_id = selected_master[0]
+            if master_id:
+                master_name = master_names.get(master_id, "")
+                kind = self.db.get_worker_schedule(booking_date, booking_date).get(master_id, {}).get(booking_date)
+                if kind:
+                    messagebox.showwarning(self.tr("common.attention"), self.tr(
+                        "bookings.master_absent_warning", name=master_name, date=date_str,
+                        kind=self.staff_kind_label(kind).lower()), parent=add_window)
+                    return
+                busy = self.db.worker_busy_booking(master_id, booking_date, time_str)
+                if busy:
+                    car = " ".join(x for x in (busy["brand"], busy["model"], busy["car_number"]) if x)
+                    messagebox.showwarning(self.tr("common.attention"), self.tr(
+                        "bookings.msg_master_busy", name=master_name, date=date_str, time=time_str,
+                        booking=(busy["client_name"] or "—") + (f" — {car}" if car else "")), parent=add_window)
+                    return
+
             # Эта же машина уже записана на это время - второй раз не записываем
             for booking in self.db.get_bookings_at_time(booking_date, time_str):
                 if booking['car_number'].strip().upper() == number:
@@ -9657,7 +9860,8 @@ class AutoServiceApp:
                 booking_time=time_str,
                 client_id=client_id,
                 car_id=car_id,
-                notes=notes if notes else None
+                notes=notes if notes else None,
+                worker_id=master_id
             )
             if booking_id:
                 messagebox.showinfo(self.tr("common.success"), self.tr("bookings.msg_client_booked", date=date_str, time=time_str), parent=add_window)
@@ -9704,6 +9908,7 @@ class AutoServiceApp:
                 day += timedelta(days=1)
             date_entry.set_date(day)
             selected_time[0] = None
+            selected_master[0] = None
             update_available_times()  # занятость слотов - свежая из базы; заодно подгоняет высоту окна
 
             # Затемнение - по текущему положению главного окна, потом само окно записи
@@ -10040,6 +10245,9 @@ class AutoServiceApp:
                         self.works_linked_wh_parts[match[0]] = match
 
             self.update_total_cost()
+        elif booking.get("worker_id"):
+            # Наряда ещё нет - мастер, к которому клиента записали
+            self.works_select_master(booking["worker_id"])
 
         # Заполняем VIN: из машины наряда, а если наряда ещё нет - из машины записи
         vin = (work[10] if work else None) or booking.get("car_vin") or ""
@@ -10201,7 +10409,8 @@ class AutoServiceApp:
         works = self.db.get_all_works_by_booking_id(int(booking_id))
 
         primary = works[0] if works else None
-        worker_name = primary[2] if primary else None
+        # Мастер наряда; наряда ещё нет - мастер, к которому записали
+        worker_name = (primary[2] if primary else None) or booking.get("worker_name") or None
         mileage = primary[9] if primary else None
         order_number = primary[14] if primary else None
         vin = (primary[10] if primary else None) or booking.get("car_vin")

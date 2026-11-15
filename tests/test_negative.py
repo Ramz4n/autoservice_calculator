@@ -4,8 +4,9 @@
 
 from datetime import date
 
-PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799"]
-PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205", "+79000000206"]
+PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799"]
+PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205", "+79000000206", "+79000000207",
+          "+79000000208"]
 
 
 def prepare(h):
@@ -372,5 +373,120 @@ def test_period_rejects(h):
     h.check("«Отчёты» снова закрыты", h.period_locked_ui("reports"))
 
 
+def test_bookings_middle_click_nothing_to_scroll(h):
+    """«Записи»: всё помещается (прокручивать нечего) - нажатие колеса ничего не включает, значка нет"""
+    import types as _types
+    app = h.app
+    app.switch_tab("bookings")
+    tree, auto = app.bookings_tree, app.bookings_autoscroll
+    app.bookings_search_entry.delete(0, "end")
+    app.bookings_search_entry.insert(0, "нет-такой-записи-zzz")
+    try:
+        app.refresh_bookings()
+        for _ in range(3):
+            h.root.update()
+        h.check("по поиску ни одной записи", not tree.get_children(), len(tree.get_children()))
+        result = auto.start(tree.winfo_rootx() + 100, tree.winfo_rooty() + 60)
+        auto.on_press(_types.SimpleNamespace(x_root=tree.winfo_rootx() + 100, y_root=tree.winfo_rooty() + 60))
+        h.root.update()
+        h.check("прокручивать нечего - прокрутка не включилась, значка нет",
+                result is False and not auto.active and auto.marker is None)
+        h.check("курсор обычный", str(tree.cget("cursor")) == "", tree.cget("cursor"))
+    finally:
+        auto.stop()
+        app.clear_bookings_search()
+        app.refresh_bookings()
+
+
+def test_tables_middle_click_nothing_to_scroll(h):
+    """Таблица или список, где всё помещается, - колесо ничего не включает, значка нет, модальное окно остаётся
+    модальным; график расписания, который помещается целиком, - тоже"""
+    import tkinter as tk
+    from tkinter import ttk
+    from autoscroll import MiddleClickAutoscroll
+    dialog = tk.Toplevel(h.root)
+    dialog.geometry("400x300+50+50")
+    tree = ttk.Treeview(dialog, columns=("a",), show="headings", height=5)
+    tree.pack()
+    tree.insert("", "end", values=("одна строка",))
+    listbox = tk.Listbox(dialog, height=5)
+    listbox.pack()
+    listbox.insert("end", "один пункт")
+    try:
+        dialog.update()
+        dialog.grab_set()
+        for widget, name in ((tree, "таблица"), (listbox, "список")):
+            widget.event_generate("<ButtonPress-2>", x=10, y=10, rootx=widget.winfo_rootx() + 10,
+                                  rooty=widget.winfo_rooty() + 10)
+            auto = MiddleClickAutoscroll._instances.get(widget)
+            h.check(f"{name}: всё помещается - прокрутка не включилась, значка нет",
+                    auto is not None and not auto.active and auto.marker is None)
+        h.check("окно осталось модальным", dialog.grab_current() == dialog, dialog.grab_current())
+    finally:
+        try:
+            dialog.grab_release()
+        except tk.TclError:
+            pass
+        dialog.destroy()
+
+    app = h.app
+    app.switch_tab("staff")
+    app.refresh_staff_tab()
+    canvas = app.staff_canvas
+    auto = MiddleClickAutoscroll._instances.get(canvas)
+    h.root.update()
+    canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), canvas.winfo_height()))   # рисунок = окно
+    try:
+        started = auto.start(canvas.winfo_rootx() + 10, canvas.winfo_rooty() + 10)
+        h.check("график помещается целиком - прокрутка не включилась",
+                started is False and not auto.active and auto.marker is None, (canvas.xview(), canvas.yview()))
+    finally:
+        auto.stop()
+        app.draw_staff_calendar()
+        app.switch_tab("bookings")
+
+
+def test_booking_master_rejects(h):
+    """«Записать клиента»: мастер уже записан на это время - отказ, ни одной записи; база тоже не даёт
+    записать его второй раз; мастер на выходном в этот день - кнопка недоступна, с пометкой"""
+    from datetime import timedelta
+    app, db = h.app, h.app.db
+    master = "Тест Мастер Занятый"
+    db.add_worker(master)
+    master_id = h.q("SELECT id FROM workers WHERE full_name = %s", (master,))[0][0]
+    day = date.today() + timedelta(days=1)
+    slot = h.m.booking_time_slots()[-1]
+    client = db.get_or_create_client(full_name="Тест Занятый Мастер", phone="+79000000208")
+    car = db.get_or_create_car(client, "Kia", "Rio", "Т208ТТ799")
+    db.add_booking(day, slot, client, car, worker_id=master_id)
+
+    h.expect_rejected("мастер уже записан на это время", lambda: h.booking_form(
+        "т207тт799", "Kia", "Rio", "9000000207", "Тест Негатив Мастер", day=day, time=slot, master=master),
+        "уже записан")
+    before = h.q("SELECT COUNT(*) FROM bookings")[0][0]
+    again = db.add_booking(day, slot, client, car, worker_id=master_id)
+    h.check("база: второй раз к тому же мастеру на то же время - не записывается",
+            again is None and h.q("SELECT COUNT(*) FROM bookings")[0][0] == before, again)
+
+    # Выходной в этот день - мастера выбрать нельзя
+    day_off = day + timedelta(days=1)
+    db.set_worker_day(master_id, day_off, "day_off")
+    try:
+        bw = app._ensure_booking_window()
+        bw["open"]()
+        h.wait(300)
+        from tkcalendar import DateEntry
+        calendar = h.find_widgets(bw["window"], DateEntry)[0]
+        calendar.set_date(day_off)
+        calendar.event_generate("<<DateEntrySelected>>")
+        h.root.update()
+        btn = h.booking_master_button(bw["window"], master)
+        h.check("мастер на выходном - кнопка недоступна, с пометкой «выходной»",
+                str(btn.cget("state")) == "disabled" and btn.cget("text") != master, btn.cget("text"))
+    finally:
+        bw["window"].withdraw(); bw["overlay"].withdraw(); bw["window"].grab_release()
+        db.set_worker_day(master_id, day_off, None)
+
 TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_edit_rejects, test_positions_rejects,
-         test_payment_rejects, test_finance_rejects, test_period_rejects]
+         test_payment_rejects, test_finance_rejects, test_period_rejects, test_booking_master_rejects,
+         test_bookings_middle_click_nothing_to_scroll, test_tables_middle_click_nothing_to_scroll]

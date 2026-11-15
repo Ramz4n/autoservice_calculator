@@ -118,6 +118,7 @@ TABLES = {
             booking_time VARCHAR(10) NOT NULL,
             status VARCHAR(20) DEFAULT 'waiting',
             notes TEXT DEFAULT NULL,
+            worker_id INT DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_booking_datetime (booking_date, booking_time)
         ) ENGINE=InnoDB
@@ -307,4 +308,8 @@ MIGRATIONS = [
     "WHERE NOT EXISTS (SELECT 1 FROM positions WHERE is_master = 1)",
     "UPDATE workers SET position_id = (SELECT id FROM positions WHERE is_master = 1 ORDER BY id LIMIT 1) "
     "WHERE position_id IS NULL",
+    # Мастер записи («Записать клиента»): к кому записан клиент. Необязателен (NULL - «любой»).
+    # Один мастер на одно время - одна активная запись (Database.worker_busy_booking)
+    "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS worker_id INT DEFAULT NULL",
+    "ALTER TABLE bookings ADD INDEX IF NOT EXISTS idx_bookings_worker_datetime (worker_id, booking_date, booking_time)",
 ]
