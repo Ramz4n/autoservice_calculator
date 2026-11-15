@@ -12,10 +12,11 @@ from harness import Harness  # noqa: E402
 import test_positive  # noqa: E402
 import test_negative  # noqa: E402
 import test_effects  # noqa: E402
+import test_pairwise  # noqa: E402
 
 # Новые наборы проверок - добавлять сюда
 SUITES = [("Позитивные", test_positive), ("Негативные", test_negative),
-          ("Связи между разделами", test_effects)]
+          ("Связи между разделами", test_effects), ("Парные сочетания", test_pairwise)]
 FILTERS = sys.argv[1:]
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_run.txt")
 

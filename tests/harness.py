@@ -204,10 +204,12 @@ class Harness:
         return next(b for b in self.find_widgets(parent, ctk.CTkButton) if b.cget("text") == text)
 
     def booking_form(self, plate, brand=None, model=None, phone10=None, name=None, typed_live_first=None, save=True,
-                     day=None, time=None):
+                     day=None, time=None, to_catalog=True):
         """«Записать клиента»: госномер (с уходом из поля), марка/модель, телефон, имя, «Завтра» (или день day
-        в календаре), время time (кнопка), «Записать»"""
+        в календаре), время time (кнопка), «Записать». to_catalog - как в works_form"""
         app, root = self.app, self.root
+        if to_catalog and brand and model:
+            self.ensure_catalog_car(brand, model)
         bw = app._ensure_booking_window()
         bw["open"]()
         self.wait(300)   # окно показывается с задержкой - ждём, как человек
@@ -246,9 +248,13 @@ class Harness:
         bw["window"].withdraw(); bw["overlay"].withdraw(); bw["window"].grab_release()
 
     def works_form(self, plate, brand=None, model=None, phone10=None, name=None, master=True, items=(),
-                   live=False, save=True):
-        """«Добавить работу»: чистая форма, госномер (поиск как при уходе из поля), данные, мастер, работы, сохранить"""
+                   live=False, save=True, to_catalog=True):
+        """«Добавить работу»: чистая форма, госномер (поиск как при уходе из поля), данные, мастер, работы, сохранить.
+        to_catalog: тестовую марку/модель («ТестКузов» / «Модель») сначала добавить в «Марки и модели» -
+        форма принимает только марки и модели из справочника (cleanup потом их убирает)"""
         app = self.app
+        if to_catalog and brand and model:
+            self.ensure_catalog_car(brand, model)
         app.switch_tab("works")
         app.clear_work_form()
         self.root.update()
@@ -271,6 +277,14 @@ class Harness:
             app.add_work()
             self.root.update()
 
+    def ensure_catalog_car(self, brand, model):
+        """Марка и модель есть в справочнике «Марки и модели» (добавить, если нет)"""
+        db = self.app.db
+        if not db.find_car_brand_name(brand):
+            db.add_car_brand(brand)
+        if not db.find_car_model_name(brand, model):
+            db.add_car_model(db.get_brand_id_by_name(brand), model)
+
     def add_work_item(self, name, price):
         app = self.app
         app.work_name_entry.delete(0, "end"); app.work_name_entry.insert(0, name)
@@ -278,9 +292,12 @@ class Harness:
         app.add_work_to_list()
 
     def warehouse_form(self, plate, brand=None, model=None, phone10=None, name=None, part="Тест деталь",
-                       qty="1", price="500", save=True, close=True, paid=None):
-        """Склад → «Добавить запчасть»: госномер (с уходом из поля), данные новой машины, деталь, «Заказать»"""
+                       qty="1", price="500", save=True, close=True, paid=None, to_catalog=True):
+        """Склад → «Добавить запчасть»: госномер (с уходом из поля), данные новой машины, деталь, «Заказать».
+        to_catalog - как в works_form"""
         app = self.app
+        if to_catalog and brand and model:
+            self.ensure_catalog_car(brand, model)
         app.switch_tab("warehouse")
         app.show_add_part_form()
         # Окно показывается с задержкой; в ещё не показанное окно Tk нажатия клавиш не доставляет

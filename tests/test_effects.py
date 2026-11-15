@@ -1697,14 +1697,16 @@ def test_settings_dictionaries(h):
 
     def brand_hints(text):
         app.car_brand_entry.delete(0, "end"); app.car_brand_entry.insert(0, text)
-        app.on_brand_keyrelease(None)
-        return list(app.brand_listbox.get(0, "end")) if app.brand_listbox_visible else []
+        hints = app.works_car_hints
+        hints.on_brand_key()
+        return list(hints.brand_listbox.get(0, "end")) if hints.brand_visible else []
 
     def model_hints(brand, text):
         app.car_brand_entry.delete(0, "end"); app.car_brand_entry.insert(0, brand)
         app.car_model_entry.delete(0, "end"); app.car_model_entry.insert(0, text)
-        app.on_model_keyrelease(None)
-        return list(app.model_listbox.get(0, "end")) if app.model_listbox_visible else []
+        hints = app.works_car_hints
+        hints.on_model_key()
+        return list(hints.model_listbox.get(0, "end")) if hints.model_visible else []
 
     def work_hints(text):
         app.work_name_entry.delete(0, "end"); app.work_name_entry.insert(0, text)

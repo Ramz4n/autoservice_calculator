@@ -3,8 +3,10 @@
 Каждая функция test_* получает Harness (h). Тестовые госномера Т1xxТТ799 / Т105ТТ77(7), телефоны +7900000010x"""
 from datetime import date, timedelta
 
-PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799"]
-PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108"]
+PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799",
+          "Т140ТТ799", "Т141ТТ799", "Т142ТТ799", "Т143ТТ799", "Т144ТТ799", "Т145ТТ799", "Т146ТТ799"]
+PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108",
+          "+79000000140", "+79000000141", "+79000000142", "+79000000143", "+79000000144", "+79000000145", "+79000000146"]
 
 
 def prepare(h):
@@ -81,6 +83,223 @@ def test_work_new_car(h):
         return
     work = h.q("SELECT client_id, amount FROM works WHERE car_id = %s", (car[0],))
     h.check("работа 800 у этой машины и её владельца", work and float(work[0][1]) == 800 and work[0][0] == car[1], work)
+
+
+def test_work_brand_from_catalog(h):
+    """«Добавить работу»: марка и модель из справочника - написание как в справочнике («hyundai» → «Hyundai»);
+    машина уже в базе с маркой не из справочника (старые данные) - работа сохраняется"""
+    h.works_form("т140тт799", "hyundai", "SOLARIS", "9000000140", "Тест Справочник", to_catalog=False,
+                 items=[("Тест справочник", 500)])
+    car = h.car("Т140ТТ799")
+    h.check("марка и модель записаны как в справочнике (Hyundai Solaris)",
+            car and car[2:4] == ("Hyundai", "Solaris"), car)
+
+    db = h.app.db
+    client = db.get_or_create_client(full_name="Тест Старая Марка", phone="+79000000141")
+    db.get_or_create_car(client, "ТестСтараяМарка", "Модель", "Т141ТТ799")
+    h.works_form("т141тт799", to_catalog=False, items=[("Тест старая марка", 700)])
+    car = h.car("Т141ТТ799")
+    work = h.q("SELECT amount FROM works WHERE car_id = %s", (car[0],)) if car else ()
+    h.check("машина из базы с маркой не из справочника - работа сохранена",
+            work and float(work[0][0]) == 700 and car[2] == "ТестСтараяМарка", (car, work))
+
+
+def test_car_hints_same_everywhere(h):
+    """Подсказки марки и модели - одни на все формы: «Добавить работу» и склад; выбрали марку -
+    модель очищена, список её моделей; уже вписана ровно эта марка - список не мешает"""
+    app = h.app
+    for title, hints in (("«Добавить работу»", app.works_car_hints), ("склад", app.wh_car_hints)):
+        hints.brand_entry.delete(0, "end"); hints.brand_entry.insert(0, "ki")
+        hints.model_entry.delete(0, "end"); hints.model_entry.insert(0, "старая")
+        hints.on_brand_key()
+        brands = list(hints.brand_listbox.get(0, "end")) if hints.brand_visible else []
+        h.check(f"{title}: на «ki» в подсказке Kia", "Kia" in brands, brands)
+        if "Kia" in brands:
+            hints.brand_listbox.selection_clear(0, "end")
+            hints.brand_listbox.selection_set(brands.index("Kia"))
+            hints.on_brand_select()
+            models = list(hints.model_listbox.get(0, "end")) if hints.model_visible else []
+            h.check(f"{title}: выбрали Kia - модель очищена, в списке модели Kia",
+                    hints.brand_entry.get() == "Kia" and not hints.model_entry.get() and "Rio" in models,
+                    (hints.brand_entry.get(), hints.model_entry.get(), models[:5]))
+        hints.on_brand_key()
+        h.check(f"{title}: вписана ровно марка Kia - подсказка спрятана", not hints.brand_visible)
+        hints.hide()
+        hints.brand_entry.delete(0, "end"); hints.model_entry.delete(0, "end")
+
+
+def test_work_mileage_digits_only(h):
+    """«Добавить работу»: в пробег не набрать буквы (убираются при вводе), цифры сохраняются в наряд и у машины"""
+    app = h.app
+    h.works_form("т142тт799", "Kia", "Rio", "9000000142", "Тест Пробег", save=False)
+    entry = app.mileage_entry
+    # Нажатие клавиши (<KeyRelease>) зовёт digits_only_clean; синтетические нажатия Tk доставляет,
+    # только когда окно программы на переднем плане - поэтому зовём напрямую
+    entry.delete(0, "end"); entry.insert(0, "12а3 45б6")
+    entry.digits_only_clean()
+    h.check("буквы и пробелы из пробега убраны при вводе", entry.get() == "123456", entry.get())
+    h.check("очистка привязана к вводу, вставке и уходу из поля",
+            all("digits_only_clean" not in b and b for b in (entry._entry.bind(ev) for ev in
+                                                              ("<KeyRelease>", "<<Paste>>", "<FocusOut>"))),
+            [entry._entry.bind(ev)[:60] for ev in ("<KeyRelease>", "<<Paste>>", "<FocusOut>")])
+    entry.delete(0, "end"); entry.insert(0, "12345678")
+    entry.digits_only_clean()
+    h.check("пробег не длиннее 7 цифр", entry.get() == "1234567", entry.get())
+    h.add_work_item("Тест пробег", 600)
+    app.add_work()
+    h.root.update()
+    car = h.car("Т142ТТ799")
+    work = h.q("SELECT mileage FROM works WHERE car_id = %s", (car[0],)) if car else ()
+    saved = h.q("SELECT mileage FROM client_cars WHERE id = %s", (car[0],)) if car else ()
+    h.check("пробег 1234567 в наряде и у машины", work and work[0][0] == 1234567 and saved
+            and str(saved[0][0]) == "1234567", (work, saved))
+
+
+def test_work_mileage_less_than_last(h):
+    """«Добавить работу»: пробег меньше прошлого у этой машины (123 → 12) - вопрос «всё равно записать?»
+    с прошлым пробегом; «Да» - работа записана с новым пробегом; пробег больше прошлого - без вопроса"""
+    app = h.app
+
+    def finish_open_records():
+        # Машину отдали: записи «в работе» → «Выполнено» (иначе госномер снова откроет тот же наряд для правки)
+        for (booking_id,) in h.q("SELECT b.id FROM bookings b JOIN client_cars cc ON b.car_id = cc.id "
+                                 "WHERE cc.car_number = 'Т143ТТ799' AND b.status = 'in_progress'"):
+            app.db.update_booking_status(booking_id, "completed")
+            app.db.mark_work_completed(booking_id)
+
+    def save(mileage, item, answers=()):
+        finish_open_records()
+        h.works_form("т143тт799", "Kia", "Rio", "9000000143", "Тест Пробег Меньше", save=False)
+        app.mileage_entry.delete(0, "end"); app.mileage_entry.insert(0, mileage)
+        h.add_work_item(item, 500)
+        h.answers[:] = list(answers)
+        n = len(h.dialogs)
+        app.add_work()
+        h.root.update()
+        h.answers[:] = []
+        return [d for d in h.dialogs_since(n) if d[0] == "askyesno" and "пробег" in d[2].lower()]
+
+    h.check("первый наряд с пробегом 123 - без вопроса о пробеге", not save("123", "Тест пробег первый"))
+    asked = save("12", "Тест пробег второй", answers=[True])
+    h.check("пробег 12 после 123 - вопрос с прошлым пробегом 123 и новым 12",
+            len(asked) == 1 and "123 км" in asked[0][2] and "12 км" in asked[0][2], asked)
+    car = h.car("Т143ТТ799")
+    rows = h.q("SELECT mileage FROM works WHERE car_id = %s ORDER BY id", (car[0],)) if car else ()
+    h.check("«Да» - второй наряд записан с пробегом 12", [r[0] for r in rows] == [123, 12], rows)
+    h.check("пробег 500 после 12 - без вопроса", not save("500", "Тест пробег третий"))
+
+
+def test_work_merge_keeps_mileage_vin(h):
+    """«Добавить работу»: у записи уже есть наряд - новые работы дописываются в него («объединено»),
+    вписанные пробег и VIN сохраняются в наряд и у машины (раньше пропадали)"""
+    from datetime import date
+    app, db = h.app, h.app.db
+    client = db.get_or_create_client(full_name="Тест Объединение", phone="+79000000144")
+    car = db.get_or_create_car(client, "Kia", "Rio", "Т144ТТ799")
+    booking = db.add_booking(date.today(), "10:00", client, car)
+    master = h.q("SELECT id FROM workers LIMIT 1")[0][0]
+    work = db.add_work(master, "Тест первая работа", 500, date.today().strftime("%Y-%m-%d"), "1000",
+                       booking_id=booking, car_id=car, client_id=client)
+    db.update_booking_status(booking, "in_progress")
+
+    h.works_form("т144тт799", "Kia", "Rio", "9000000144", "Тест Объединение", save=False)
+    app.editing_work_id = None          # запись выбрана, но наряд не открыт для правки - путь «объединить»
+    app.selected_booking_id = booking
+    app.works_list.clear()              # в форму встали работы открытого наряда - дописываем только новую
+    app.mileage_entry.delete(0, "end"); app.mileage_entry.insert(0, "1500")
+    app.vin_entry.delete(0, "end"); app.vin_entry.insert(0, "XTA21100099998888")
+    h.add_work_item("Тест вторая работа", 300)
+    n = len(h.dialogs)
+    app.add_work()
+    h.root.update()
+    merged = any(d[0] == "showinfo" and d[2] == app.tr("works.msg_work_merged") for d in h.dialogs_since(n))
+    rows = h.q("SELECT id, mileage, amount FROM works WHERE car_id = %s", (car,))
+    card = h.q("SELECT mileage, vin FROM client_cars WHERE id = %s", (car,))
+    h.check("работы объединены в один наряд 800", merged and len(rows) == 1 and rows[0][0] == work
+            and float(rows[0][2]) == 800, (merged, rows))
+    h.check("пробег 1500 в наряде и у машины, VIN у машины",
+            rows and rows[0][1] == 1500 and card and str(card[0][0]) == "1500" and card[0][1] == "XTA21100099998888",
+            (rows, card))
+
+
+def test_input_rules_boundaries(h):
+    """Правила чисел (input_rules.py) на границах: допустимые крайние значения проходят, соседние - нет"""
+    from input_rules import parse_money, parse_quantity, parse_percent, MONEY_MAX, QUANTITY_MAX
+
+    def value(func, text, **kw):
+        try:
+            return func(text, **kw)
+        except ValueError:
+            return "ошибка"
+
+    cases = [  # (функция, ввод, ожидание)
+        (parse_money, "0,01", 0.01), (parse_money, "0.005", 0.01), (parse_money, "0,004", "ошибка"),
+        (parse_money, "0", "ошибка"), (parse_money, "1", 1.0), (parse_money, "1 500", 1500.0),
+        (parse_money, "1500,5", 1500.5), (parse_money, "12.", 12.0), (parse_money, ".5", 0.5),
+        (parse_money, "99999999.99", MONEY_MAX), (parse_money, "99 999 999,99", MONEY_MAX),
+        (parse_money, "100000000", "ошибка"), (parse_money, "-1", "ошибка"), (parse_money, "+5", "ошибка"),
+        (parse_money, "nan", "ошибка"), (parse_money, "inf", "ошибка"), (parse_money, "1e3", "ошибка"),
+        (parse_money, "", "ошибка"), (parse_money, "1,2,3", "ошибка"),
+        (parse_quantity, "", 1), (parse_quantity, "1", 1), (parse_quantity, "0", "ошибка"),
+        (parse_quantity, str(QUANTITY_MAX), QUANTITY_MAX), (parse_quantity, str(QUANTITY_MAX + 1), "ошибка"),
+        (parse_quantity, "-1", "ошибка"), (parse_quantity, "1.0", "ошибка"), (parse_quantity, " 3 ", 3),
+        (parse_percent, "0", 0.0), (parse_percent, "100", 100.0), (parse_percent, "100,01", "ошибка"),
+        (parse_percent, "-0.01", "ошибка"), (parse_percent, "40,5", 40.5), (parse_percent, "nan", "ошибка"),
+    ]
+    wrong = [(f.__name__, text, expected, value(f, text)) for f, text, expected in cases
+             if value(f, text) != expected]
+    h.check(f"{len(cases)} граничных значений разобраны верно", not wrong, wrong)
+    h.check("пустая цена на складе разрешена (неизвестна)", parse_money("", allow_empty=True) is None)
+
+
+def test_boundaries_in_forms(h):
+    """Границы в формах: цена 0,01 и 99 999 999,99 сохраняются точно; VIN 17 - без вопроса, 18-й символ не
+    набрать; склад: количество 9999 и цена 0,01; пробег, равный прошлому, и на 1 больше - без вопроса"""
+    app = h.app
+    h.works_form("т145тт799", "Kia", "Rio", "9000000145", "Тест Границы", save=False)
+    h.add_work_item("Тест граница мин", "0,01")
+    h.add_work_item("Тест граница макс", "99 999 999,99")
+    app.part_name_entry.insert(0, "Тест недописанная"); app.work_name_entry.insert(0, "Тест недописанная")
+    app.clear_work_form()
+    h.check("«Очистить форму» стирает и недобавленные работу и запчасть",
+            not app.part_name_entry.get() and not app.work_name_entry.get())
+    h.works_form("т145тт799", "Kia", "Rio", "9000000145", "Тест Границы", save=False)
+    h.add_work_item("Тест граница мин", "0,01")
+    h.add_work_item("Тест граница макс", "99 999 999,99")
+    h.check("цены 0,01 и 99 999 999,99 в списке работ",
+            [p for _, p in app.works_list] == [0.01, 99999999.99], app.works_list)
+    app.vin_entry.delete(0, "end"); app.vin_entry.insert(0, "Z9T14500000000145Z")
+    h.check("VIN: 18-й символ отрезан", app.vin_entry.get() == "Z9T14500000000145", app.vin_entry.get())
+    app.mileage_entry.delete(0, "end"); app.mileage_entry.insert(0, "500")
+    n = len(h.dialogs)
+    app.add_work()
+    h.root.update()
+    asked = [d for d in h.dialogs_since(n) if d[0] == "askyesno"]
+    h.check("VIN ровно 17 символов - без вопроса «введён не полностью»", not asked, asked)
+    car = h.car("Т145ТТ799")
+    work = h.q("SELECT amount, mileage FROM works WHERE car_id = %s", (car[0],)) if car else ()
+    h.check("сумма наряда 100 000 000,00 (0,01 + 99 999 999,99) записана точно",
+            work and float(work[0][0]) == 100000000.0, work)
+
+    for mileage, label in (("500", "равный прошлому (500 → 500)"), ("501", "на 1 больше (500 → 501)")):
+        for (booking_id,) in h.q("SELECT b.id FROM bookings b WHERE b.car_id = %s AND b.status = 'in_progress'",
+                                 (car[0],)):
+            app.db.update_booking_status(booking_id, "completed")
+            app.db.mark_work_completed(booking_id)
+        h.works_form("т145тт799", "Kia", "Rio", "9000000145", "Тест Границы", save=False,
+                     items=[("Тест граница пробег " + mileage, 100)])
+        app.mileage_entry.delete(0, "end"); app.mileage_entry.insert(0, mileage)
+        n = len(h.dialogs)
+        app.add_work()
+        h.root.update()
+        asked = [d for d in h.dialogs_since(n) if d[0] == "askyesno" and "пробег" in d[2].lower()]
+        h.check(f"пробег {label} - без вопроса", not asked, asked)
+
+    h.warehouse_form("т146тт799", "Kia", "Rio", "9000000146", "Тест Склад Границы", part="Тест граница склад",
+                     qty="9999", price="0,01")
+    part = h.q("SELECT quantity, price FROM warehouse_parts WHERE part_name = 'Тест граница склад'")
+    h.check("склад: количество 9999 и цена 0,01 сохранены", part and part[0][0] == 9999 and float(part[0][1]) == 0.01,
+            part)
 
 
 def test_work_opens_active_record(h):
@@ -246,10 +465,11 @@ def test_warehouse_new_car(h):
 
 
 def test_edit_data(h):
-    """«Изменить данные»: госномер (латиницей), модель и имя - та же машина и тот же клиент"""
-    h.edit_form(h.state["booking1"], {0: "t102tt799", 2: "Rio X", 6: "Тест Один Изменён"})
+    """«Изменить данные»: госномер (латиницей), модель (другим регистром - записывается как в справочнике)
+    и имя - та же машина и тот же клиент"""
+    h.edit_form(h.state["booking1"], {0: "t102tt799", 2: "ceed gt", 6: "Тест Один Изменён"})
     car = h.q("SELECT car_number, car_model FROM client_cars WHERE id = %s", (h.state["car1"],))
-    h.check("та же машина: Т102ТТ799, Rio X", car and car[0] == ("Т102ТТ799", "Rio X"), car)
+    h.check("та же машина: Т102ТТ799, Ceed GT", car and car[0] == ("Т102ТТ799", "Ceed GT"), car)
     name = h.q("SELECT full_name FROM clients WHERE id = %s", (h.state["client1"],))
     h.check("имя клиента изменено", name and name[0][0] == "Тест Один Изменён", name)
 
@@ -693,7 +913,10 @@ def test_bookings_no_phone_red(h):
 
 TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booking_region_continues,
          test_booking_pick_car_clears_error, test_warehouse_pick_car, test_work_pick_car,
-         test_work_from_booking, test_work_new_car, test_work_opens_active_record, test_plate_hint_all_forms,
+         test_work_from_booking, test_work_new_car, test_work_brand_from_catalog, test_car_hints_same_everywhere,
+         test_work_mileage_digits_only, test_work_mileage_less_than_last,
+         test_work_merge_keeps_mileage_vin, test_input_rules_boundaries, test_boundaries_in_forms,
+         test_work_opens_active_record, test_plate_hint_all_forms,
          test_warehouse_existing_car, test_warehouse_new_car, test_edit_data, test_delete_booking_with_work,
          test_positions, test_finance_category_follows_switch, test_users_and_roles,
          test_locales, test_login, test_bookings_no_phone_red]

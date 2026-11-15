@@ -2,8 +2,10 @@
 """Негативные проверки: неверный ввод - предупреждение и НИ ОДНОЙ записи в базу (h.expect_rejected).
 Тестовые госномера Т2xxТТ799, телефоны +7900000020x"""
 
-PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799"]
-PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205"]
+from datetime import date
+
+PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799"]
+PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205", "+79000000206"]
 
 
 def prepare(h):
@@ -20,6 +22,9 @@ def test_booking_rejects(h):
     h.expect_rejected("пустой госномер", booking(plate=""), "госномер")
     h.expect_rejected("новая машина без марки", booking(brand=""), "марку")
     h.expect_rejected("новая машина без модели", booking(model=""), "модель")
+    h.expect_rejected("марка не из справочника", booking(brand="Несуществующая Марка", to_catalog=False),
+                      "нет в списке")
+    h.expect_rejected("модель не из справочника", booking(model="Несуществующая", to_catalog=False), "нет модели")
     h.expect_rejected("неполный телефон", booking(phone10="90000"), "+7")
     h.expect_rejected("без телефона", booking(phone10=""), "+7")
     h.expect_rejected("без имени", booking(name=""), "имя")
@@ -41,13 +46,59 @@ def test_works_rejects(h):
     h.expect_rejected("без работ", works(items=()), "работ")
     h.expect_rejected("без марки", works(brand=""), "марку")
     h.expect_rejected("без модели", works(model=""), "модель")
+    h.expect_rejected("марка не из справочника", works(brand="Несуществующая Марка", to_catalog=False),
+                      "нет в списке")
+    h.expect_rejected("модель не из справочника", works(model="Несуществующая", to_catalog=False), "нет модели")
+
+    def works_with_mileage(value):
+        def action():
+            # Мимо клавиатуры (вставка программой / старые данные) - фильтр поля не срабатывает, ловит проверка
+            data = dict(plate="т202тт799", brand="Hyundai", model="Solaris", phone10="9000000202", name="Тест Работа",
+                        items=[("Тест работа", 1000)], save=False)
+            h.works_form(**data)
+            h.app.mileage_entry.delete(0, "end"); h.app.mileage_entry.insert(0, value)
+            h.app.add_work()
+        return action
+
+    h.expect_rejected("пробег буквами", works_with_mileage("абв"), "только цифры")
+    h.expect_rejected("пробег с буквами", works_with_mileage("12тыс"), "только цифры")
+    h.expect_rejected("пробег длиннее 7 цифр", works_with_mileage("123456789"), "только цифры")
+
+    # Пробег меньше прошлого, ответ «Нет» - ни работы, ни нового пробега у машины
+    db = h.app.db
+    client = db.get_or_create_client(full_name="Тест Пробег Нет", phone="+79000000206")
+    car = db.get_or_create_car(client, "Kia", "Rio", "Т206ТТ799")
+    master = h.q("SELECT id FROM workers LIMIT 1")[0][0]
+    db.add_work(master, "Тест пробег прошлый", 500, date.today().strftime("%Y-%m-%d"), "123", car_id=car,
+                client_id=client)
+
+    def less_mileage():
+        h.works_form("т206тт799", "Kia", "Rio", "9000000206", "Тест Пробег Нет", items=[("Тест пробег меньше", 500)],
+                     save=False)
+        h.app.mileage_entry.delete(0, "end"); h.app.mileage_entry.insert(0, "12")
+        h.app.add_work()
+
+    h.expect_rejected("пробег меньше прошлого (123 → 12), ответ «Нет»", less_mileage, "последний пробег",
+                      answers=[False])
+
+    def mileage_122():
+        h.works_form("т206тт799", "Kia", "Rio", "9000000206", "Тест Пробег Нет", items=[("Тест пробег меньше", 500)],
+                     save=False)
+        h.app.mileage_entry.delete(0, "end"); h.app.mileage_entry.insert(0, "122")
+        h.app.add_work()
+
+    h.expect_rejected("пробег на 1 меньше прошлого (123 → 122), ответ «Нет»", mileage_122, "последний пробег",
+                      answers=[False])
+    h.check("пробег у машины остался 123",
+            str(h.q("SELECT mileage FROM client_cars WHERE id = %s", (car,))[0][0]) == "123")
     h.expect_rejected("без госномера", works(plate=""), "госномер")
     h.expect_rejected("госномер без первой буквы, ответ «Нет»", works(plate="202тт799"), "пропущена первая буква",
                       answers=[False])
 
     app = h.app
     app.clear_work_form()
-    for price in ("0", "abc", "-5"):
+    # Классы: ноль, минус, буквы, nan/inf, экспонента; границы: 0,001 (округляется до 0), 100 000 000 (> MONEY_MAX)
+    for price in ("0", "abc", "-5", "0,001", "0.004", "nan", "inf", "1e5", "100000000", "99999999.996"):
         before = len(h.dialogs)
         h.add_work_item("Тест цена " + price, price)
         h.check(f"работа с ценой «{price}» не добавляется", not app.works_list and
@@ -61,7 +112,32 @@ def test_works_rejects(h):
     h.add_work_item("", 100)
     h.check("работа без названия не добавляется", len(app.works_list) == 1 and
             any(d[0] == "showwarning" for d in h.dialogs_since(before)))
+    # Поле запчасти в «Добавить работу» - те же правила, что у работы
+    for price in ("0", "0,001", "nan", "100000000"):
+        app.part_name_entry.delete(0, "end"); app.part_name_entry.insert(0, "Тест деталь " + price)
+        app.part_price_entry.delete(0, "end"); app.part_price_entry.insert(0, price)
+        n = len(app.parts_list)
+        before = len(h.dialogs)
+        app.add_part_to_list()
+        h.check(f"запчасть с ценой «{price}» не добавляется", len(app.parts_list) == n and
+                any(d[0] == "showwarning" for d in h.dialogs_since(before)), app.parts_list)
     app.clear_work_form()
+
+    # Границы телефона и VIN, пробег на 1 меньше прошлого
+    h.expect_rejected("телефон 9 цифр (граница 10)", works(phone10="900000020"), "+7")
+    h.expect_rejected("пустой телефон, ответ «Нет» на «Сохранить без телефона?»", works(phone10=""), "телефон",
+                      answers=[False])
+
+    def works_with_vin(vin):
+        def action():
+            h.works_form(**dict(plate="т202тт799", brand="Hyundai", model="Solaris", phone10="9000000202",
+                                name="Тест Работа", items=[("Тест работа", 1000)], save=False))
+            h.app.vin_entry.delete(0, "end"); h.app.vin_entry.insert(0, vin)
+            h.app.add_work()
+        return action
+
+    h.expect_rejected("VIN 16 символов (граница 17), ответ «Нет»", works_with_vin("XTA2110009999888"), "17",
+                      answers=[False])
 
 
 def test_warehouse_rejects(h):
@@ -75,8 +151,17 @@ def test_warehouse_rejects(h):
     h.expect_rejected("без названия детали", wh(part=""), "запчаст")
     h.expect_rejected("количество буквами", wh(qty="abc"), "количество")
     h.expect_rejected("цена буквами", wh(price="abc"), "цена")
+    # Границы количества (1..9999) и цены (> 0, до 99 999 999,99)
+    for qty in ("0", "-1", "10000", "1.5"):
+        h.expect_rejected(f"количество «{qty}»", wh(qty=qty), "количество")
+    for price in ("0", "-5", "0,001", "nan", "100000000"):
+        h.expect_rejected(f"цена «{price}»", wh(price=price), "цена")
     h.expect_rejected("новая машина без марки", wh(brand=""), "марку")
     h.expect_rejected("новая машина без модели", wh(model=""), "модель")
+    h.expect_rejected("марка не из справочника", wh(brand="Несуществующая Марка", model="Vesta", to_catalog=False),
+                      "нет в списке")
+    h.expect_rejected("модель не из справочника", wh(brand="Kia", model="Несуществующая", to_catalog=False),
+                      "нет модели")
     h.expect_rejected("новая машина, неполный телефон", wh(phone10="9001"), "телефон")
     h.expect_rejected("госномер без первой буквы, ответ «Нет»", wh(plate="203тт799"), "пропущена первая буква",
                       answers=[False])
@@ -102,6 +187,8 @@ def test_edit_rejects(h):
             ("пустой госномер", {0: ""}, "госномер", ()),
             ("пустая марка", {1: ""}, "марку", ()),
             ("пустая модель", {2: ""}, "модель", ()),
+            ("марка не из справочника", {1: "Несуществующая Марка"}, "нет в списке", ()),
+            ("модель не из справочника", {2: "Rio X"}, "нет модели", ()),
             ("неполный телефон", {5: "90012"}, "+7", ()),
             ("чужой госномер латиницей", {0: "t205tt799"}, "уже есть", ()),
             ("чужой VIN", {3: "XTA21100012345678"}, "уже есть", ()),
@@ -172,7 +259,7 @@ def test_payment_rejects(h):
     if not h.check("есть сотрудник для проверки", worker):
         return
     name = worker[0][0]
-    for amount in ("0", "-100", "abc", ""):
+    for amount in ("0", "-100", "abc", "", "0,001", "nan", "100000000"):
         before = h.q("SELECT COUNT(*) FROM expenses")[0][0], h.q("SELECT COUNT(*) FROM worker_bonuses")[0][0]
         h.expect_rejected(f"сумма «{amount}»", lambda a=amount: h.give_bonus(name, a), "сумму")
         after = h.q("SELECT COUNT(*) FROM expenses")[0][0], h.q("SELECT COUNT(*) FROM worker_bonuses")[0][0]
@@ -195,7 +282,10 @@ def test_finance_rejects(h):
             ("сумма 0", False, rent, "Тест", "0", "сумму"),
             ("сумма с минусом", False, rent, "Тест", "-50", "сумму"),
             ("сумма буквами", False, rent, "Тест", "abc", "сумму"),
-            ("пустая сумма", False, rent, "Тест", "", "сумму")):
+            ("пустая сумма", False, rent, "Тест", "", "сумму"),
+            ("сумма 0,001 (округляется до 0)", False, rent, "Тест", "0,001", "сумму"),
+            ("сумма nan", False, rent, "Тест", "nan", "сумму"),
+            ("сумма 100 000 000 (больше предела)", False, rent, "Тест", "100000000", "сумму")):
         before = count()
         h.expect_rejected(f"«Финансы»: {label}",
                           lambda a=(income, category, desc, amount): h.finance_entry(*a), text)

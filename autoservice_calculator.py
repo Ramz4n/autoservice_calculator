@@ -32,6 +32,8 @@ from dotenv import load_dotenv
 from database import Database
 import web_sync
 from plates import plate_problem, plate_may_continue, PLATE_EXAMPLE
+from car_catalog import CarAutocomplete, catalog_car_names
+from input_rules import parse_money, parse_quantity, parse_percent, MONEY_MAX, QUANTITY_MAX
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
 import backup as backup_module
@@ -938,6 +940,30 @@ class AutoServiceApp:
             self._first_names = list(dict.fromkeys(names))
         return self._first_names
 
+    def format_money_limit(self):
+        """Верхняя граница цены / суммы для текста предупреждения (99 999 999,99)"""
+        return f"{MONEY_MAX:,.2f}".replace(",", " ").replace(".", ",")
+
+    MILEAGE_MAX_DIGITS = 7   # пробег - до 9 999 999 км (как в «Изменить данные клиента и машины»)
+
+    def attach_digits_only(self, entry, max_len=MILEAGE_MAX_DIGITS):
+        """Поле только для цифр (пробег): буквы, пробелы и прочее убираются сразу при вводе и вставке"""
+        def clean(event=None):
+            value = entry.get()
+            digits = re.sub(r"\D", "", value)[:max_len]
+            if digits != value:
+                try:
+                    pos = entry.index(tk.INSERT)
+                except (tk.TclError, AttributeError):
+                    pos = len(digits)
+                entry.delete(0, tk.END)
+                entry.insert(0, digits)
+                entry.icursor(min(pos, len(digits)))
+        entry.bind("<KeyRelease>", clean, add="+")
+        entry.bind("<<Paste>>", lambda e: entry.after_idle(clean), add="+")
+        entry.bind("<FocusOut>", clean, add="+")
+        entry.digits_only_clean = clean   # для тестов: то же, что делает нажатие клавиши
+
     def attach_phone_mask(self, entry):
         """Поле телефона с маской +7(___)-___-__-__ (номер читать через phone_mask_digits,
         подставлять через set_phone_value)"""
@@ -1282,11 +1308,11 @@ class AutoServiceApp:
         window.bind("<Return>", on_enter)
         window.bind("<Escape>", on_escape)
 
-    def form_mark_error(self, entry, message_key, window):
+    def form_mark_error(self, entry, message_key, window=None, **kwargs):
         """Незаполненное/неверное поле - красная рамка, курсор в поле и сообщение"""
         entry.configure(border_color=self.FORM_ERROR_BORDER)
         entry.focus_set()
-        messagebox.showwarning(self.tr("common.attention"), self.tr(message_key), parent=window)
+        messagebox.showwarning(self.tr("common.attention"), self.tr(message_key, **kwargs), parent=window)
 
     def form_combo_error(self, combo, on):
         """Красная рамка (и стрелка) у списка - например «Машины клиента»: нажали «Сохранить», а машину не выбрали"""
@@ -2525,6 +2551,7 @@ class AutoServiceApp:
         self.mileage_entry = self.works_cell(car_row, 3, self.tr("works.mileage"),
                                              self.works_entry(car_row, 95,
                                                               placeholder_text=self.tr("works.mileage_placeholder")), 95)
+        self.attach_digits_only(self.mileage_entry)
 
         # Машины клиента - кнопками над строкой машины
         self.client_cars_combo = ClientCarChips(
@@ -2549,21 +2576,14 @@ class AutoServiceApp:
         # Подсказка имён - список под полем, поверх строк ниже
         self.attach_name_autocomplete(self.client_name_entry, col, position="below")
 
-        # Подсказки марок и моделей - поверх формы, под полем
-        self.car_brand_entry.bind('<KeyRelease>', self.on_brand_keyrelease)
-        self.car_brand_entry.bind('<FocusOut>', self.on_brand_focus_out)
-        self.brand_listbox = self.works_popup_listbox(col)
-        self.brand_listbox_visible = False
-        self.brand_listbox.bind('<<ListboxSelect>>', self.on_brand_select)
-        self.car_model_entry.bind('<KeyRelease>', self.on_model_keyrelease)
-        self.car_model_entry.bind('<FocusOut>', self.on_model_focus_out)
+        # Подсказки марок и моделей - поверх формы, под полем (одни на все формы - car_catalog.py)
+        self.works_car_hints = CarAutocomplete(
+            self, self.car_brand_entry, self.car_model_entry, col,
+            locked=lambda key: key in getattr(self, "works_locked", ()))
         # Вписали марку / модель (или выбрали из подсказки) - пересчитать цвет карточки
         for entry in (self.car_brand_entry, self.car_model_entry):
             entry.bind("<KeyRelease>", lambda e: self.works_update_card_marks(), add="+")
             entry.bind("<FocusOut>", lambda e: self.root.after(250, self.works_update_card_marks), add="+")
-        self.model_listbox = self.works_popup_listbox(col)
-        self.model_listbox_visible = False
-        self.model_listbox.bind('<<ListboxSelect>>', self.on_model_select)
 
         # Контекстное меню для VIN (правая кнопка - вставить)
         self.vin_context_menu = tk.Menu(self.root, tearoff=0)
@@ -3105,37 +3125,6 @@ class AutoServiceApp:
             if fields[key].cget("border_color") != color:
                 fields[key].configure(border_color=color)
 
-    # Обработчики автокомплита для марки
-    def on_brand_keyrelease(self, event):
-        """Обработчик ввода текста для марки"""
-        if "brand" in getattr(self, "works_locked", ()):
-            return  # поле закрыто - подсказки не нужны
-        search_text = self.car_brand_entry.get().strip()
-        if len(search_text) < 1:
-            self.hide_brand_listbox()
-            return
-
-        brands = self.db.search_car_brands(search_text)
-        if brands:
-            self.show_brand_listbox(brands)
-        else:
-            self.hide_brand_listbox()
-
-    def show_brand_listbox(self, brands):
-        """Показать список марок"""
-        self.brand_listbox.delete(0, tk.END)
-        for brand in brands:
-            self.brand_listbox.insert(tk.END, brand)
-        # Список - поверх формы, под полем
-        self.place_popup(self.brand_listbox, self.car_brand_entry)
-        self.brand_listbox_visible = True
-
-    def hide_brand_listbox(self):
-        """Скрыть список марок"""
-        if self.brand_listbox_visible:
-            self.hide_popup(self.brand_listbox)
-            self.brand_listbox_visible = False
-
     def on_vin_change(self, *args):
         """Ограничить VIN 17 символами (без пробелов, заглавными) и обновить счётчик"""
         value = self.vin_var.get()
@@ -3270,26 +3259,6 @@ class AutoServiceApp:
 
         btn.configure(command=copy)
         return btn
-
-    def on_brand_select(self, event):
-        """Обработчик выбора марки из списка"""
-        selection = self.brand_listbox.curselection()
-        if selection:
-            brand = self.brand_listbox.get(selection[0])
-            self.car_brand_entry.delete(0, tk.END)
-            self.car_brand_entry.insert(0, brand)
-            self.hide_brand_listbox()
-
-            # Автоматически показываем все модели выбранной марки
-            models = self.db.search_car_models(brand, "")
-            if models:
-                self.car_model_entry.delete(0, tk.END)
-                self.show_model_listbox(models)
-                self.car_model_entry.focus_set()
-
-    def on_brand_focus_out(self, event):
-        """Скрыть список при потере фокуса"""
-        self.root.after(200, self.hide_brand_listbox)
 
     # Обработчики для выбора записи клиента
     def refresh_bookings_combo(self):
@@ -3880,52 +3849,6 @@ class AutoServiceApp:
             # Не делаем ничего, ждём выбора
             self.client_cars_combo.configure(text_color="#c62828")
 
-    # Обработчики автокомплита для модели
-    def on_model_keyrelease(self, event):
-        """Обработчик ввода текста для модели"""
-        if "model" in getattr(self, "works_locked", ()):
-            return  # поле закрыто - подсказки не нужны
-        brand = self.car_brand_entry.get().strip()
-        if not brand:
-            self.hide_model_listbox()
-            return
-
-        search_text = self.car_model_entry.get().strip()
-        models = self.db.search_car_models(brand, search_text)
-        if models:
-            self.show_model_listbox(models)
-        else:
-            self.hide_model_listbox()
-
-    def show_model_listbox(self, models):
-        """Показать список моделей"""
-        self.model_listbox.delete(0, tk.END)
-        for model in models:
-            self.model_listbox.insert(tk.END, model)
-        # Список - поверх формы, под полем
-        self.place_popup(self.model_listbox, self.car_model_entry)
-        self.model_listbox_visible = True
-
-    def hide_model_listbox(self):
-        """Скрыть список моделей"""
-        if self.model_listbox_visible:
-            self.hide_popup(self.model_listbox)
-            self.model_listbox_visible = False
-
-    def on_model_select(self, event):
-        """Обработчик выбора модели из списка"""
-        selection = self.model_listbox.curselection()
-        if selection:
-            model = self.model_listbox.get(selection[0])
-            self.car_model_entry.delete(0, tk.END)
-            self.car_model_entry.insert(0, model)
-            self.hide_model_listbox()
-
-    def on_model_focus_out(self, event):
-        """Скрыть список при потере фокуса"""
-        self.root.after(200, self.hide_model_listbox)
-
-
     def refresh_workers_combo(self):
         """Обновить выпадающий список работников. Кто сегодня по расписанию отсутствует -
         в конце списка с пометкой ("Иванов — отпуск"). Выбранный мастер сохраняется.
@@ -4134,9 +4057,7 @@ class AutoServiceApp:
             return
 
         try:
-            part_price = float(self.part_price_entry.get().replace(',', '.'))
-            if part_price <= 0:
-                raise ValueError()
+            part_price = parse_money(self.part_price_entry.get())   # больше 0, до MONEY_MAX (input_rules.py)
         except ValueError:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_valid_part_price"))
             return
@@ -4187,9 +4108,7 @@ class AutoServiceApp:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_work_name"))
             return
         try:
-            work_price = float(self.work_price_entry.get().replace(',', '.'))
-            if work_price <= 0:
-                raise ValueError()
+            work_price = parse_money(self.work_price_entry.get())   # больше 0, до MONEY_MAX (input_rules.py)
         except ValueError:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_valid_work_price"))
             return
@@ -4607,6 +4526,12 @@ class AutoServiceApp:
         mileage = self.mileage_entry.get().strip()
         vin = self.vin_entry.get().strip().upper()
 
+        # Пробег - только цифры (буквы в поле не набрать, но значение могло попасть вставкой / из старых данных):
+        # иначе запись сохранялась, а пробег в наряде пропадал
+        if mileage and (not mileage.isdigit() or len(mileage) > self.MILEAGE_MAX_DIGITS):
+            self.form_mark_error(self.mileage_entry, "works.msg_mileage_digits", max=self.MILEAGE_MAX_DIGITS)
+            return
+
         # У клиента несколько машин, а машину не выбрали (кнопки машин красные) - просим выбрать,
         # а не «Введите марку»
         if not car_number and self.client_cars_combo.get() == self.tr("works.select_car"):
@@ -4625,6 +4550,14 @@ class AutoServiceApp:
         if not car_number:
             messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_enter_car_number"))
             return
+        # Марка и модель - только из справочника «Марки и модели» (иначе можно записать несуществующую машину).
+        # Машина уже в базе с этими же маркой и моделью (старые записи не из справочника) - не мешаем
+        known_car = self.db.get_car_by_number(car_number) or {}
+        names = catalog_car_names(self, self.car_brand_entry, self.car_model_entry,
+                                  saved=(known_car.get("car_brand"), known_car.get("car_model")))
+        if not names:
+            return
+        car_brand, car_model = names
         # Машины с таким госномером ещё нет - проверить номер (пропущена первая буква, не те буквы)
         if self.find_car_by_plate(car_number)["status"] != "found" and not self.confirm_new_plate(
                 car_number, entry=self.car_number_entry):
@@ -4647,6 +4580,22 @@ class AutoServiceApp:
                     return
                 if choice == "keep":
                     vin = old_vin
+
+        # Пробег меньше прошлого у этой машины - скорее всего опечатка (123 → 12), переспрашиваем.
+        # Правим старый наряд - сравниваем с нарядами не позже его даты
+        if mileage:
+            editing_id = getattr(self, 'editing_work_id', None)
+            last = self.db.get_last_car_mileage(car_number, exclude_work_id=editing_id,
+                                                until_date=check_date if editing_id else None)
+            if last and int(mileage) < last[0]:
+                last_date = last[1]
+                when = (self.tr("works.mileage_last_date", date=last_date.strftime('%d.%m.%Y'))
+                        if hasattr(last_date, "strftime") else "")
+                if not messagebox.askyesno(self.tr("common.attention"), self.tr(
+                        "works.ask_mileage_less", last=f"{last[0]:,}".replace(",", " "), when=when,
+                        now=f"{int(mileage):,}".replace(",", " "))):
+                    self.mileage_entry.focus_set()
+                    return
 
         # Данные клиента
         booking_id = getattr(self, 'selected_booking_id', None)
@@ -4747,7 +4696,7 @@ class AutoServiceApp:
                     # Сменился владелец / контакты / госномер (ответы на вопросы выше) - применяем и здесь
                     if owner["new_owner"] or owner["update_contact"] or owner["plate_from"]:
                         client_and_car()
-                    self.db.append_to_work(existing_work["work_id"], description, amount, items_json)
+                    self.db.append_to_work(existing_work["work_id"], description, amount, items_json, mileage, vin)
 
                     # Добавляем запчасти к существующей работе
                     if self.parts_list:
@@ -4788,7 +4737,7 @@ class AutoServiceApp:
                         existing_work_id = active_work["work_id"]
                         if owner["new_owner"] or owner["update_contact"] or owner["plate_from"]:
                             client_and_car()
-                        self.db.append_to_work(existing_work_id, description, amount, items_json)
+                        self.db.append_to_work(existing_work_id, description, amount, items_json, mileage, vin)
 
                         # Добавляем запчасти к существующей работе
                         if self.parts_list:
@@ -4895,6 +4844,13 @@ class AutoServiceApp:
         self.parts_list = []
         for item in self.parts_tree.get_children():
             self.parts_tree.delete(item)
+
+        # Недописанные (не добавленные в список) работа и запчасть - тоже стираем, иначе переезжают на следующую машину
+        for entry in (self.work_name_entry, self.work_price_entry, self.part_name_entry, self.part_price_entry):
+            entry.delete(0, tk.END)
+            self.restore_placeholder(entry)
+        self.hide_work_keyword_listbox()
+        self.hide_part_keyword_listbox()
 
         # Обновляем общую стоимость
         self.update_total_cost()
@@ -5112,8 +5068,7 @@ class AutoServiceApp:
         self.wh_plate_phone = None
         self.wh_searched_number = None
         self.wh_phone_cars_numbers = {}
-        self.hide_wh_brand_listbox()
-        self.hide_wh_model_listbox()
+        self.wh_car_hints.hide()
         self.form_combo_error(self.wh_phone_cars_combo, False)
         if self.wh_phone_cars_combo.winfo_manager():
             self.wh_phone_cars_combo.pack_forget()
@@ -5186,24 +5141,16 @@ class AutoServiceApp:
         self.form_label(frame, self.tr("works.client_name")).grid(row=0, column=2, sticky="w", padx=(10, 0))
         self.wh_new_brand_entry = self.form_entry(frame)
         self.wh_new_brand_entry.grid(row=1, column=0, sticky="ew")
-        self.wh_new_brand_entry.bind('<KeyRelease>', self.on_wh_brand_keyrelease)
-        self.wh_new_brand_entry.bind('<FocusOut>', self.on_wh_brand_focus_out)
         self.wh_new_model_entry = self.form_entry(frame)
         self.wh_new_model_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
-        self.wh_new_model_entry.bind('<KeyRelease>', self.on_wh_model_keyrelease)
-        self.wh_new_model_entry.bind('<FocusOut>', self.on_wh_model_focus_out)
         self.wh_new_client_name_entry = self.form_entry(frame)
         self.wh_new_client_name_entry.grid(row=1, column=2, sticky="ew", padx=(10, 0))
         # Подсказка имён - список под полем
         self.attach_name_autocomplete(self.wh_new_client_name_entry, content, position="below")
 
-        # Списки подсказок марки и модели - поверх формы под полями
-        self.wh_brand_listbox = self.form_popup_listbox(content, takefocus=False)
-        self.wh_brand_listbox_visible = False
-        self.wh_brand_listbox.bind('<<ListboxSelect>>', self.on_wh_brand_select)
-        self.wh_model_listbox = self.form_popup_listbox(content, takefocus=False)
-        self.wh_model_listbox_visible = False
-        self.wh_model_listbox.bind('<<ListboxSelect>>', self.on_wh_model_select)
+        # Подсказки марки и модели - поверх формы под полями (одни на все формы - car_catalog.py)
+        self.wh_car_hints = CarAutocomplete(self, self.wh_new_brand_entry, self.wh_new_model_entry, content,
+                                            next_entry=self.wh_new_client_name_entry)
 
         # === ЗАПЧАСТЬ: название | кол-во | цена - в одну строку ===
         _, part_body = self.form_section(content, self.tr("warehouse.part_label"))
@@ -5245,10 +5192,10 @@ class AutoServiceApp:
         # Кнопки: широкая "Заказать" и "Отмена"; Enter - заказать, Esc - отмена
         self.form_buttons(window, self.tr("warehouse.order_btn"), self.add_warehouse_part, self.hide_add_part_form)
         self.form_bind_keys(window, content, self.add_warehouse_part, self.hide_add_part_form,
-                            lambda: (self.hide_wh_brand_listbox(), self.hide_wh_model_listbox(),
+                            lambda: (self.wh_car_hints.hide(),
                                      self.hide_popup(self.wh_part_listbox)))
-        self.form_clear_error_on_type((self.wh_car_number_entry, self.wh_new_brand_entry, self.wh_phone_entry,
-                                       self.wh_part_name_entry, self.wh_quantity_entry, self.wh_price_entry))
+        self.form_clear_error_on_type((self.wh_car_number_entry, self.wh_new_brand_entry, self.wh_new_model_entry,
+                                       self.wh_phone_entry, self.wh_part_name_entry, self.wh_quantity_entry, self.wh_price_entry))
 
         self.wh_normal_border = self.wh_car_number_entry.cget("border_color")
         window.update_idletasks()
@@ -5426,8 +5373,7 @@ class AutoServiceApp:
         """Скрыть форму для новой машины"""
         self.wh_form_by_phone = False
         if self.wh_new_car_visible:
-            self.hide_wh_brand_listbox()
-            self.hide_wh_model_listbox()
+            self.wh_car_hints.hide()
             self.wh_new_car_frame.pack_forget()
             self.wh_new_car_frame.master.configure(height=1)  # пустой контейнер Tk сам не сжимает
             self.wh_new_car_visible = False
@@ -5531,109 +5477,11 @@ class AutoServiceApp:
         self.wh_car_number_entry.insert(0, number)
         self.search_car_for_warehouse()
 
-    # === Автокомплит для марки (форма склада) ===
-    def on_wh_brand_keyrelease(self, event):
-        """Обработчик ввода текста для марки (склад)"""
-        if event.keysym in ('Up', 'Down', 'Return', 'Escape'):
-            return
-
-        search_text = self.wh_new_brand_entry.get().strip()
-        if len(search_text) < 1:
-            self.hide_wh_brand_listbox()
-            return
-
-        brands = self.db.search_car_brands(search_text)
-        if brands:
-            self.show_wh_brand_listbox(brands)
-        else:
-            self.hide_wh_brand_listbox()
-
-    def show_wh_brand_listbox(self, brands):
-        """Показать список марок (склад)"""
-        self.wh_brand_listbox.delete(0, tk.END)
-        for brand in brands:
-            self.wh_brand_listbox.insert(tk.END, brand)
-        self.place_popup(self.wh_brand_listbox, self.wh_new_brand_entry)
-        self.wh_brand_listbox_visible = True
-
-    def hide_wh_brand_listbox(self):
-        """Скрыть список марок (склад)"""
-        if self.wh_brand_listbox_visible:
-            self.hide_popup(self.wh_brand_listbox)
-            self.wh_brand_listbox_visible = False
-
-    def on_wh_brand_select(self, event):
-        """Обработчик выбора марки из списка (склад)"""
-        selection = self.wh_brand_listbox.curselection()
-        if selection:
-            brand = self.wh_brand_listbox.get(selection[0])
-            self.wh_new_brand_entry.delete(0, tk.END)
-            self.wh_new_brand_entry.insert(0, brand)
-            self.hide_wh_brand_listbox()
-
-            # Автоматически показываем все модели выбранной марки
-            models = self.db.search_car_models(brand, "")
-            if models:
-                self.wh_new_model_entry.delete(0, tk.END)
-                self.show_wh_model_listbox(models)
-                self.wh_new_model_entry.focus_set()
-
-    def on_wh_brand_focus_out(self, event):
-        """Скрыть список при потере фокуса (склад)"""
-        self.root.after(200, self.hide_wh_brand_listbox)
-
-    # === Автокомплит для модели (форма склада) ===
-    def on_wh_model_keyrelease(self, event):
-        """Обработчик ввода текста для модели (склад)"""
-        if event.keysym in ('Up', 'Down', 'Return', 'Escape'):
-            return
-
-        brand = self.wh_new_brand_entry.get().strip()
-        if not brand:
-            self.hide_wh_model_listbox()
-            return
-
-        search_text = self.wh_new_model_entry.get().strip()
-        models = self.db.search_car_models(brand, search_text)
-        if models:
-            self.show_wh_model_listbox(models)
-        else:
-            self.hide_wh_model_listbox()
-
-    def show_wh_model_listbox(self, models):
-        """Показать список моделей (склад)"""
-        self.wh_model_listbox.delete(0, tk.END)
-        for model in models:
-            self.wh_model_listbox.insert(tk.END, model)
-        self.place_popup(self.wh_model_listbox, self.wh_new_model_entry)
-        self.wh_model_listbox_visible = True
-
-    def hide_wh_model_listbox(self):
-        """Скрыть список моделей (склад)"""
-        if self.wh_model_listbox_visible:
-            self.hide_popup(self.wh_model_listbox)
-            self.wh_model_listbox_visible = False
-
-    def on_wh_model_select(self, event):
-        """Обработчик выбора модели из списка (склад)"""
-        selection = self.wh_model_listbox.curselection()
-        if selection:
-            model = self.wh_model_listbox.get(selection[0])
-            self.wh_new_model_entry.delete(0, tk.END)
-            self.wh_new_model_entry.insert(0, model)
-            self.hide_wh_model_listbox()
-
-    def on_wh_model_focus_out(self, event):
-        """Скрыть список при потере фокуса (склад)"""
-        self.root.after(200, self.hide_wh_model_listbox)
-
     def hide_add_part_form(self):
         """Скрыть форму добавления запчасти"""
         # Скрываем списки автокомплита
-        if hasattr(self, 'wh_brand_listbox_visible'):
-            self.hide_wh_brand_listbox()
-        if hasattr(self, 'wh_model_listbox_visible'):
-            self.hide_wh_model_listbox()
+        if hasattr(self, 'wh_car_hints'):
+            self.wh_car_hints.hide()
 
         # Окно не уничтожаем - прячем вместе с затемнением; при следующем открытии форма сбросится
         window = getattr(self, "_part_window", None)
@@ -5658,15 +5506,17 @@ class AutoServiceApp:
             return
 
         try:
-            quantity = int(quantity_str) if quantity_str else 1
+            quantity = parse_quantity(quantity_str)   # целое 1..QUANTITY_MAX, пусто - 1
         except ValueError:
-            self.form_mark_error(self.wh_quantity_entry, "warehouse.msg_quantity_number", self.add_part_form_frame)
+            self.form_mark_error(self.wh_quantity_entry, "warehouse.msg_quantity_number", self.add_part_form_frame,
+                                 max=QUANTITY_MAX)
             return
 
         try:
-            price = float(price_str.replace(",", ".")) if price_str else None
+            price = parse_money(price_str, allow_empty=True)   # пусто - цена пока неизвестна
         except ValueError:
-            self.form_mark_error(self.wh_price_entry, "warehouse.msg_price_number", self.add_part_form_frame)
+            self.form_mark_error(self.wh_price_entry, "warehouse.msg_price_number", self.add_part_form_frame,
+                                 max=self.format_money_limit())
             return
 
         # По телефону показан список машин клиента, а машину не выбрали и госномер не вписали - подсвечиваем
@@ -5707,6 +5557,11 @@ class AutoServiceApp:
             if not model:
                 self.form_mark_error(self.wh_new_model_entry, "works.msg_enter_model", self.add_part_form_frame)
                 return
+            # Марка и модель - только из справочника «Марки и модели»
+            names = catalog_car_names(self, self.wh_new_brand_entry, self.wh_new_model_entry, self.add_part_form_frame)
+            if not names:
+                return
+            brand, model = names
 
             # Проверка телефона: должен быть +7 и 10 цифр
             if len(phone_digits) != 10:
@@ -6080,16 +5935,17 @@ class AutoServiceApp:
                 return
 
             try:
-                new_quantity = int(quantity_entry.get().strip()) if quantity_entry.get().strip() else 1
+                new_quantity = parse_quantity(quantity_entry.get())
             except ValueError:
-                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_quantity_number"))
+                messagebox.showwarning(self.tr("common.attention"),
+                                       self.tr("warehouse.msg_quantity_number", max=QUANTITY_MAX))
                 return
 
             try:
-                price_str = price_entry.get().strip().replace(",", ".")
-                new_price = float(price_str) if price_str else None
+                new_price = parse_money(price_entry.get(), allow_empty=True)
             except ValueError:
-                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_price_number"))
+                messagebox.showwarning(self.tr("common.attention"),
+                                       self.tr("warehouse.msg_price_number", max=self.format_money_limit()))
                 return
 
             new_status = status_display_to_raw.get(status_var.get(), status_var.get())
@@ -6421,9 +6277,7 @@ class AutoServiceApp:
 
         # Получаем процент
         try:
-            percent = float(self.percent_var.get().replace(',', '.'))
-            if percent < 0 or percent > 100:
-                raise ValueError()
+            percent = parse_percent(self.percent_var.get())   # 0..100 включительно
         except ValueError:
             messagebox.showwarning(self.tr("common.attention"), self.tr("reports.msg_invalid_percent"))
             return
@@ -6584,9 +6438,7 @@ class AutoServiceApp:
 
         def save_bonus():
             try:
-                amount = float(amount_entry.get().strip().replace(',', '.'))
-                if amount <= 0:
-                    raise ValueError()
+                amount = parse_money(amount_entry.get())
             except ValueError:
                 messagebox.showwarning(self.tr("common.attention"), self.tr("reports.msg_invalid_bonus_amount"), parent=bonus_window)
                 return
@@ -7658,9 +7510,7 @@ class AutoServiceApp:
             return
 
         try:
-            amount = float(self.expense_amount_entry.get().replace(',', '.'))
-            if amount <= 0:
-                raise ValueError()
+            amount = parse_money(self.expense_amount_entry.get())
         except ValueError:
             messagebox.showwarning(self.tr("common.attention"), self.tr("finances.msg_invalid_amount"))
             return
@@ -9129,11 +8979,9 @@ class AutoServiceApp:
         model_entry = make_entry(car_details_frame)
         model_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
 
-        # Флаги видимости listbox
-        brand_listbox_visible = [False]
-        model_listbox_visible = [False]
-        brand_listbox = self.form_popup_listbox(content)
-        model_listbox = self.form_popup_listbox(content)
+        # Подсказки марки и модели - одни на все формы (car_catalog.py); после модели - курсор в телефон
+        car_hints = CarAutocomplete(self, brand_entry, model_entry, content)
+        hide_brand_list, hide_model_list = car_hints.hide_brands, car_hints.hide_models
 
         car_state = [None]
 
@@ -9188,87 +9036,6 @@ class AutoServiceApp:
                 car_details_visible[0] = False
             fit_window()
 
-        def show_brand_list(brands_list):
-            brand_listbox.delete(0, tk.END)
-            for b in brands_list:
-                brand_listbox.insert(tk.END, b)
-            popup_below(brand_listbox, brand_entry)
-            brand_listbox_visible[0] = True
-
-        def hide_brand_list():
-            if brand_listbox_visible[0]:
-                self.hide_popup(brand_listbox)
-                brand_listbox_visible[0] = False
-
-        def on_brand_key(event):
-            text = brand_entry.get().strip()
-            if len(text) >= 1:
-                results = self.db.search_car_brands(text)
-                if results:
-                    show_brand_list(results)
-                else:
-                    hide_brand_list()
-            else:
-                hide_brand_list()
-
-        def on_brand_select(event):
-            sel = brand_listbox.curselection()
-            if sel:
-                brand_entry.delete(0, tk.END)
-                brand_entry.insert(0, brand_listbox.get(sel[0]))
-                hide_brand_list()
-                model_entry.focus_set()
-
-        brand_entry.bind('<KeyRelease>', on_brand_key)
-        brand_listbox.bind('<<ListboxSelect>>', on_brand_select)
-
-        def show_model_list(models_list):
-            model_listbox.delete(0, tk.END)
-            for m in models_list:
-                model_listbox.insert(tk.END, m)
-            popup_below(model_listbox, model_entry)
-            model_listbox_visible[0] = True
-
-        def hide_model_list():
-            if model_listbox_visible[0]:
-                self.hide_popup(model_listbox)
-                model_listbox_visible[0] = False
-
-        def on_model_key(event):
-            brand_name = brand_entry.get().strip()
-            text = model_entry.get().strip()
-            if brand_name:
-                results = self.db.search_car_models(brand_name, text)
-                if results:
-                    show_model_list(results)
-                else:
-                    hide_model_list()
-            else:
-                hide_model_list()
-
-        def on_model_select(event):
-            sel = model_listbox.curselection()
-            if sel:
-                model_entry.delete(0, tk.END)
-                model_entry.insert(0, model_listbox.get(sel[0]))
-                hide_model_list()
-                phone_entry.focus_set()
-
-        def hide_list_later(hide):
-            # Список марок/моделей прячем, когда фокус ушёл из поля (но не в сам список)
-            def check():
-                try:
-                    if add_window.focus_get() not in (brand_listbox, model_listbox):
-                        hide()
-                except (KeyError, tk.TclError):
-                    hide()
-            add_window.after(200, check)
-
-        model_entry.bind('<KeyRelease>', on_model_key)
-        model_entry.bind('<FocusIn>', on_model_key)
-        model_listbox.bind('<<ListboxSelect>>', on_model_select)
-        brand_entry.bind('<FocusOut>', lambda e: hide_list_later(hide_brand_list), add="+")
-        model_entry.bind('<FocusOut>', lambda e: hide_list_later(hide_model_list), add="+")
 
         # === КЛИЕНТ: телефон и имя рядом ===
         client_card, client_body = section(self.tr("bookings.section_client"))
@@ -9279,6 +9046,7 @@ class AutoServiceApp:
         field_label(client_grid, self.tr("works.client_name"), required=True).grid(row=0, column=1, sticky="w", padx=(10, 0))
         phone_entry = make_entry(client_grid)
         phone_entry.grid(row=1, column=0, sticky="ew")
+        car_hints.next_entry = phone_entry
         self.attach_phone_mask(phone_entry)
         name_entry = make_entry(client_grid)
         name_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
@@ -9765,6 +9533,11 @@ class AutoServiceApp:
                 if not model:
                     mark_error(model_entry, "works.msg_enter_model")
                     return
+                # Марка и модель - только из справочника «Марки и модели»
+                names = catalog_car_names(self, brand_entry, model_entry, add_window)
+                if not names:
+                    return
+                brand, model = names
                 # Новая машина - проверить госномер (пропущена первая буква, не те буквы)
                 if not self.confirm_new_plate(number, add_window, car_number_entry):
                     return
@@ -10792,39 +10565,6 @@ class AutoServiceApp:
             for listbox in popups:
                 self.hide_popup(listbox)
 
-        def attach_suggestions(entry, search, next_entry):
-            """Подсказки под полем (марки, модели) - как в "Записать клиента" """
-            listbox = self.form_popup_listbox(content)
-            popups.append(listbox)
-
-            def on_key(event=None):
-                if event is not None and event.keysym in ("Return", "Escape", "Tab"):
-                    return
-                results = search(entry.get().strip())
-                if results and entry.get().strip() not in results[:1]:
-                    listbox.delete(0, tk.END)
-                    for value in results:
-                        listbox.insert(tk.END, value)
-                    self.place_popup(listbox, entry)
-                else:
-                    self.hide_popup(listbox)
-
-            def on_select(event):
-                sel = listbox.curselection()
-                if sel:
-                    entry.delete(0, tk.END)
-                    entry.insert(0, listbox.get(sel[0]))
-                    self.hide_popup(listbox)
-                    next_entry.focus_set()
-
-            def hide_later(event):
-                window.after(200, lambda: window.winfo_exists() and window.focus_get() is not listbox
-                             and self.hide_popup(listbox))
-
-            entry.bind("<KeyRelease>", on_key, add="+")
-            entry.bind("<FocusOut>", hide_later, add="+")
-            listbox.bind("<<ListboxSelect>>", on_select)
-
         # === АВТОМОБИЛЬ ===
         car_card, car_body = self.form_section(content, self.tr("bookings.section_car"))
         car_entries = {}
@@ -10882,9 +10622,9 @@ class AutoServiceApp:
             on_vin_change()
             on_mileage_change()
 
-            attach_suggestions(brand_entry, self.db.search_car_brands, model_entry)
-            attach_suggestions(model_entry, lambda text: self.db.search_car_models(brand_entry.get().strip(), text)
-                               if brand_entry.get().strip() else [], vin_entry)
+            # Подсказки марки и модели - одни на все формы (car_catalog.py)
+            car_hints = CarAutocomplete(self, brand_entry, model_entry, content, next_entry=vin_entry)
+            popups.extend((car_hints.brand_listbox, car_hints.model_listbox))
             car_entries = {"number": number_entry, "brand": brand_entry, "model": model_entry, "vin": vin_entry,
                            "mileage": mileage_entry}
             hint(car_body, self.tr("bookings.edit_car_hint"))
@@ -10971,6 +10711,12 @@ class AutoServiceApp:
                     return mark_error(car_entries["brand"], "works.msg_enter_brand")
                 if not model:
                     return mark_error(car_entries["model"], "works.msg_enter_model")
+                # Марка и модель - из справочника «Марки и модели»; не меняли - как было (старые машины)
+                names = catalog_car_names(self, car_entries["brand"], car_entries["model"], window,
+                                          saved=(original_car["brand"], original_car["model"]))
+                if not names:
+                    return
+                brand, model = names
                 if number != original_car["number"].upper() and not self.confirm_new_plate(
                         number, window, car_entries["number"]):
                     return

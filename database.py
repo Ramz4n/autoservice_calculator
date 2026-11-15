@@ -611,6 +611,33 @@ class Database:
         conn.close()
         return models
 
+    def find_car_brand_name(self, brand_name):
+        """Марка из справочника, как она там записана (без учёта регистра), или None"""
+        brand_name = (brand_name or "").strip()
+        if not brand_name:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT brand_name FROM car_brands WHERE LOWER(brand_name) = LOWER(%s) LIMIT 1",
+                       (brand_name,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def find_car_model_name(self, brand_name, model_name):
+        """Модель этой марки из справочника, как она там записана (без учёта регистра), или None"""
+        model_name = (model_name or "").strip()
+        brand_id = self.get_brand_id_by_name((brand_name or "").strip())
+        if not brand_id or not model_name:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT model_name FROM car_models WHERE brand_id = %s AND LOWER(model_name) = LOWER(%s) "
+                       "LIMIT 1", (brand_id, model_name))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
     def delete_car_brand(self, brand_id):
         """Удалить марку машины и все её модели"""
         conn = self.get_connection()
@@ -709,9 +736,9 @@ class Database:
                     raise
         work_id = cursor.lastrowid
         if car_id:
-            if mileage:
-                # Также обновляем последний известный пробег авто
-                cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (mileage, car_id))
+            if mileage_int is not None:
+                # Также обновляем последний известный пробег авто (только число - буквы в пробег не пишем)
+                cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (str(mileage_int), car_id))
             if vin:
                 cursor.execute("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, car_id))
         if booking_id and car_id:
@@ -740,9 +767,9 @@ class Database:
             WHERE id = %s
         ''', (worker_id, description, amount, work_date, booking_id, car_id, mileage_int, items_json, client_id, work_id))
         if car_id:
-            if mileage:
-                # Также обновляем последний известный пробег авто
-                cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (mileage, car_id))
+            if mileage_int is not None:
+                # Также обновляем последний известный пробег авто (только число - буквы в пробег не пишем)
+                cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (str(mileage_int), car_id))
             if vin:
                 cursor.execute("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, car_id))
         if booking_id and car_id:
@@ -750,13 +777,22 @@ class Database:
         conn.commit()
         conn.close()
 
-    def append_to_work(self, work_id, new_description, new_amount, new_items_json=None):
-        """Добавить описание и сумму к существующей работе"""
+    def append_to_work(self, work_id, new_description, new_amount, new_items_json=None, mileage="", vin=""):
+        """Добавить описание и сумму к существующей работе.
+        mileage / vin из формы (если вписаны) - в наряд и в карточку машины, как в add_work"""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT description, amount, items_json FROM works WHERE id = %s", (work_id,))
+        cursor.execute("SELECT description, amount, items_json, car_id FROM works WHERE id = %s", (work_id,))
         row = cursor.fetchone()
         if row:
+            digits = re.sub(r"\D", "", str(mileage or ""))
+            if digits:
+                cursor.execute("UPDATE works SET mileage = %s WHERE id = %s", (int(digits), work_id))
+            if row[3]:
+                if digits:
+                    cursor.execute("UPDATE client_cars SET mileage = %s WHERE id = %s", (str(int(digits)), row[3]))
+                if vin:
+                    cursor.execute("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, row[3]))
             old_desc = row[0] or ""
             old_amount = float(row[1] or 0)
             combined_desc = old_desc + "\n" + new_description if old_desc else new_description
@@ -2172,6 +2208,34 @@ class Database:
         cursor.execute("UPDATE clients SET phone = NULL WHERE id = %s", (client_id,))
         conn.commit()
         conn.close()
+
+    def get_last_car_mileage(self, car_number, exclude_work_id=None, until_date=None):
+        """Последний известный пробег машины: из последнего наряда с пробегом (кроме exclude_work_id -
+        наряда, который сейчас правят; until_date - только наряды не позже этой даты), иначе - пробег
+        в карточке машины. Возвращает (пробег, дата наряда или None) или None"""
+        car_number = normalize_plate(car_number) if car_number else car_number
+        if not car_number:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        query = ("SELECT wk.mileage, wk.work_date FROM works wk JOIN client_cars cc ON wk.car_id = cc.id "
+                 "WHERE UPPER(cc.car_number) = UPPER(%s) AND wk.mileage IS NOT NULL AND wk.mileage > 0")
+        params = [car_number]
+        if exclude_work_id:
+            query += " AND wk.id <> %s"
+            params.append(exclude_work_id)
+        if until_date:
+            query += " AND wk.work_date <= %s"
+            params.append(until_date)
+        cursor.execute(query + " ORDER BY wk.work_date DESC, wk.id DESC LIMIT 1", params)
+        row = cursor.fetchone()
+        if not row and not exclude_work_id:
+            cursor.execute("SELECT mileage FROM client_cars WHERE UPPER(car_number) = UPPER(%s)", (car_number,))
+            card = cursor.fetchone()
+            digits = re.sub(r"\D", "", str(card[0] or "")) if card else ""
+            row = (int(digits), None) if digits else None
+        conn.close()
+        return (int(row[0]), row[1]) if row else None
 
     def get_car_by_number(self, car_number):
         """Получить авто по госномеру"""
