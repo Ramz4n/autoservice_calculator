@@ -2,11 +2,11 @@
 """Негативные проверки: неверный ввод - предупреждение и НИ ОДНОЙ записи в базу (h.expect_rejected).
 Тестовые госномера Т2xxТТ799, телефоны +7900000020x"""
 
-from datetime import date
+from datetime import date, timedelta
 
-PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799"]
+PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799", "Т209ТТ799", "Т210ТТ799"]
 PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205", "+79000000206", "+79000000207",
-          "+79000000208"]
+          "+79000000208", "+79000000209", "+79000000210"]
 
 
 def prepare(h):
@@ -446,6 +446,122 @@ def test_tables_middle_click_nothing_to_scroll(h):
         app.switch_tab("bookings")
 
 
+def test_tires_rejects(h):
+    """«Принять шины»: нет сезона / госномера / марки новой машины, количество 0 и буквы, дата 31.02 и не по образцу,
+    «хранить до» раньше приёма, цена 0, слишком длинный размер - предупреждение и ни одной записи (машина тоже
+    не создаётся); ячейка занята, ответ «нет» - не сохраняется; выдать неоплаченные, «нет» - не выдано;
+    перенос: ничего не отмечено - ничего не перенесено; деталь в наряде - не переносится"""
+    app, db = h.app, h.app.db
+    good = dict(brand="Kia", model="Rio", phone10="9000000209", name="Тест Шины Отказ", season="winter",
+                size="205/55 R16", qty="4", received=date.today().strftime("%d.%m.%Y"), until="", price="1000")
+    cases = [
+        ("нет сезона", dict(season=None), "сезон"),
+        ("нет госномера", dict(plate=""), None),
+        ("новая машина без марки", dict(brand=""), None),
+        ("количество 0", dict(qty="0"), None),
+        ("количество буквами", dict(qty="четыре"), None),
+        ("количество пусто", dict(qty=""), None),
+        ("дата 31.02", dict(received="31.02.2026"), "дд.мм"),
+        ("дата не по образцу", dict(received="вчера"), "дд.мм"),
+        ("дата пустая", dict(received=""), "дд.мм"),
+        ("год 1999", dict(received="01.01.1999"), "дд.мм"),
+        ("«хранить до» раньше приёма", dict(until=(date.today() - timedelta(days=1)).strftime("%d.%m.%Y")), None),
+        ("стоимость 0", dict(price="0"), None),
+        ("стоимость буквами", dict(price="много"), None),
+        ("размер длиннее 50", dict(size="2" * 51), "50"),
+    ]
+    for name, change, text in cases:
+        fields = dict(good, plate="Т209ТТ799")
+        fields.update(change)
+        plate = fields.pop("plate")
+        h.expect_rejected(f"шины: {name} - отказ, ничего не сохранено",
+                          lambda p=plate, f=fields: h.tires_form(p, **f), text)
+    h.check("машина Т209ТТ799 не создана (отказ до сохранения)", not h.car("Т209ТТ799"))
+
+    # Ячейка занята: «нет» - не сохраняется, «да» - сохраняется
+    h.tires_form("Т209ТТ799", location="Ж-1", notes="Тест шины ячейка 1", **{k: v for k, v in good.items()})
+    first = h.tire(notes="Тест шины ячейка 1")
+    if h.check("первый комплект в ячейке Ж-1 сохранён", first and first["location"] == "Ж-1"):
+        h.expect_rejected("ячейка Ж-1 занята, ответ «нет» - не сохранено",
+                          lambda: h.tires_form("Т209ТТ799", season="summer", location="ж-1",
+                                               notes="Тест шины ячейка 2"), "Ж-1", answers=[False])
+        # Неоплаченные - выдать, «нет»: статус не меняется
+        db.set_tire_storage_paid(first["id"], False)
+        h.tires_select(first["id"])
+        h.answers[:] = [False]
+        app.issue_selected_tires()
+        h.check("выдать неоплаченные, «нет» - не выдано", db.get_tire_storage_by_id(first["id"])["status"] == "stored")
+        h.check("был вопрос про неоплаченное хранение", any("не оплачено" in d[2] for d in h.dialogs[-1:]),
+                h.dialogs[-1:])
+        h.tires_select(first["id"])
+        app.issue_selected_tires()   # «да»
+        h.tires_select(first["id"])
+        before = len(h.dialogs)
+        app.issue_selected_tires()   # уже выдано
+        h.check("уже выдано - второй раз не выдаётся (сообщение)", db.get_tire_storage_by_id(first["id"])["status"]
+                == "issued" and any(app.tr("tires.msg_already_issued") in d[2] for d in h.dialogs[before:]))
+        h.answers[:] = [False]
+        h.tires_select(first["id"])
+        app.delete_selected_tires()
+        h.check("удалить, «нет» - комплект остался", db.get_tire_storage_by_id(first["id"]) is not None)
+
+    # Ничего не выбрано в таблице - предупреждение
+    app.tires_tree.selection_set(())
+    h.expect_rejected("ничего не выбрано - «Выдать» не работает", app.issue_selected_tires, app.tr("tires.msg_select"))
+
+    # Перенос: ничего не отмечено - ничего не переносится
+    h.warehouse_form("т210тт799", "Kia", "Rio", "9000000210", "Тест Перенос Отказ", part="Тест шины отказ переноса")
+    part = h.warehouse_part("Тест шины отказ переноса")
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("tires")
+    app.open_tire_transfer()
+    h.root.update()
+    window = app._tire_transfer_window
+    for box in h.find_widgets(window, h.m.ctk.CTkCheckBox):
+        box.deselect()
+    h.expect_rejected("перенос: ничего не отмечено - предупреждение, ничего не перенесено",
+                      lambda: h.find_button(window, app.tr("tires.transfer_do")).invoke(), app.tr("tires.transfer_choose"))
+    for box in h.find_widgets(window, h.m.ctk.CTkCheckBox):
+        if box.cget("text").startswith("Тест шины отказ переноса"):
+            box.select()
+    h.expect_rejected("перенос: «нет» на вопросе - ничего не перенесено",
+                      lambda: h.find_button(window, app.tr("tires.transfer_do")).invoke(), None, answers=[False])
+    h.find_button(window, app.tr("common.cancel")).invoke()
+    h.check("отмена - окно закрыто, деталь в запчастях", not app._tire_transfer_window
+            and h.warehouse_part("Тест шины отказ переноса"))
+    # Деталь в наряде («установлена») - не переносится и в списке её нет
+    h.q("UPDATE warehouse_parts SET status = 'установлена' WHERE id = %s", (part[0],))
+    h.check("деталь в наряде - в списке переноса её нет",
+            all(p["id"] != part[0] for p in db.get_tire_like_warehouse_parts()))
+    h.check("деталь в наряде - перенос отказан, в запчастях осталась",
+            db.move_warehouse_part_to_tires(part[0]) is None and h.warehouse_part("Тест шины отказ переноса"))
+
+    # Оплата без цены: в форме - сохраняется, но дохода нет; «Отметить оплату» - предупреждение, дохода нет
+    incomes = lambda: h.q("SELECT COUNT(*) FROM expenses WHERE is_income = 1")[0][0]
+    before = incomes()
+    h.tires_form("Т209ТТ799", season="summer", price="", paid=True, notes="Тест шины без цены")
+    no_price = h.tire(notes="Тест шины без цены")
+    h.check("оплачено без цены - сохранено, дохода нет", no_price and no_price["income_id"] is None
+            and incomes() == before)
+    db.set_tire_storage_paid(no_price["id"], False)
+    h.tires_select(no_price["id"])
+    h.expect_rejected("«Отметить оплату» без цены - предупреждение", lambda: app.set_selected_tires_paid(True),
+                      app.tr("tires.msg_paid_no_price"))
+    h.check("и дохода нет, комплект не оплачен", incomes() == before
+            and not db.get_tire_storage_by_id(no_price["id"])["is_paid"])
+
+    # Расписка: в окне сохранения нажали «Отмена» - ни файла, ни сообщений
+    real_save = h.m.filedialog.asksaveasfilename
+    h.m.filedialog.asksaveasfilename = lambda **kw: ""
+    try:
+        n = len(h.dialogs)
+        h.tires_select(no_price["id"])
+        saved = app.save_selected_tire_receipt()
+    finally:
+        h.m.filedialog.asksaveasfilename = real_save
+    h.check("расписка: отмена - ничего не сохранено, сообщений нет", saved is False and not h.dialogs_since(n))
+
+
 def test_booking_master_rejects(h):
     """«Записать клиента»: мастер уже записан на это время - отказ, ни одной записи; база тоже не даёт
     записать его второй раз; мастер на выходном в этот день - кнопка недоступна, с пометкой"""
@@ -489,4 +605,4 @@ def test_booking_master_rejects(h):
 
 TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_edit_rejects, test_positions_rejects,
          test_payment_rejects, test_finance_rejects, test_period_rejects, test_booking_master_rejects,
-         test_bookings_middle_click_nothing_to_scroll, test_tables_middle_click_nothing_to_scroll]
+         test_bookings_middle_click_nothing_to_scroll, test_tables_middle_click_nothing_to_scroll, test_tires_rejects]

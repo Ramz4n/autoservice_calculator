@@ -5,10 +5,10 @@ from datetime import date, timedelta
 
 PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799",
           "Т140ТТ799", "Т141ТТ799", "Т142ТТ799", "Т143ТТ799", "Т144ТТ799", "Т145ТТ799", "Т146ТТ799", "Т147ТТ799",
-          "Т148ТТ799", "Т149ТТ799"]
+          "Т148ТТ799", "Т149ТТ799", "Т150ТТ799", "Т151ТТ799", "Т152ТТ799", "Т153ТТ799"]
 PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108",
           "+79000000140", "+79000000141", "+79000000142", "+79000000143", "+79000000144", "+79000000145", "+79000000146", "+79000000147",
-          "+79000000148", "+79000000149"]
+          "+79000000148", "+79000000149", "+79000000150", "+79000000151", "+79000000152", "+79000000153"]
 
 
 def prepare(h):
@@ -786,7 +786,7 @@ def test_locales(h):
     empty = [(lang, key) for lang in langs for key, value in data[lang].items() if not str(value).strip()]
     h.check("пустых текстов нет", not empty, empty[:10])
     used = set()
-    for name in ("autoservice_calculator.py", "login_window.py"):
+    for name in ("autoservice_calculator.py", "login_window.py", "tire_storage.py"):
         text = open(os.path.join(base, name), encoding="utf-8").read()
         used |= {k for k in re.findall(r'\btr\(\s*["\']([a-z_]+\.[A-Za-z0-9_.]+)["\']', text)}
     # Ключ, собранный в коде (f"staff.short_{kind}"), - проверяем все его варианты
@@ -1033,9 +1033,13 @@ def test_bookings_middle_click_scroll(h):
         h.check("ещё раз колесо - выключена", not auto.active and auto.marker is None)
 
         auto.on_press(press)
-        tree.event_generate("<KeyPress-Escape>")
+        # Клавиши Tk отдаёт виджету с фокусом - он может быть где угодно в программе (тут - в поле поиска)
+        app.bookings_search_entry._entry.focus_force()   # как формы программы: окно тестов могло быть не активно
         h.root.update()
-        h.check("Esc - выключена", not auto.active and auto.marker is None)
+        focus = app.root.focus_get()
+        app.bookings_search_entry._entry.event_generate("<KeyPress-Escape>")
+        h.root.update()
+        h.check("Esc - выключена", not auto.active and auto.marker is None, focus)
 
         auto.on_press(press)
         app.root.event_generate("<ButtonPress-1>", x=10, y=10)
@@ -1167,6 +1171,346 @@ def test_tables_middle_click_scroll(h):
             auto.__dict__.pop("pointer", None)
         app.draw_staff_calendar()
         app.switch_tab("bookings")
+
+
+def test_tires_rules(h):
+    """Шины: как узнать шины среди запчастей (явно / возможно / нет), сезон, размер и «с дисками» по названию;
+    дата в поле - дд.мм.гггг / дд.мм.гг / через / и -; срок хранения по умолчанию - полгода; «срок истёк»"""
+    from tires import tire_match, guess_season, guess_size, guess_with_rims, default_store_until, display_status
+    from input_rules import parse_date
+    h.check("явно шины: шины / резина / покрышки / хранение колёс",
+            all(tire_match(n) == "strong" for n in ("Шины зимние", "Резина летняя 4 шт", "Покрышки Nokian",
+                                                     "Хранение колёс")))
+    h.check("возможно шины: «колёса»", tire_match("Колёса R16 зимние") == "weak")
+    h.check("не шины: колодки, колёсный цилиндр, шиномонтаж",
+            all(tire_match(n) is None for n in ("Колодки передние", "Колёсный цилиндр", "Шиномонтаж", "")))
+    h.check("сезон по названию", (guess_season("Шины зимние"), guess_season("Летняя резина"),
+                                  guess_season("Всесезонные шины"), guess_season("Шины")) ==
+            ("winter", "summer", "all", None))
+    h.check("размер по названию", (guess_size("Шины 205/55r16 зимние"), guess_size("шины 195/75 R16C"),
+                                   guess_size("Шины")) == ("205/55 R16", "195/75 R16C", None))
+    h.check("с дисками по названию", guess_with_rims("Колёса в сборе") and guess_with_rims("Шины на дисках")
+            and not guess_with_rims("Шины зимние"))
+    h.check("дата: дд.мм.гггг, дд.мм.гг, / и -",
+            parse_date("15.10.2026") == parse_date("15.10.26") == parse_date("15/10/2026") == parse_date("15-10-2026")
+            == date(2026, 10, 15))
+    h.check("пустая дата - можно, если поле необязательное", parse_date("  ", allow_empty=True) is None)
+    h.check("хранить до - через полгода", default_store_until(date(2026, 4, 1)) == date(2026, 10, 1))
+    h.check("на хранении и срок прошёл - «срок истёк»; выдано - выдано",
+            display_status("stored", date(2026, 1, 1), date(2026, 2, 1)) == "overdue"
+            and display_status("stored", date(2026, 3, 1), date(2026, 2, 1)) == "stored"
+            and display_status("issued", date(2026, 1, 1), date(2026, 2, 1)) == "issued"
+            and display_status("stored", None, date(2026, 2, 1)) == "stored")
+
+
+def test_tires_accept(h):
+    """«Склад» → «Шины» → «Принять шины»: новая машина и клиент создаются (как у запчасти), все поля сохраняются,
+    комплект в таблице «На хранении»; машина из базы - находится по госномеру; вкладки «Запчасти | Шины»"""
+    app = h.app
+    app.switch_tab("warehouse")
+    h.root.update()
+    h.check("на складе две вкладки: «Запчасти» и «Шины», открыты запчасти",
+            list(app.warehouse_page_labels) == ["parts", "tires"] and app.warehouse_page == "parts"
+            and app.warehouse_pages["parts"].winfo_ismapped() and not app.warehouse_pages["tires"].winfo_ismapped(),
+            (app.warehouse_page, app.warehouse_pages["parts"].winfo_ismapped()))
+    app.warehouse_show_page("tires")
+    h.root.update()
+    h.check("переключили на «Шины» - видна таблица шин, запчастей нет",
+            app.tires_tree.winfo_ismapped() and not app.warehouse_tree.winfo_ismapped())
+    received = date.today() - timedelta(days=3)
+    h.tires_form("т150тт799", "Kia", "Rio", "9000000150", "Тест Шины Один", season="winter", size="205/55 R16",
+                 tire_brand="Nokian Hakkapeliitta", qty="4", location="а-12", rims=True,
+                 received=received.strftime("%d.%m.%Y"), until="", price="3 500", paid=True,
+                 notes="Тест шины один")
+    tire = h.tire(notes="Тест шины один")
+    if not h.check("комплект сохранён", tire):
+        return
+    h.check("машина и клиент созданы, комплект за ней", tire["car_number"] == "Т150ТТ799"
+            and tire["client_phone"] == "+79000000150" and tire["client_name"] == "Тест Шины Один", tire)
+    h.check("поля: зимние, размер, марка, 4 шт., с дисками, ячейка большими буквами",
+            (tire["season"], tire["tire_size"], tire["tire_brand"], tire["quantity"], tire["with_rims"],
+             tire["location"]) == ("winter", "205/55 R16", "Nokian Hakkapeliitta", 4, True, "А-12"), tire)
+    h.check("даты, стоимость, оплачено, статус «на хранении»",
+            tire["received_date"] == received and tire["store_until"] is None and float(tire["price"]) == 3500
+            and tire["is_paid"] and tire["status"] == "stored" and tire["issued_date"] is None, tire)
+    h.check("после приёма открыта вкладка «Шины» и комплект в таблице",
+            app.warehouse_page == "tires" and any(t["id"] == tire["id"] for t in app.tires_rows.values()))
+    h.state["tire1"] = tire["id"]
+
+    # Машина уже в базе - по госномеру находится, новая не создаётся
+    cars_before = h.q("SELECT COUNT(*) FROM client_cars")[0][0]
+    h.tires_form("Т150ТТ799", season="summer", size="205/55 R16", location="Б-3", notes="Тест шины летние")
+    summer = h.tire(notes="Тест шины летние")
+    h.check("машина из базы - комплект за ней, новой машины нет",
+            summer and summer["car_id"] == tire["car_id"] and h.q("SELECT COUNT(*) FROM client_cars")[0][0] == cars_before)
+    h.check("по умолчанию: 4 шт., принято сегодня, хранить полгода, без дисков, не оплачено",
+            summer and summer["quantity"] == 4 and summer["received_date"] == date.today()
+            and summer["store_until"] == date.today() + timedelta(days=183) and not summer["with_rims"]
+            and not summer["is_paid"], summer)
+
+
+def test_tires_edit_issue(h):
+    """Шины: изменить комплект (двойной клик) - форма открывается с его данными, изменения сохраняются;
+    «Выдать клиенту» - «выдано» с сегодняшней датой; «Вернуть на хранение»; оплата; удаление"""
+    app = h.app
+    tire_id = h.state.get("tire1")
+    if not h.check("есть комплект из test_tires_accept", tire_id):
+        return
+    # Форма изменения - с данными комплекта
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("tires")
+    app.show_add_part_form("tires", tire_id=tire_id)
+    h.wait(300)
+    h.check("форма изменения: данные комплекта и машины",
+            app.tire_size_entry.get() == "205/55 R16" and app.tire_location_entry.get() == "А-12"
+            and app.tire_season_switch.get() == app.tr("tires.season_winter") and app.tire_rims_var.get()
+            and app.wh_car_number_entry.get() == "Т150ТТ799" and app.wh_selected_car_id is not None
+            and app.wh_ok_button.cget("text") == app.tr("common.save"),
+            (app.tire_size_entry.get(), app.tire_location_entry.get(), app.wh_car_number_entry.get()))
+    app.hide_add_part_form()
+    h.tires_form(None, season="all", location="В-7", qty="2", tire_id=tire_id)
+    tire = app.db.get_tire_storage_by_id(tire_id)
+    h.check("изменения сохранены, новой строки нет",
+            (tire["season"], tire["location"], tire["quantity"], tire["tire_size"]) == ("all", "В-7", 2, "205/55 R16")
+            and h.q("SELECT COUNT(*) FROM tire_storage WHERE notes = 'Тест шины один'")[0][0] == 1, tire)
+
+    if h.tires_select(tire_id):
+        app.set_selected_tires_paid(False)
+        h.check("снять оплату", not app.db.get_tire_storage_by_id(tire_id)["is_paid"])
+        h.tires_select(tire_id)
+        app.set_selected_tires_paid(True)
+        h.check("отметить оплату", app.db.get_tire_storage_by_id(tire_id)["is_paid"])
+        h.tires_select(tire_id)
+        app.issue_selected_tires()
+        tire = app.db.get_tire_storage_by_id(tire_id)
+        h.check("«Выдать клиенту» - выдано сегодня", tire["status"] == "issued" and tire["issued_date"] == date.today(),
+                tire)
+        h.tires_select(tire_id)
+        row = next(i for i, t in app.tires_rows.items() if t["id"] == tire_id)
+        h.check("в таблице - «Выдано»", app.tires_tree.set(row, "status") == app.tr("tires.status_issued"))
+        app.return_selected_tires()
+        tire = app.db.get_tire_storage_by_id(tire_id)
+        h.check("«Вернуть на хранение» - снова на хранении, дата выдачи стёрта",
+                tire["status"] == "stored" and tire["issued_date"] is None, tire)
+    else:
+        h.check("комплект виден в таблице", False)
+
+    summer = h.tire(notes="Тест шины летние")
+    if summer and h.tires_select(summer["id"]):
+        app.delete_selected_tires()
+        h.check("удалить - комплекта нет", app.db.get_tire_storage_by_id(summer["id"]) is None)
+
+
+def test_tires_filters(h):
+    """Шины: «Срок истёк» - на хранении и «хранить до» прошло (красным, своя фишка); фильтр по статусу и сезону;
+    поиск по размеру, ячейке, госномеру и телефону"""
+    app = h.app
+    h.tires_form("т151тт799", "Kia", "Rio", "9000000151", "Тест Шины Два", season="summer", size="185/65 R15",
+                 location="Г-1", notes="Тест шины просрочены")
+    old = h.tire(notes="Тест шины просрочены")
+    if not h.check("комплект сохранён", old):
+        return
+    h.q("UPDATE tire_storage SET received_date = %s, store_until = %s WHERE id = %s",
+        (date.today() - timedelta(days=200), date.today() - timedelta(days=10), old["id"]))
+    h.tires_select(old["id"])
+    row = next(i for i, t in app.tires_rows.items() if t["id"] == old["id"])
+    h.check("срок прошёл - «Срок истёк»", app.tires_tree.set(row, "status") == app.tr("tires.status_overdue")
+            and "overdue" in app.tires_tree.item(row, "tags"))
+    app.tires_status_filter = "overdue"
+    app.refresh_tires()
+    ids = {t["id"] for t in app.tires_rows.values()}
+    h.check("фишка «Срок истёк» - только просроченные", old["id"] in ids
+            and all(app.tires_tree.set(i, "status") == app.tr("tires.status_overdue") for i in app.tires_tree.get_children()))
+    app.tires_status_filter = "stored"
+    app.refresh_tires()
+    h.check("«На хранении» - вместе с просроченными", old["id"] in {t["id"] for t in app.tires_rows.values()})
+    app.tires_status_filter = "all"
+    app.tires_season_filter = "winter"
+    app.refresh_tires()
+    h.check("сезон «Зимние» - летних нет", old["id"] not in {t["id"] for t in app.tires_rows.values()}
+            and all(t["season"] == "winter" for t in app.tires_rows.values()))
+    app.tires_season_filter = None
+    for text in ("185/65", "г-1", "т151тт", "000000151"):
+        app.tires_search_entry.delete(0, "end")
+        app.tires_search_entry.insert(0, text)
+        app.refresh_tires()
+        h.check(f"поиск «{text}» находит комплект", old["id"] in {t["id"] for t in app.tires_rows.values()})
+    app.clear_tires_search()
+
+
+def test_tires_transfer(h):
+    """«Перенести из запчастей»: в списке - позиции, похожие на шины (не в наряде); явно шины отмечены сразу,
+    «колёса» и заказ «в пути» - нет; перенесённые - во вкладке «Шины» (сезон, размер, диски, оплата, машина,
+    название в примечании), из запчастей убраны; неотмеченные остались"""
+    app, db = h.app, h.app.db
+    h.warehouse_form("т152тт799", "Kia", "Rio", "9000000152", "Тест Перенос", part="Тест шины зимние 205/55 R16 на дисках",
+                     qty="4", price="2000", paid=True)
+    h.warehouse_form("Т152ТТ799", part="Тест колёса летние", qty="4", price="1000")
+    h.warehouse_form("Т152ТТ799", part="Тест резина в заказе", qty="4", price="9000")
+    h.warehouse_form("Т152ТТ799", part="Тест колодки шинные нет", qty="1", price="100")
+    h.warehouse_form("Т152ТТ799", part="Тест колодки передние", qty="1", price="100")
+    strong, weak, ordered = (h.warehouse_part(n) for n in ("Тест шины зимние 205/55 R16 на дисках", "Тест колёса летние",
+                                                           "Тест резина в заказе"))
+    for part in (strong, weak):
+        h.warehouse_set_status(part[0], "на складе")
+    h.warehouse_set_status(strong[0], "выдано")
+    h.warehouse_set_status(strong[0], "на складе")   # «выдано» → «на складе» (вопрос - «да»)
+
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("tires")
+    h.check("кнопка «перенести» видна", app.tires_transfer_btn.winfo_manager() == "pack")
+    app.open_tire_transfer()
+    h.root.update()
+    window = app._tire_transfer_window
+    boxes = {b.cget("text"): b for b in h.find_widgets(window, h.m.ctk.CTkCheckBox)}
+    find = lambda name: next((b for text, b in boxes.items() if text.startswith(name)), None)
+    h.check("в списке: шины, колёса, резина в заказе; колодок нет",
+            find("Тест шины зимние") and find("Тест колёса летние") and find("Тест резина в заказе")
+            and not find("Тест колодки передние"), list(boxes))
+    h.check("явно шины - отмечены", find("Тест шины зимние").get() == 1)
+    h.check("«колёса» и заказ «в пути» - не отмечены", find("Тест колёса летние").get() == 0
+            and find("Тест резина в заказе").get() == 0)
+    find("Тест колёса летние").select()
+    for box in boxes.values():   # чужие (не тестовые) позиции не трогаем
+        if not box.cget("text").startswith("Тест "):
+            box.deselect()
+    h.find_button(window, app.tr("tires.transfer_do")).invoke()
+    h.root.update()
+
+    moved = h.tire(from_part_id=strong[0])
+    h.check("шины перенесены: зимние, размер, с дисками, 4 шт., оплачено, машина, название в примечании",
+            moved and (moved["season"], moved["tire_size"], moved["with_rims"], moved["quantity"], moved["is_paid"],
+                       moved["car_number"], moved["status"]) == ("winter", "205/55 R16", True, 4, True, "Т152ТТ799",
+                                                                 "stored")
+            and "Тест шины зимние" in moved["notes"] and float(moved["price"]) == 2000, moved)
+    wheels = h.tire(from_part_id=weak[0])
+    h.check("отмеченные «колёса» - тоже перенесены (летние)", wheels and wheels["season"] == "summer")
+    h.check("перенесённые убраны из запчастей", not h.warehouse_part("Тест шины зимние 205/55 R16 на дисках")
+            and not h.warehouse_part("Тест колёса летние"))
+    h.check("неотмеченные остались в запчастях", h.warehouse_part("Тест резина в заказе")
+            and h.warehouse_part("Тест колодки передние"))
+    h.check("окно закрыто", not app._tire_transfer_window)
+
+
+def test_tires_hint_soon_receipt(h):
+    """Шины на хранении: при поиске машины по госномеру (одном на все формы) - вторая строка «🛞 На хранении: ...»
+    в «Добавить работу» и на складе; выдали - подсказки нет. «Хранить до» через 5 дней - «Скоро срок»
+    (своя фишка, входит в «На хранении»); колонка телефона. Расписка - PDF с клиентом, шинами, ячейкой, ценой"""
+    import os, tempfile
+    from reportlab import platypus
+    app, db = h.app, h.app.db
+    h.tires_form("т153тт799", "Kia", "Rio", "9000000153", "Тест Шины Подсказка", season="winter", size="225/45 R18",
+                 location="Д-4", price="2500", paid=True, notes="Тест шины подсказка",
+                 until=(date.today() + timedelta(days=5)).strftime("%d.%m.%Y"))
+    tire = h.tire(notes="Тест шины подсказка")
+    if not h.check("комплект сохранён", tire):
+        return
+    hint = app.tr("tires.hint_stored", sets="").strip()
+    text = app.find_car_by_plate("Т153ТТ799")["text"]
+    h.check("поиск машины: вторая строка - шины на хранении (сезон, размер, ячейка)",
+            hint in text and "225/45 R18" in text and "Д-4" in text and text.count("\n") == 1, text)
+    shown = lambda: (app.works_tires_label.winfo_ismapped() and hint in app.works_tires_label.cget("text")
+                     and "225/45 R18" in app.works_tires_label.cget("text"))
+    h.works_form("Т153ТТ799", master=None, save=False)
+    h.root.update()
+    h.check("«Добавить работу», вписали госномер: строка про шины видна", shown(), app.works_tires_label.cget("text"))
+    h.check("и не повторяется в строке «машина найдена»", hint not in (app.works_lookup_text or ""))
+    app.clear_work_form()
+    h.root.update()
+    h.check("очистили форму - строки про шины нет", not app.works_tires_label.winfo_ismapped())
+
+    # Клиент записан - работу начинают из записи: выбор записи в списке и «Записи» → «Редактировать наряд»
+    h.booking_form("Т153ТТ799", None, None, None, None, day=date.today() + timedelta(days=1))
+    booking = h.q("SELECT b.id FROM bookings b JOIN client_cars cc ON cc.id = b.car_id "
+                  "WHERE cc.car_number = 'Т153ТТ799' ORDER BY b.id DESC LIMIT 1")
+    if h.check("запись сохранена", booking):
+        booking_id = booking[0][0]
+        app.switch_tab("works")
+        app.clear_work_form()
+        app.refresh_bookings_combo()
+        choice = next((text for text, info in app.bookings_data.items() if info["id"] == booking_id), None)
+        if choice:
+            app.booking_combo.set(choice)
+            app.on_booking_select(choice)
+            h.root.update()
+            h.check("«Добавить работу», выбрали запись: строка про шины видна", shown(),
+                    app.works_tires_label.cget("text"))
+            app.clear_work_form()
+        app.switch_tab("bookings")
+        app.bookings_show_all_time = True
+        app.refresh_bookings()
+        item = next((i for i in app.bookings_tree.get_children()
+                     if str(app.bookings_tree.item(i, "values")[0]) == str(booking_id)), None)
+        if h.check("запись есть в «Записях»", item):
+            app.bookings_tree.selection_set(item)
+            app.edit_booking_in_add_work()
+            h.root.update()
+            h.check("«Записи» → «Редактировать наряд»: строка про шины видна", shown(),
+                    app.works_tires_label.cget("text"))
+            app.clear_work_form()
+        app.bookings_show_all_time = False
+    app.switch_tab("warehouse")
+    app.show_add_part_form()
+    h.wait(300)
+    app.fill_wh_car_number("Т153ТТ799")
+    h.check("склад: подсказка про шины", hint in app.wh_car_info_label.cget("text"), app.wh_car_info_label.cget("text"))
+    app.hide_add_part_form()
+
+    # «Скоро срок» и телефон
+    h.tires_select(tire["id"])
+    row = next(i for i, t in app.tires_rows.items() if t["id"] == tire["id"])
+    h.check("срок через 5 дней - «Скоро срок»", app.tires_tree.set(row, "status") == app.tr("tires.status_soon"))
+    h.check("колонка телефона", app.tires_tree.set(row, "phone") == app.display_phone("+79000000153"),
+            app.tires_tree.set(row, "phone"))
+    app.tires_status_filter = "soon"
+    app.refresh_tires()
+    h.check("фишка «Скоро срок» - комплект в списке", tire["id"] in {t["id"] for t in app.tires_rows.values()})
+    app.tires_status_filter = "stored"
+    app.refresh_tires()
+    h.check("«На хранении» - вместе со «скоро срок»", tire["id"] in {t["id"] for t in app.tires_rows.values()})
+    app.tires_status_filter = "all"
+
+    # Расписка
+    folder = tempfile.mkdtemp(prefix="alexan_test_receipt_")
+    path = os.path.join(folder, "receipt.pdf")
+    captured, real_save, real_build = [], h.m.filedialog.asksaveasfilename, platypus.SimpleDocTemplate.build
+
+    def walk(item):
+        if isinstance(item, platypus.Paragraph):
+            captured.append(item.getPlainText())
+        elif isinstance(item, platypus.Table):
+            for cells in item._cellvalues:
+                for cell in cells:
+                    walk(cell) if not isinstance(cell, str) else captured.append(cell)
+        elif isinstance(item, (list, tuple)):
+            for x in item:
+                walk(x)
+
+    def build(doc, flowables, *a, **kw):
+        walk(flowables)
+        return real_build(doc, flowables, *a, **kw)
+    h.m.filedialog.asksaveasfilename = lambda **kw: path
+    platypus.SimpleDocTemplate.build = build
+    try:
+        h.tires_select(tire["id"])
+        n = len(h.dialogs)
+        app.save_selected_tire_receipt()
+    finally:
+        h.m.filedialog.asksaveasfilename = real_save
+        platypus.SimpleDocTemplate.build = real_build
+    ok_file = os.path.exists(path) and open(path, "rb").read(5) == b"%PDF-"
+    h.check("расписка: PDF создан, «сохранена» показано",
+            ok_file and any(d[0] == "showinfo" and path in d[2] for d in h.dialogs_since(n)), h.dialogs_since(n))
+    joined = " | ".join(captured)
+    h.check("расписка: номер, клиент, госномер, размер, ячейка, цена, подписи",
+            all(x in joined for x in (app.tr("tires.receipt_title", number=tire["id"]), "Тест Шины Подсказка",
+                                      "Т153ТТ799", "225/45 R18", "Д-4", app.format_currency(2500),
+                                      app.tr("tires.receipt_handed"))), joined[:400])
+
+    # Выдали - подсказки нет
+    h.tires_select(tire["id"])
+    app.issue_selected_tires()
+    h.check("выдали - при поиске машины подсказки про шины нет", hint not in app.find_car_by_plate("Т153ТТ799")["text"])
 
 
 def test_booking_with_master(h):
@@ -1369,4 +1713,5 @@ TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booki
          test_warehouse_existing_car, test_warehouse_new_car, test_edit_data, test_delete_booking_with_work,
          test_positions, test_finance_category_follows_switch, test_users_and_roles,
          test_locales, test_login, test_bookings_no_phone_red, test_bookings_row_colors, test_bookings_middle_click_scroll, test_tables_middle_click_scroll,
+         test_tires_rules, test_tires_accept, test_tires_edit_issue, test_tires_filters, test_tires_transfer, test_tires_hint_soon_receipt,
          test_booking_slot_tooltip, test_period_follows_new_day, test_booking_with_master]

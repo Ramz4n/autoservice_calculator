@@ -42,6 +42,29 @@ def parse_quantity(text, allow_empty=True):
     return value
 
 
+DATE_MIN_YEAR, DATE_MAX_YEAR = 2000, 2100
+
+
+def parse_date(text, allow_empty=False):
+    """Дата из поля: дд.мм.гггг (или дд.мм.гг; разделитель - точка, / или -). Возвращает date,
+    None - если поле пустое и allow_empty. Неверная дата (31.02, год вне 2000..2100, буквы) - ValueError"""
+    from datetime import date
+    raw = re.sub(r"\s", "", str(text or ""))
+    if not raw:
+        if allow_empty:
+            return None
+        raise ValueError("пусто")
+    match = re.fullmatch(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})", raw)
+    if not match:
+        raise ValueError(raw)
+    day, month, year = (int(x) for x in match.groups())
+    if len(match.group(3)) == 2:
+        year += 2000
+    if not DATE_MIN_YEAR <= year <= DATE_MAX_YEAR:
+        raise ValueError(raw)
+    return date(year, month, day)   # 31.02 - ValueError
+
+
 def parse_percent(text):
     """Процент 0..100 включительно (запятая или точка). Неверное - ValueError"""
     raw = re.sub(r"\s", "", str(text or "")).replace(",", ".")

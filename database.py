@@ -1191,10 +1191,14 @@ class Database:
         return expenses
 
     def delete_expense(self, expense_id):
-        """Удалить расход (и связанную премию мастера, если это была она - см. add_worker_bonus)"""
+        """Удалить расход (и связанную премию мастера, если это была она - см. add_worker_bonus);
+        доход за хранение шин - комплект становится неоплаченным (см. _sync_tire_income)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM worker_bonuses WHERE expense_id = %s", (expense_id,))
+        # Доход за хранение шин удалили - комплект снова не оплачен
+        cursor.execute("UPDATE tire_storage SET is_paid = 0, paid_date = NULL, income_id = NULL WHERE income_id = %s",
+                       (expense_id,))
         cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
         conn.commit()
         conn.close()
@@ -2762,6 +2766,263 @@ class Database:
         parts = cursor.fetchall()
         conn.close()
         return parts
+
+    # --- Шины на хранении («Склад» → «Шины», tires.py) ---
+    # Оплаченное хранение - доход: строка в expenses (is_income=1), tire_storage.income_id - ссылка на неё,
+    # дата дохода - paid_date. Каждое изменение комплекта сверяет доход (_sync_tire_income) в той же транзакции.
+    # income - функция (комплект-словарь) -> (категория, описание) на языке программы
+
+    TIRE_INCOME_CATEGORY = "Хранение шин"   # если программа не передала свою подпись (income=None)
+
+    _TIRE_SELECT = """
+        SELECT ts.id, ts.car_id, cc.car_number, cc.car_brand, cc.car_model,
+               cl.full_name, cl.phone, ts.season, ts.tire_size, ts.tire_brand, ts.quantity, ts.with_rims,
+               ts.location, ts.received_date, ts.store_until, ts.price, ts.is_paid, ts.status,
+               ts.issued_date, ts.notes, ts.from_part_id, ts.paid_date, ts.income_id
+        FROM tire_storage ts
+        LEFT JOIN client_cars cc ON ts.car_id = cc.id
+        LEFT JOIN clients cl ON cc.client_id = cl.id
+    """
+    _TIRE_KEYS = ("id", "car_id", "car_number", "car_brand", "car_model", "client_name", "client_phone",
+                  "season", "tire_size", "tire_brand", "quantity", "with_rims", "location", "received_date",
+                  "store_until", "price", "is_paid", "status", "issued_date", "notes", "from_part_id",
+                  "paid_date", "income_id")
+
+    def _tire_row(self, row):
+        data = dict(zip(self._TIRE_KEYS, row))
+        data["with_rims"] = bool(data["with_rims"])
+        data["is_paid"] = bool(data["is_paid"])
+        return data
+
+    def _sync_tire_income(self, cursor, tire_id, income=None):
+        """Доход за хранение - как у комплекта: оплачено и есть цена - строка дохода (новая или исправленная:
+        сумма, дата оплаты, описание); не оплачено / цены нет - строки дохода нет"""
+        cursor.execute(self._TIRE_SELECT + " WHERE ts.id = %s", (tire_id,))
+        row = cursor.fetchone()
+        if not row:
+            return
+        tire = self._tire_row(row)
+        income_id = tire["income_id"]
+        if income_id:
+            cursor.execute("SELECT id FROM expenses WHERE id = %s", (income_id,))
+            if not cursor.fetchone():
+                income_id = None   # доход удалили - создадим заново, если комплект оплачен
+        if tire["is_paid"] and tire["price"] and float(tire["price"]) > 0:
+            day = tire["paid_date"] or tire["received_date"]
+            category, description = income(tire) if income else (self.TIRE_INCOME_CATEGORY, self.TIRE_INCOME_CATEGORY)
+            if income_id:
+                cursor.execute("UPDATE expenses SET description = %s, amount = %s, expense_date = %s, category = %s "
+                               "WHERE id = %s", (description, tire["price"], day, category, income_id))
+            else:
+                cursor.execute("INSERT INTO expenses (description, amount, expense_date, category, is_income) "
+                               "VALUES (%s, %s, %s, %s, 1)", (description, tire["price"], day, category))
+                income_id = cursor.lastrowid
+            cursor.execute("UPDATE tire_storage SET income_id = %s, paid_date = %s WHERE id = %s",
+                           (income_id, day, tire_id))
+        else:
+            if income_id:
+                cursor.execute("DELETE FROM expenses WHERE id = %s", (income_id,))
+            cursor.execute("UPDATE tire_storage SET income_id = NULL WHERE id = %s", (tire_id,))
+
+    def _tire_transaction(self, action):
+        """action(cursor) в одной транзакции; результат action"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            result = action(cursor)
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def add_tire_storage(self, car_id, season, tire_size, tire_brand, quantity, with_rims, location,
+                         received_date, store_until, price, is_paid, notes, income=None):
+        """Принять шины на хранение. Оплачено сразу - доход в день приёма. Возвращает id"""
+        def action(cursor):
+            cursor.execute("""
+                INSERT INTO tire_storage (car_id, season, tire_size, tire_brand, quantity, with_rims, location,
+                                          received_date, store_until, price, is_paid, paid_date, notes, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'stored')
+            """, (car_id, season, tire_size, tire_brand, quantity, int(bool(with_rims)), location,
+                  received_date, store_until, price, int(bool(is_paid)), received_date if is_paid else None, notes))
+            tire_id = cursor.lastrowid
+            self._sync_tire_income(cursor, tire_id, income)
+            return tire_id
+        return self._tire_transaction(action)
+
+    def update_tire_storage(self, tire_id, car_id, season, tire_size, tire_brand, quantity, with_rims, location,
+                            received_date, store_until, price, is_paid, notes, income=None):
+        """Изменить данные комплекта (статус меняет set_tire_storage_status). Стал оплаченным - доход сегодня,
+        уже был оплачен - дата оплаты прежняя (сумма дохода - новая цена), снята оплата - дохода нет"""
+        from datetime import date
+
+        def action(cursor):
+            cursor.execute("SELECT is_paid, paid_date FROM tire_storage WHERE id = %s", (tire_id,))
+            old = cursor.fetchone()
+            if not old:
+                return False
+            paid_date = (old[1] or date.today()) if is_paid and old[0] else (date.today() if is_paid else None)
+            cursor.execute("""
+                UPDATE tire_storage SET car_id = %s, season = %s, tire_size = %s, tire_brand = %s, quantity = %s,
+                       with_rims = %s, location = %s, received_date = %s, store_until = %s, price = %s,
+                       is_paid = %s, paid_date = %s, notes = %s
+                WHERE id = %s
+            """, (car_id, season, tire_size, tire_brand, quantity, int(bool(with_rims)), location,
+                  received_date, store_until, price, int(bool(is_paid)), paid_date, notes, tire_id))
+            self._sync_tire_income(cursor, tire_id, income)
+            return True
+        return self._tire_transaction(action)
+
+    def get_all_tire_storage(self):
+        """Все комплекты (словари), сначала свежие"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(self._TIRE_SELECT + " ORDER BY ts.received_date DESC, ts.id DESC")
+        rows = [self._tire_row(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    def get_tire_storage_by_id(self, tire_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(self._TIRE_SELECT + " WHERE ts.id = %s", (tire_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return self._tire_row(row) if row else None
+
+    def get_stored_tires_by_car(self, car_id):
+        """Комплекты машины, которые сейчас на хранении (для подсказки в формах)"""
+        if not car_id:
+            return []
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(self._TIRE_SELECT + " WHERE ts.car_id = %s AND ts.status = 'stored' ORDER BY ts.id",
+                       (car_id,))
+        rows = [self._tire_row(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    def set_tire_storage_status(self, tire_id, status, issued_date=None):
+        """'issued' - выдано (с датой выдачи), 'stored' - снова на хранении (дата выдачи стирается)"""
+        from datetime import date
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        if status == "issued":
+            cursor.execute("UPDATE tire_storage SET status = 'issued', issued_date = %s WHERE id = %s",
+                           (issued_date or date.today(), tire_id))
+        else:
+            cursor.execute("UPDATE tire_storage SET status = 'stored', issued_date = NULL WHERE id = %s", (tire_id,))
+        conn.commit()
+        conn.close()
+
+    def set_tire_storage_paid(self, tire_id, is_paid, income=None, paid_date=None):
+        """Оплачено (доход - сегодня или paid_date) / не оплачено (дохода нет)"""
+        from datetime import date
+
+        def action(cursor):
+            cursor.execute("SELECT is_paid FROM tire_storage WHERE id = %s", (tire_id,))
+            old = cursor.fetchone()
+            if not old:
+                return False
+            if is_paid and not old[0]:
+                cursor.execute("UPDATE tire_storage SET is_paid = 1, paid_date = %s WHERE id = %s",
+                               (paid_date or date.today(), tire_id))
+            elif not is_paid:
+                cursor.execute("UPDATE tire_storage SET is_paid = 0, paid_date = NULL WHERE id = %s", (tire_id,))
+            self._sync_tire_income(cursor, tire_id, income)
+            return True
+        return self._tire_transaction(action)
+
+    def delete_tire_storage(self, tire_id):
+        """Удалить комплект (внесён по ошибке) вместе с его доходом"""
+        def action(cursor):
+            cursor.execute("SELECT income_id FROM tire_storage WHERE id = %s", (tire_id,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                cursor.execute("DELETE FROM expenses WHERE id = %s", (row[0],))
+            cursor.execute("DELETE FROM tire_storage WHERE id = %s", (tire_id,))
+        self._tire_transaction(action)
+
+    def get_tire_storage_income_by_period(self, date_from, date_to):
+        """Оплаченное хранение за период (по дате оплаты): (количество комплектов, сумма)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*), COALESCE(SUM(e.amount), 0)
+            FROM tire_storage ts JOIN expenses e ON e.id = ts.income_id
+            WHERE e.expense_date BETWEEN %s AND %s
+        """, (date_from, date_to))
+        count, total = cursor.fetchone()
+        conn.close()
+        return int(count), float(total)
+
+    def tire_location_taken(self, location, exclude_id=None):
+        """Другой комплект на хранении в этой ячейке (словарь) или None. Пустая ячейка - None"""
+        location = (location or "").strip()
+        if not location:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(self._TIRE_SELECT + " WHERE ts.status = 'stored' AND UPPER(TRIM(ts.location)) = UPPER(%s)"
+                       " AND ts.id <> %s ORDER BY ts.id LIMIT 1", (location, exclude_id or 0))
+        row = cursor.fetchone()
+        conn.close()
+        return self._tire_row(row) if row else None
+
+    def get_tire_like_warehouse_parts(self):
+        """Позиции склада запчастей, похожие на шины (для переноса во вкладку «Шины»): словари с полем
+        match = "strong" / "weak" (tires.tire_match). Детали в наряде («установлена») не переносятся"""
+        from tires import tire_match
+        result = []
+        for row in self.get_all_warehouse_parts():
+            part_id, car_number, car_brand, car_model, client_name, client_phone, \
+                part_name, quantity, price, status, order_date, received_date, notes, car_id, is_paid = row
+            match = tire_match(part_name)
+            if not match or status == "установлена":
+                continue
+            result.append({"id": part_id, "car_number": car_number, "car_brand": car_brand, "car_model": car_model,
+                           "client_name": client_name, "part_name": part_name, "quantity": quantity, "price": price,
+                           "status": status, "order_date": order_date, "received_date": received_date,
+                           "notes": notes, "car_id": car_id, "is_paid": bool(is_paid), "match": match})
+        return result
+
+    def move_warehouse_part_to_tires(self, part_id, income=None):
+        """Перенести позицию склада запчастей во вкладку «Шины» (одной транзакцией: новая строка шин
+        и удаление запчасти). Сезон, размер и «с дисками» - угадываются по названию, название - в примечание.
+        Оплаченная - доход на дату приёма (раньше нигде не считался). Возвращает id комплекта;
+        None - позиции нет или она в наряде («установлена»)"""
+        from tires import guess_season, guess_size, guess_with_rims
+
+        def action(cursor):
+            cursor.execute("""SELECT car_id, part_name, quantity, price, status, order_date, received_date,
+                                     notes, is_paid
+                              FROM warehouse_parts WHERE id = %s FOR UPDATE""", (part_id,))
+            row = cursor.fetchone()
+            if not row or row[4] == "установлена":
+                return None
+            car_id, part_name, quantity, price, status, order_date, received_date, notes, is_paid = row
+            received = received_date or order_date
+            issued = status == "выдано"
+            note = " ".join(str(part_name or "").split())
+            if notes:
+                note += "; " + " ".join(str(notes).split())
+            cursor.execute("""
+                INSERT INTO tire_storage (car_id, season, tire_size, tire_brand, quantity, with_rims, location,
+                                          received_date, store_until, price, is_paid, paid_date, status,
+                                          issued_date, notes, from_part_id)
+                VALUES (%s, %s, %s, NULL, %s, %s, NULL, %s, NULL, %s, %s, %s, %s, %s, %s, %s)
+            """, (car_id, guess_season(part_name), guess_size(part_name), quantity or 4,
+                  int(guess_with_rims(part_name)), received, price, int(bool(is_paid)),
+                  received if is_paid else None, "issued" if issued else "stored", received if issued else None,
+                  note, part_id))
+            tire_id = cursor.lastrowid
+            cursor.execute("DELETE FROM warehouse_parts WHERE id = %s", (part_id,))
+            self._sync_tire_income(cursor, tire_id, income)
+            return tire_id
+        return self._tire_transaction(action)
 
     # ──────────────────────────────────────────────────────
     # --- Методы авторизации и управления пользователями ---

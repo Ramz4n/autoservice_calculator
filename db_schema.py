@@ -232,6 +232,38 @@ TABLES = {
             INDEX idx_worker_absences_dates (worker_id, date_from, date_to)
         ) ENGINE=InnoDB
     ''',
+
+    # Шины клиентов на хранении («Склад» → «Шины»). Не запчасти: их принимают и через сезон выдают.
+    # season: summer / winter / all; status: stored (на хранении) / issued (выдано) - «срок истёк»
+    # считается по store_until. from_part_id - позиция склада запчастей, из которой перенесли (tires.py).
+    # Оплаченное хранение - доход: строка в expenses (is_income=1) со ссылкой income_id на дату оплаты paid_date
+    # (Database._sync_tire_income); удалили доход в «Финансах» - комплект снова не оплачен
+    'tire_storage': '''
+        CREATE TABLE IF NOT EXISTS tire_storage (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            car_id INT,
+            season VARCHAR(10) DEFAULT NULL,
+            tire_size VARCHAR(50) DEFAULT NULL,
+            tire_brand VARCHAR(100) DEFAULT NULL,
+            quantity INT NOT NULL DEFAULT 4,
+            with_rims TINYINT(1) NOT NULL DEFAULT 0,
+            location VARCHAR(50) DEFAULT NULL,
+            received_date DATE NOT NULL,
+            store_until DATE DEFAULT NULL,
+            price DECIMAL(12,2) DEFAULT NULL,
+            is_paid TINYINT(1) NOT NULL DEFAULT 0,
+            status VARCHAR(20) NOT NULL DEFAULT 'stored',
+            issued_date DATE DEFAULT NULL,
+            notes TEXT,
+            from_part_id INT DEFAULT NULL,
+            paid_date DATE DEFAULT NULL,
+            income_id INT DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_tire_storage_car_id (car_id),
+            INDEX idx_tire_storage_status (status),
+            FOREIGN KEY (car_id) REFERENCES client_cars(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB
+    ''',
 }
 
 # Индексы для быстрого поиска
@@ -312,4 +344,7 @@ MIGRATIONS = [
     # Один мастер на одно время - одна активная запись (Database.worker_busy_booking)
     "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS worker_id INT DEFAULT NULL",
     "ALTER TABLE bookings ADD INDEX IF NOT EXISTS idx_bookings_worker_datetime (worker_id, booking_date, booking_time)",
+    # Хранение шин - доход: дата оплаты и строка дохода в «Финансах» (expenses), см. Database._sync_tire_income
+    "ALTER TABLE tire_storage ADD COLUMN IF NOT EXISTS paid_date DATE DEFAULT NULL",
+    "ALTER TABLE tire_storage ADD COLUMN IF NOT EXISTS income_id INT DEFAULT NULL",
 ]

@@ -15,7 +15,7 @@ PLATES = ["Т301ТТ799", "Т302ТТ799", "Т303ТТ799", "Т304ТТ799", "Т305
           "Т323ТТ799", "Т324ТТ799", "Т325ТТ799",
           "Т326ТТ799", "Т327ТТ799", "Т328ТТ799", "Т329ТТ799", "Т330ТТ799", "Т331ТТ799", "Т332ТТ799",
           "Т333ТТ799", "Т334ТТ799", "Т335ТТ799", "Т336ТТ799",
-          "Т337ТТ799", "Т338ТТ799", "Т339ТТ799"]
+          "Т337ТТ799", "Т338ТТ799", "Т339ТТ799", "Т340ТТ799", "Т341ТТ799"]
 PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+79000000305", "+79000000306",
           "+79000000307", "+79000000308", "+79000000309", "+79000000310", "+79000000311", "+79000000312",
           "+79000000313", "+79000000314", "+79000000315", "+79000000316", "+79000000317", "+79000000318",
@@ -25,7 +25,7 @@ PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+7900
           "+79000000327", "+79000000328",
           "+79000000329", "+79000000330", "+79000000331", "+79000000332", "+79000000334", "+79000000335",
           "+79000000336", "+79000000337", "+79000000338", "+79000000339",
-          "+79000000340", "+79000000341", "+79000000342"]
+          "+79000000340", "+79000000341", "+79000000342", "+79000000343", "+79000000344"]
 MASTER = "Тест Мастер"
 STAFF_POSITION, STAFF = "Тест-администратор", "Тест Админ"   # должность НЕ «с машинами»
 
@@ -2039,6 +2039,133 @@ def test_statistics_monthly(h):
     app.toggle_period_lock("statistics")
 
 
+def test_tires_leave_parts(h):
+    """Шины, записанные запчастью «на складе», предлагались в «Добавить работу» → «Со склада»; после переноса
+    во вкладку «Шины» - не предлагаются, на складе запчастей их нет, во вкладке «Шины» - есть (поиск по госномеру).
+    Приём шин на хранение не создаёт ни нарядов, ни расходов (оплата - доход, см. test_tires_income).
+    Удалили комплект - пропал из «Шин», запчасти не вернулись"""
+    app, db = h.app, h.app.db
+    plate = "Т340ТТ799"
+    h.warehouse_form("т340тт799", "Kia", "Rio", "9000000343", "Тест Шины Связи", part="Тест шины связи зимние",
+                     qty="4", price="1500", paid=True)
+    part = h.warehouse_part("Тест шины связи зимние")
+    h.warehouse_set_status(part[0], "на складе")
+    h.works_form(plate, master=None, save=False)
+    h.check("до переноса: шины предлагаются «Со склада» в «Добавить работу»",
+            any(p[1] == "Тест шины связи зимние" for p in app.current_car_warehouse_parts),
+            app.current_car_warehouse_parts)
+    app.clear_work_form()
+
+    tire_id = db.move_warehouse_part_to_tires(part[0])
+    h.check("перенесены", tire_id and not h.warehouse_part("Тест шины связи зимние"))
+    h.works_form(plate, master=None, save=False)
+    h.check("после переноса: в «Добавить работу» «Со склада» их нет",
+            all(p[1] != "Тест шины связи зимние" for p in app.current_car_warehouse_parts),
+            app.current_car_warehouse_parts)
+    app.clear_work_form()
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("parts")
+    app.warehouse_search_entry.delete(0, "end")
+    app.warehouse_search_entry.insert(0, plate)
+    app.refresh_warehouse()
+    h.check("на складе запчастей по госномеру их нет",
+            all("Тест шины связи" not in str(app.warehouse_tree.item(i, "values")) for i in app.warehouse_tree.get_children()))
+    app.clear_warehouse_search()
+    app.warehouse_show_page("tires")
+    app.tires_search_entry.delete(0, "end")
+    app.tires_search_entry.insert(0, plate)
+    app.refresh_tires()
+    h.check("во вкладке «Шины» по госномеру - есть", any(t["id"] == tire_id for t in app.tires_rows.values()))
+    app.clear_tires_search()
+
+    counts = lambda: (h.q("SELECT COUNT(*) FROM works")[0][0],
+                      h.q("SELECT COUNT(*) FROM expenses WHERE is_income = 0 OR is_income IS NULL")[0][0])
+    before = counts()
+    h.tires_form(plate, season="summer", price="2500", paid=True, notes="Тест шины связи летние")
+    h.check("приём шин с оплатой - ни нарядов, ни расходов (только доход - test_tires_income)", h.tire(notes="Тест шины связи летние") and counts() == before,
+            (before, counts()))
+
+    if h.tires_select(tire_id):
+        app.delete_selected_tires()
+    h.check("удалили комплект - в «Шинах» нет, в запчасти не вернулся", db.get_tire_storage_by_id(tire_id) is None
+            and not h.warehouse_part("Тест шины связи зимние"))
+
+
+def test_tires_income(h):
+    """Хранение шин - доход: принято с оплатой - доход «Хранение шин» в «Финансах» в день приёма, в «Отчётах»
+    («Прочие доходы» и прибыль) и в «Статистике» (вид работ «Хранение шин»); сняли оплату - дохода нет;
+    отметили оплату - доход сегодня; поменяли цену - та же строка дохода с новой суммой; удалили доход
+    в «Финансах» - комплект не оплачен; удалили комплект - доход убран; без оплаты дохода нет;
+    перенос оплаченной запчасти-шин - доход на дату приёма"""
+    app, db = h.app, h.app.db
+    today = date.today()
+    total = lambda: float(db.get_total_income_by_period(today, today))
+    income_of = lambda tire_id: h.q("SELECT e.amount, e.expense_date, e.category, e.description, e.id "
+                                    "FROM tire_storage ts JOIN expenses e ON e.id = ts.income_id WHERE ts.id = %s",
+                                    (tire_id,))
+    before = total()
+    h.tires_form("т341тт799", "Kia", "Rio", "9000000344", "Тест Шины Доход", season="winter", size="215/60 R17",
+                 price="2000", paid=True, notes="Тест шины доход")
+    tire = h.tire(notes="Тест шины доход")
+    if not h.check("комплект с оплатой сохранён", tire and tire["is_paid"]):
+        return
+    row = income_of(tire["id"])
+    h.check("доход «Хранение шин» 2000 в день приёма, в описании шины и машина",
+            row and float(row[0][0]) == 2000 and row[0][1] == today and row[0][2] == app.tr("tires.income_category")
+            and "215/60 R17" in row[0][3] and "Т341ТТ799" in row[0][3], row)
+    h.check("«Отчёты»: прочие доходы за сегодня +2000", total() - before == 2000, (before, total()))
+    app.switch_tab("reports")
+    app.generate_report(show_empty_message=False)
+    h.check("«Отчёты»: в подсказке доходов - «Хранение шин»",
+            any(app.tr("tires.income_category") == r[0] and "215/60 R17" in r[1]
+                for r in db.get_detailed_income_by_period(today, today)))
+    app.switch_tab("expenses")
+    h.check("«Финансы»: доход в истории", any("215/60 R17" in str(app.expenses_tree.item(i, "values"))
+                                             for i in app.expenses_tree.get_children()))
+    app.switch_tab("statistics")
+    app.generate_statistics(show_empty_message=False)
+    stats = {name: (count, money) for name, count, money in app._stats_work_rows}
+    h.check("«Статистика»: вид работ «Хранение шин» с суммой",
+            stats.get(app.tr("tires.income_category"), (0, 0))[1] >= 2000, stats.get(app.tr("tires.income_category")))
+
+    h.tires_select(tire["id"])
+    app.set_selected_tires_paid(False)
+    h.check("сняли оплату - дохода нет", not income_of(tire["id"]) and total() == before, (total(), before))
+    h.tires_select(tire["id"])
+    app.set_selected_tires_paid(True)
+    row = income_of(tire["id"])
+    h.check("отметили оплату - доход сегодня", row and row[0][1] == today and total() - before == 2000)
+    first_income = row[0][4] if row else None
+    h.tires_form(None, price="3000", paid=True, tire_id=tire["id"])
+    row = income_of(tire["id"])
+    h.check("поменяли цену - та же строка дохода, сумма 3000", row and row[0][4] == first_income
+            and float(row[0][0]) == 3000 and total() - before == 3000, row)
+
+    db.delete_expense(first_income)
+    fresh = db.get_tire_storage_by_id(tire["id"])
+    h.check("удалили доход в «Финансах» - комплект не оплачен", not fresh["is_paid"] and fresh["income_id"] is None
+            and total() == before, fresh)
+    h.tires_select(tire["id"])
+    app.set_selected_tires_paid(True)
+    h.tires_select(tire["id"])
+    app.delete_selected_tires()
+    h.check("удалили комплект - доход убран", total() == before and db.get_tire_storage_by_id(tire["id"]) is None)
+
+    h.tires_form("Т341ТТ799", season="summer", price="1500", paid=False, notes="Тест шины без оплаты")
+    unpaid = h.tire(notes="Тест шины без оплаты")
+    h.check("без оплаты - дохода нет", unpaid and not income_of(unpaid["id"]) and total() == before)
+
+    # Перенос оплаченной запчасти-шин - доход на дату приёма
+    h.warehouse_form("Т341ТТ799", part="Тест шины доход перенос", qty="4", price="1200", paid=True)
+    part = h.warehouse_part("Тест шины доход перенос")
+    h.warehouse_set_status(part[0], "на складе")
+    received = h.warehouse_part("Тест шины доход перенос")[4]
+    moved = db.move_warehouse_part_to_tires(part[0], income=app.tire_income_texts)
+    row = income_of(moved) if moved else None
+    h.check("перенос оплаченной - доход 1200 на дату приёма", row and float(row[0][0]) == 1200
+            and row[0][1] == received, (row, received))
+
+
 TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_works_one_record,
          test_warehouse_chain, test_staff_payment, test_finance_entries, test_report_other_period,
          test_new_owner, test_fire_worker, test_cancel_booking_with_works,
@@ -2049,4 +2176,5 @@ TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_w
          test_change_worker_position, test_backup_restore, test_slot_capacity,
          test_work_parts_mileage_vin, test_warehouse_edit_search_goto,
          test_staff_calendar_clicks, test_settings_dictionaries, test_info_windows_and_pdf,
-         test_complete_twice, test_statistics_monthly]
+         test_complete_twice, test_statistics_monthly,
+         test_tires_leave_parts, test_tires_income]

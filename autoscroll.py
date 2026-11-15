@@ -294,3 +294,12 @@ def enable_autoscroll(root):
     for class_name in AUTOSCROLL_CLASSES:
         root.bind_class(class_name, "<ButtonPress-2>", press, add="+")
         root.bind_class(class_name, "<ButtonRelease-2>", release, add="+")
+    # Esc выключает прокрутку, где бы ни был фокус клавиатуры (в поле поиска, в другом окне программы)
+    root.bind_all("<Escape>", lambda event: stop_all(), add="+")
+
+
+def stop_all():
+    """Выключить все включённые прокрутки"""
+    for auto in list(MiddleClickAutoscroll._instances.values()):
+        if auto.active:
+            auto.stop()

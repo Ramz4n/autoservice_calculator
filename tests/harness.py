@@ -20,13 +20,13 @@ import tkinter.messagebox as mb
 import customtkinter as ctk
 import pymysql
 
-TABLES = ["works", "parts", "bookings", "warehouse_parts", "client_cars", "clients", "workers", "positions",
+TABLES = ["works", "parts", "bookings", "warehouse_parts", "tire_storage", "client_cars", "clients", "workers", "positions",
           "worker_bonuses", "expenses", "worker_absences", "users", "car_brands", "car_models", "keywords"]
 # Порядок удаления при уборке (сначала зависимые)
-CLEANUP_ORDER = ["parts", "works", "worker_bonuses", "worker_absences", "warehouse_parts", "bookings",
+CLEANUP_ORDER = ["parts", "works", "worker_bonuses", "worker_absences", "warehouse_parts", "tire_storage", "bookings",
                  "expenses", "client_cars", "clients", "workers", "positions", "users", "car_models", "car_brands",
                  "keywords"]
-WATCH = ["works", "bookings", "warehouse_parts", "client_cars", "clients", "workers", "positions"]
+WATCH = ["works", "bookings", "warehouse_parts", "tire_storage", "client_cars", "clients", "workers", "positions"]
 
 
 class Harness:
@@ -328,6 +328,64 @@ class Harness:
             self.root.update()
         if close:
             app.hide_add_part_form()
+
+    def tires_form(self, plate, brand=None, model=None, phone10=None, name=None, season="winter", size=None,
+                   tire_brand=None, qty=None, location=None, received=None, until=None, price=None, paid=None,
+                   rims=None, notes=None, tire_id=None, save=True, close=True, to_catalog=True):
+        """Склад → «Шины» → «Принять шины» (или изменить комплект tire_id): госномер, данные новой машины,
+        раздел «Шины», «Принять на хранение». season - summer / winter / all / None (не выбран).
+        Поля, переданные как None, остаются как в форме"""
+        app = self.app
+        if to_catalog and brand and model:
+            self.ensure_catalog_car(brand, model)
+        app.switch_tab("warehouse")
+        app.warehouse_show_page("tires")
+        app.show_add_part_form("tires", tire_id=tire_id)
+        self.wait(300)
+        if plate is not None:
+            e = app.wh_car_number_entry
+            e.delete(0, "end"); e.insert(0, plate); e._entry.event_generate("<FocusOut>")
+            self.root.update()
+        for entry, value in ((app.wh_new_brand_entry, brand), (app.wh_new_model_entry, model),
+                             (app.wh_new_client_name_entry, name), (app.tire_size_entry, size),
+                             (app.tire_brand_entry, tire_brand), (app.tire_quantity_entry, qty),
+                             (app.tire_location_entry, location), (app.tire_received_entry, received),
+                             (app.tire_until_entry, until), (app.tire_price_entry, price),
+                             (app.tire_notes_entry, notes)):
+            if value is not None:
+                entry.delete(0, "end"); entry.insert(0, value)
+        if phone10 is not None:
+            app.set_phone_value(app.wh_phone_entry, phone10)
+        app.tire_season_switch.set(app.tr(f"tires.season_{season}") if season else "")
+        if paid is not None:
+            app.tire_paid_var.set(paid)
+        if rims is not None:
+            app.tire_rims_var.set(rims)
+        if save:
+            app.add_warehouse_part()
+            self.root.update()
+        if close:
+            app.hide_add_part_form()
+
+    def tire(self, **where):
+        """Комплект шин (словарь из базы) по полю: tire(notes=...) / tire(location=...) - последний"""
+        (column, value), = where.items()
+        r = self.q(f"SELECT id FROM tire_storage WHERE {column} = %s ORDER BY id DESC LIMIT 1", (value,))
+        return self.app.db.get_tire_storage_by_id(r[0][0]) if r else None
+
+    def tires_select(self, tire_id):
+        """Склад → «Шины»: выделить строку комплекта. False - строки нет в списке"""
+        app = self.app
+        app.switch_tab("warehouse")
+        app.warehouse_show_page("tires")
+        app.tires_show_all_time = True
+        app.tires_status_filter, app.tires_season_filter = "all", None
+        app.refresh_tires()
+        item = next((i for i, t in app.tires_rows.items() if t["id"] == tire_id), None)
+        if item is None:
+            return False
+        app.tires_tree.selection_set(item)
+        return True
 
     def edit_form(self, booking_id, changes):
         """«Записи» → ПКМ → «Изменить данные клиента и машины» для записи booking_id.

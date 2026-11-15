@@ -37,6 +37,7 @@ from input_rules import parse_money, parse_quantity, parse_percent, MONEY_MAX, Q
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
 from autoscroll import MiddleClickAutoscroll, enable_autoscroll
+from tire_storage import TireStorageMixin
 import backup as backup_module
 
 # Стандартная длина VIN
@@ -562,7 +563,7 @@ class ClientCarChips:
         self.frame.pack(**self.pack_kwargs)
 
 
-class AutoServiceApp:
+class AutoServiceApp(TireStorageMixin):
     """Главный класс приложения"""
 
     def __init__(self, root, current_user=None):
@@ -868,11 +869,13 @@ class AutoServiceApp:
             self.works_sync_warehouse_parts()
             # и список мастеров - кто сегодня по расписанию отсутствует
             self.refresh_workers_combo()
+            # шины машины в форме - как сейчас на складе (могли выдать или принять)
+            self.works_refresh_tires_hint(force=True)
         elif current_tab == "staff":
             self.refresh_staff_tab()
         elif current_tab == "warehouse":
-            # Автоматически обновляем список запчастей на складе
-            self.refresh_warehouse()
+            # Автоматически обновляем открытую вкладку склада (запчасти или шины)
+            self.refresh_warehouse_page()
         elif current_tab == "statistics":
             # Автоматически обновляем статистику при переключении на вкладку
             self.generate_statistics(show_empty_message=False)
@@ -1288,9 +1291,11 @@ class AutoServiceApp:
         ctk.CTkButton(btn_frame, text=self.tr("common.cancel"), command=cancel_command, width=120, height=40,
                       corner_radius=8, font=("Arial", 14), fg_color="transparent", border_width=1,
                       border_color="#9e9e9e", text_color="#424242", hover_color="#e0e0e0").pack(side=tk.RIGHT)
-        ctk.CTkButton(btn_frame, text=ok_text, command=ok_command, height=40,
-                      corner_radius=8, font=("Arial", 15, "bold"), fg_color="#2e7d32",
-                      hover_color="#1b5e20").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        ok_button = ctk.CTkButton(btn_frame, text=ok_text, command=ok_command, height=40,
+                                  corner_radius=8, font=("Arial", 15, "bold"), fg_color="#2e7d32",
+                                  hover_color="#1b5e20")
+        ok_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        return ok_button
 
     def form_bind_keys(self, window, content, on_ok, on_cancel, hide_popups):
         """Enter - основная кнопка, Esc - отмена. Если открыт список подсказок - Enter/Esc сначала для него"""
@@ -2540,9 +2545,12 @@ class AutoServiceApp:
 
         # Строка результата поиска ("✓ Машина есть в базе — ...") - видна, когда есть текст
         self.works_lookup_status = ctk.CTkLabel(body, text="", font=("Arial", 13, "bold"), anchor="w")
+        # Шины клиента на хранении - для машины в форме, как бы она сюда ни попала (госномер, телефон, запись)
+        self.works_tires_label = ctk.CTkLabel(body, text="", font=("Arial", 13, "bold"), anchor="w", justify="left",
+                                              text_color="#1565c0", wraplength=620)
 
         # Марка | Модель | VIN | Пробег
-        car_row = ctk.CTkFrame(body, fg_color="transparent")
+        car_row = self.works_car_row = ctk.CTkFrame(body, fg_color="transparent")
         car_row.pack(fill=tk.X, pady=(0, 6))
         self.car_brand_entry = self.works_cell(car_row, 0, self.tr("works.car_brand"),
                                                self.works_entry(car_row, 120), 120, required=True)
@@ -2674,9 +2682,28 @@ class AutoServiceApp:
                     or getattr(self, "works_list", None)
                     or getattr(self, "parts_list", None))
 
+    def works_refresh_tires_hint(self, force=False):
+        """Строка «🛞 На хранении: ...» под госномером - шины машины, которая сейчас в форме. База читается,
+        только когда госномер сменился (или force - вернулись на вкладку: шины могли выдать)"""
+        label = getattr(self, "works_tires_label", None)
+        if label is None or getattr(self, "works_car_row", None) is None or not hasattr(self, "car_number_entry"):
+            return   # форма ещё строится
+        number = self.car_number_entry.get().strip().upper()
+        if force or number != getattr(self, "_works_tires_number", None):
+            self._works_tires_number = number
+            cars = self.db.get_all_clients_by_car_number(number) if len(number) >= self.PLATE_MIN else []
+            self._works_tires_text = self.tire_hint_text(cars[0]["car_id"]) if cars else ""
+        if self._works_tires_text:
+            label.configure(text=self._works_tires_text)
+            label.pack(fill=tk.X, pady=(0, 6), before=self.works_car_row)
+        else:
+            label.configure(text="")
+            label.pack_forget()
+
     def works_update_card_marks(self):
         """Рамки карточек, когда запись начата: что заполнено - зелёным, чего не хватает - оранжевым.
         "Работы" - есть ли работы; "Запись и мастер" - выбран ли мастер. Пустая форма - без цвета"""
+        self.works_refresh_tires_hint()
         started = self.works_form_started()
         works_card = getattr(self, "works_card", None)
         if works_card is not None:
@@ -3541,7 +3568,8 @@ class AutoServiceApp:
         if not name:
             self.client_name_entry.focus_set()
         if same:
-            self.works_set_lookup_state("found", self.car_found_text(dict(car, client_name=car["owner_name"])))
+            self.works_set_lookup_state("found", self.car_found_text(dict(car, client_name=car["owner_name"]),
+                                                                     with_tires=False))   # шины - своей строкой
         else:
             self.works_set_lookup_state("new", self.tr("works.lookup_owner_change",
                                                        owner=car["owner_name"] or self.tr("common.no_name")))
@@ -3701,10 +3729,14 @@ class AutoServiceApp:
         """Марка и модель одной строкой: "Hyundai Tucson" """
         return " ".join(x for x in (car.get("car_brand"), car.get("car_model")) if x)
 
-    def car_found_text(self, car):
-        """Строка "машина найдена" - одинаковая во всех формах: "✓ Hyundai Tucson — Иван" """
-        return self.tr("plates.car_found", car=self.car_title(car) or self.tr("works.new_car"),
+    def car_found_text(self, car, with_tires=True):
+        """Строка "машина найдена" - одинаковая во всех формах: "✓ Hyundai Tucson — Иван"
+        (и второй строкой - шины на хранении, если есть)"""
+        text = self.tr("plates.car_found", car=self.car_title(car) or self.tr("works.new_car"),
                        name=car.get("client_name") or self.tr("common.no_name"))
+        # У машины шины на хранении - видно сразу при записи, в наряде и на складе
+        tires = self.tire_hint_text(car.get("car_id")) if with_tires else ""
+        return text + "\n" + tires if tires else text
 
     def works_open_car_record(self, car_number):
         """Ввели (или поправили) госномер машины, у которой уже есть запись в работе - открываем эту запись,
@@ -3779,7 +3811,7 @@ class AutoServiceApp:
                                   "filled": self.autofilled_diff(fields, before)}
         self.works_phone_fill = {"digits": phone_mask_digits(self.client_phone_entry.get()), "filled": {}}
         self.works_mark_autofilled(before)
-        self.works_set_lookup_state("found", self.car_found_text(client_info))
+        self.works_set_lookup_state("found", self.car_found_text(client_info, with_tires=False))   # шины - своей строкой
         self.works_lock_filled()
         # Всё подставили - курсор сразу в "Пробег"
         self.mileage_entry.focus_set()
@@ -4884,8 +4916,10 @@ class AutoServiceApp:
 
     def setup_warehouse_tab(self):
         """Вкладка "Склад" - как "Записи": один ряд (статусы с количеством, поиск по мере ввода, кнопки),
-        таблица со статусом полоской слева, светлое меню, двойной клик - редактирование"""
-        top = ctk.CTkFrame(self.warehouse_frame, fg_color="transparent")
+        таблица со статусом полоской слева, светлое меню, двойной клик - редактирование.
+        Две вкладки: «Запчасти» (заказы) и «Шины» (хранение шин клиентов - tire_storage.py)"""
+        page = self.setup_warehouse_pages()
+        top = ctk.CTkFrame(page, fg_color="transparent")
         top.pack(fill=tk.X, padx=10, pady=(10, 6))
 
         # Статусы - фишками с количеством (слева)
@@ -4915,7 +4949,7 @@ class AutoServiceApp:
                       fg_color="transparent", text_color="gray45", hover_color="#e0e0e0").pack(side=tk.LEFT, padx=(2, 0))
 
         # Низ: "Показано N из M" и "за 3 месяца / за всё время"
-        bottom = ctk.CTkFrame(self.warehouse_frame, fg_color="transparent")
+        bottom = ctk.CTkFrame(page, fg_color="transparent")
         bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 6))
         self.warehouse_range_btn = ctk.CTkButton(bottom, text="", width=10, height=24, fg_color="transparent",
                                                  text_color="#1565c0", hover_color="#e3f2fd",
@@ -4924,7 +4958,7 @@ class AutoServiceApp:
         self.warehouse_count_label.pack(side=tk.RIGHT)
 
         # Таблица
-        table_frame = ctk.CTkFrame(self.warehouse_frame, fg_color="white", corner_radius=10, border_width=1,
+        table_frame = ctk.CTkFrame(page, fg_color="white", corner_radius=10, border_width=1,
                                    border_color=self.FORM_CARD_BORDER)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
 
@@ -5029,8 +5063,9 @@ class AutoServiceApp:
         self.add_part_form_frame = ctk.CTkFrame(self.warehouse_frame)
         self.add_part_form_visible = False
 
-    def show_add_part_form(self):
-        """Показать форму добавления запчасти"""
+    def show_add_part_form(self, mode="part", tire_id=None):
+        """Показать форму добавления запчасти. mode="tires" - та же форма для шин на хранение
+        (клиент и машина - как у запчасти, вместо раздела «Запчасть» - «Шины»); tire_id - изменить комплект"""
         # Окно уже открыто - просто поднимаем его. Раньше кнопка работала как переключатель,
         # и после закрытия окна крестиком (флаг не сбрасывался) открывалась только со второго нажатия
         if self.add_part_form_visible and self.add_part_form_frame.winfo_exists():
@@ -5041,6 +5076,7 @@ class AutoServiceApp:
         # Окно строится один раз (заранее, вскоре после запуска) - дальше только сброс формы и показ
         window = self._ensure_part_window()
         self.reset_add_part_form()
+        self.wh_set_form_mode(mode, tire_id)
         self.show_dim_overlay(self.wh_part_overlay)
         delay = 40 if self._part_window_fresh else 1   # сразу после построения CustomTkinter ещё перекрашивает заголовок
         self._part_window_fresh = False
@@ -5169,6 +5205,8 @@ class AutoServiceApp:
 
         # === ЗАПЧАСТЬ: название | кол-во | цена - в одну строку ===
         _, part_body = self.form_section(content, self.tr("warehouse.part_label"))
+        # Заголовок и карточка раздела - в режиме «Шины» вместо них раздел шин (build_tire_form_section)
+        self.wh_part_section = content.winfo_children()[-2:]
         row = ctk.CTkFrame(part_body, fg_color="transparent")
         row.pack(fill=tk.X)
         self.wh_part_name_entry = self.works_cell(row, 0, self.tr("warehouse.part_name_label"), self.form_entry(row),
@@ -5204,8 +5242,13 @@ class AutoServiceApp:
         self.wh_notes_entry = self.form_entry(part_body)
         self.wh_notes_entry.pack(fill=tk.X)
 
+        # === ШИНЫ (режим «Принять шины»): сезон, размер, ячейка, сроки, стоимость хранения ===
+        self.wh_tire_section = self.build_tire_form_section(content)
+        self.wh_form_mode = "part"
+
         # Кнопки: широкая "Заказать" и "Отмена"; Enter - заказать, Esc - отмена
-        self.form_buttons(window, self.tr("warehouse.order_btn"), self.add_warehouse_part, self.hide_add_part_form)
+        self.wh_ok_button = self.form_buttons(window, self.tr("warehouse.order_btn"), self.add_warehouse_part,
+                                              self.hide_add_part_form)
         self.form_bind_keys(window, content, self.add_warehouse_part, self.hide_add_part_form,
                             lambda: (self.wh_car_hints.hide(),
                                      self.hide_popup(self.wh_part_listbox)))
@@ -5508,9 +5551,132 @@ class AutoServiceApp:
             overlay.withdraw()
         self.add_part_form_visible = False
 
-    def add_warehouse_part(self):
-        """Добавить запчасть на склад"""
+    def wh_set_form_mode(self, mode, tire_id=None):
+        """Форма склада: "part" - заказать запчасть, "tires" - принять шины / изменить комплект tire_id"""
+        self.wh_form_mode = mode
+        self.wh_editing_tire_id = tire_id if mode == "tires" else None
+        for widget in self.wh_part_section + self.wh_tire_section:
+            widget.pack_forget()
+        title, card = self.wh_tire_section if mode == "tires" else self.wh_part_section
+        title.pack(fill=tk.X, padx=4, pady=(4, 2))
+        card.pack(fill=tk.X, pady=(0, 8))
+        if mode == "tires":
+            self.reset_tire_form(tire_id)
+            text = self.tr("tires.edit_title") if tire_id else self.tr("tires.accept")
+            button = self.tr("common.save") if tire_id else self.tr("tires.accept_btn")
+        else:
+            text, button = self.tr("warehouse.order_part"), self.tr("warehouse.order_btn")
+        self.add_part_form_frame.title(text)
+        self.wh_ok_button.configure(text=button)
+        self.fit_form_window(self.add_part_form_frame)
+
+    WH_CAR_ABORT = object()   # wh_form_car_id: остановились (предупреждение уже показано)
+
+    def wh_form_car_id(self, require_car=False):
+        """Машина формы склада: найденная по госномеру / телефону или новая (клиент и машина создаются).
+        Возвращает car_id, None (без машины - можно только запчасти) или WH_CAR_ABORT.
+        require_car - машина обязательна (шины на хранении - всегда чьи-то)"""
         car_number = self.wh_car_number_entry.get().strip().upper()
+
+        # По телефону показан список машин клиента, а машину не выбрали и госномер не вписали - подсвечиваем
+        # список (иначе запчасть молча ушла бы на склад без машины)
+        if not car_number and self.wh_phone_cars_combo.winfo_manager():
+            self.form_combo_error(self.wh_phone_cars_combo, True)
+            self.wh_phone_cars_combo.focus_set()
+            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_client_car"),
+                                   parent=self.add_part_form_frame)
+            return self.WH_CAR_ABORT
+
+        if require_car and not car_number:
+            self.form_mark_error(self.wh_car_number_entry, "works.msg_enter_car_number", self.add_part_form_frame)
+            return self.WH_CAR_ABORT
+
+        # Используем car_id если машина найдена
+        car_id = self.wh_selected_car_id if hasattr(self, 'wh_selected_car_id') else None
+
+        # Если госномер введён, но машина не найдена — пробуем найти автоматически
+        if car_number and car_id is None:
+            result = self.find_car_by_plate(car_number)
+            if result["status"] == "found":
+                car_id = result["car"].get("car_id")
+                self.wh_selected_car_id = car_id
+            elif require_car and not self.wh_new_car_visible:
+                # Госномер не найден, а форма новой машины ещё не открыта - открываем: нужны марка и модель
+                self.search_car_for_warehouse()
+                if not self.wh_new_car_visible:
+                    self.form_mark_error(self.wh_car_number_entry, "works.msg_enter_car_number",
+                                         self.add_part_form_frame)
+                    return self.WH_CAR_ABORT
+
+        # Форма новой машины открыта (например, поиском по телефону), а госномер не введён
+        if car_id is None and self.wh_new_car_visible and not car_number:
+            self.form_mark_error(self.wh_car_number_entry, "works.msg_enter_car_number", self.add_part_form_frame)
+            return self.WH_CAR_ABORT
+
+        # Если машина не найдена и форма новой машины видна — создаём клиента и машину
+        if car_id is None and self.wh_new_car_visible and car_number:
+            brand = self.wh_new_brand_entry.get().strip()
+            model = self.wh_new_model_entry.get().strip()
+            client_name = self.wh_new_client_name_entry.get().strip()
+            phone_digits = phone_mask_digits(self.wh_phone_entry.get())
+
+            if not brand:
+                self.form_mark_error(self.wh_new_brand_entry, "warehouse.msg_enter_car_brand", self.add_part_form_frame)
+                return self.WH_CAR_ABORT
+            # Модель обязательна, как в "Записать клиента" и "Добавить работу"
+            if not model:
+                self.form_mark_error(self.wh_new_model_entry, "works.msg_enter_model", self.add_part_form_frame)
+                return self.WH_CAR_ABORT
+            # Марка и модель - только из справочника «Марки и модели»
+            names = catalog_car_names(self, self.wh_new_brand_entry, self.wh_new_model_entry, self.add_part_form_frame)
+            if not names:
+                return self.WH_CAR_ABORT
+            brand, model = names
+
+            # Проверка телефона: должен быть +7 и 10 цифр
+            if len(phone_digits) != 10:
+                self.form_mark_error(self.wh_phone_entry, "warehouse.msg_enter_full_phone", self.add_part_form_frame)
+                return self.WH_CAR_ABORT
+            phone = "+7" + phone_digits
+
+            # Новая машина - проверить госномер (пропущена первая буква, не те буквы)
+            if not self.confirm_new_plate(car_number, self.add_part_form_frame, self.wh_car_number_entry):
+                return self.WH_CAR_ABORT
+
+            # Создаём или находим клиента
+            client_id = self.db.get_or_create_client(
+                full_name=client_name if client_name else None,
+                phone=phone if phone else None,
+                car_number=car_number
+            )
+
+            # Создаём машину
+            car_id = self.db.get_or_create_car(
+                client_id=client_id,
+                car_brand=brand,
+                car_model=model,
+                car_number=car_number
+            )
+
+        if car_id is None and require_car:
+            self.form_mark_error(self.wh_car_number_entry, "works.msg_enter_car_number", self.add_part_form_frame)
+            return self.WH_CAR_ABORT
+
+        # Предупреждение: госномер введён, но машина не привязана
+        if car_number and car_id is None:
+            result = messagebox.askyesno(
+                self.tr("common.attention"),
+                self.tr("warehouse.msg_car_not_found_confirm", car_number=car_number),
+                parent=self.add_part_form_frame   # поверх окна формы, а не под затемнением
+            )
+            if not result:
+                return self.WH_CAR_ABORT
+        return car_id
+
+    def add_warehouse_part(self):
+        """Добавить запчасть на склад (в режиме «Шины» - принять шины / сохранить комплект)"""
+        if getattr(self, "wh_form_mode", "part") == "tires":
+            return self.save_tire_storage_form()
         part_name = " ".join(self.wh_part_name_entry.get().split())
         quantity_str = self.wh_quantity_entry.get().strip()
         price_str = self.wh_price_entry.get().strip()
@@ -5534,84 +5700,9 @@ class AutoServiceApp:
                                  max=self.format_money_limit())
             return
 
-        # По телефону показан список машин клиента, а машину не выбрали и госномер не вписали - подсвечиваем
-        # список (иначе запчасть молча ушла бы на склад без машины)
-        if not car_number and self.wh_phone_cars_combo.winfo_manager():
-            self.form_combo_error(self.wh_phone_cars_combo, True)
-            self.wh_phone_cars_combo.focus_set()
-            messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_select_client_car"),
-                                   parent=self.add_part_form_frame)
+        car_id = self.wh_form_car_id()
+        if car_id is self.WH_CAR_ABORT:
             return
-
-        # Используем car_id если машина найдена
-        car_id = self.wh_selected_car_id if hasattr(self, 'wh_selected_car_id') else None
-
-        # Если госномер введён, но машина не найдена — пробуем найти автоматически
-        if car_number and car_id is None:
-            result = self.find_car_by_plate(car_number)
-            if result["status"] == "found":
-                car_id = result["car"].get("car_id")
-                self.wh_selected_car_id = car_id
-
-        # Форма новой машины открыта (например, поиском по телефону), а госномер не введён
-        if car_id is None and self.wh_new_car_visible and not car_number:
-            self.form_mark_error(self.wh_car_number_entry, "works.msg_enter_car_number", self.add_part_form_frame)
-            return
-
-        # Если машина не найдена и форма новой машины видна — создаём клиента и машину
-        if car_id is None and self.wh_new_car_visible and car_number:
-            brand = self.wh_new_brand_entry.get().strip()
-            model = self.wh_new_model_entry.get().strip()
-            client_name = self.wh_new_client_name_entry.get().strip()
-            phone_digits = phone_mask_digits(self.wh_phone_entry.get())
-
-            if not brand:
-                self.form_mark_error(self.wh_new_brand_entry, "warehouse.msg_enter_car_brand", self.add_part_form_frame)
-                return
-            # Модель обязательна, как в "Записать клиента" и "Добавить работу"
-            if not model:
-                self.form_mark_error(self.wh_new_model_entry, "works.msg_enter_model", self.add_part_form_frame)
-                return
-            # Марка и модель - только из справочника «Марки и модели»
-            names = catalog_car_names(self, self.wh_new_brand_entry, self.wh_new_model_entry, self.add_part_form_frame)
-            if not names:
-                return
-            brand, model = names
-
-            # Проверка телефона: должен быть +7 и 10 цифр
-            if len(phone_digits) != 10:
-                self.form_mark_error(self.wh_phone_entry, "warehouse.msg_enter_full_phone", self.add_part_form_frame)
-                return
-            phone = "+7" + phone_digits
-
-            # Новая машина - проверить госномер (пропущена первая буква, не те буквы)
-            if not self.confirm_new_plate(car_number, self.add_part_form_frame, self.wh_car_number_entry):
-                return
-
-            # Создаём или находим клиента
-            client_id = self.db.get_or_create_client(
-                full_name=client_name if client_name else None,
-                phone=phone if phone else None,
-                car_number=car_number
-            )
-
-            # Создаём машину
-            car_id = self.db.get_or_create_car(
-                client_id=client_id,
-                car_brand=brand,
-                car_model=model,
-                car_number=car_number
-            )
-
-        # Предупреждение: госномер введён, но машина не привязана
-        if car_number and car_id is None:
-            result = messagebox.askyesno(
-                self.tr("common.attention"),
-                self.tr("warehouse.msg_car_not_found_confirm", car_number=car_number),
-                parent=self.add_part_form_frame   # поверх окна формы, а не под затемнением
-            )
-            if not result:
-                return
 
         self.db.add_warehouse_part(
             car_id=car_id,
@@ -7930,6 +8021,12 @@ class AutoServiceApp:
                 entry = work_stats.setdefault(key, {"count": 0, "total": 0.0})
                 entry["count"] += 1
                 entry["total"] += price
+        # Хранение шин - тоже услуга: комплекты, оплаченные за период, и сумма
+        tire_count, tire_total = self.db.get_tire_storage_income_by_period(date_from, date_to)
+        if tire_count:
+            entry = work_stats.setdefault(self.tr("tires.income_category"), {"count": 0, "total": 0.0})
+            entry["count"] += tire_count
+            entry["total"] += tire_total
         self._stats_work_rows = sorted(
             [(name, data["count"], data["total"]) for name, data in work_stats.items()],
             key=lambda r: r[1], reverse=True
@@ -8438,6 +8535,11 @@ class AutoServiceApp:
                          foreground="#c62828", activeforeground="white", activebackground="#c62828")
         self.bookings_tree.bind("<Button-3>", self.show_bookings_context_menu)
         self.bookings_tree.bind("<Double-1>", self._bookings_double_click)
+
+    @staticmethod
+    def make_tree_tooltip(tree, columns):
+        """Подсказка с полным текстом ячейки, если он обрезан (для таблиц из других модулей)"""
+        return TreeviewTooltip(tree, columns=columns)
 
     def _bookings_double_click(self, event):
         """Двойной клик по записи - окно "Информация" """
