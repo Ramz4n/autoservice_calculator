@@ -15,14 +15,82 @@ import customtkinter as ctk
 
 from input_rules import parse_money, parse_quantity, parse_date, QUANTITY_MAX
 from tires import (SEASONS, STATUS_STORED, STATUS_ISSUED, STATUS_OVERDUE, STATUS_SOON, DEFAULT_QUANTITY,
-                   default_store_until, display_status)
+                   COMMON_WIDTH_PROFILES, COMMON_RADII, default_store_until, display_status, split_size,
+                   size_from_fields, rim_of, rim_sort_key)
 
 TIRE_TEXT_LIMITS = {"tire_size": 50, "tire_brand": 100, "location": 50}   # как в базе (VARCHAR)
 
 
+class SuggestList:
+    """Список под полем: вошли в поле - все варианты, вводят - подходящие (без учёта «/», пробелов, R);
+    выбрали мышью / Enter - значение в поле, курсор дальше (on_pick). Вписать своё тоже можно"""
+
+    def __init__(self, app, entry, parent, values, on_pick=None):
+        self.app, self.entry, self.values, self.on_pick = app, entry, values, on_pick
+        self.listbox = app.form_popup_listbox(parent)
+        self.listbox.bind("<ButtonRelease-1>", self.pick)
+        self.listbox.bind("<Return>", self.pick)
+        entry.bind("<KeyRelease>", self.on_key, add="+")
+        entry.bind("<FocusIn>", self.on_key, add="+")
+        entry.bind("<Down>", self.on_down, add="+")
+        entry.bind("<FocusOut>", lambda e: entry.after(200, self._focus_check), add="+")
+
+    @staticmethod
+    def key(text):
+        return "".join(ch for ch in str(text or "").lower() if ch.isalnum() and ch not in "rzрз")
+
+    def matches(self):
+        text = self.key(self.entry.get())
+        values = self.values()
+        return [v for v in values if text in self.key(v)] if text else list(values)
+
+    def on_key(self, event=None):
+        if event is not None and getattr(event, "keysym", None) in ("Down", "Up", "Return", "Escape", "Tab"):
+            return
+        found = self.matches()
+        if not found or (len(found) == 1 and found[0] == self.entry.get().strip()):
+            return self.hide()
+        self.listbox.delete(0, tk.END)
+        for value in found:
+            self.listbox.insert(tk.END, value)
+        self.app.place_popup(self.listbox, self.entry)
+
+    def on_down(self, event=None):
+        if self.listbox.popup_frame.winfo_ismapped():
+            self.listbox.focus_set()
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(0)
+            self.listbox.activate(0)
+            return "break"
+
+    def pick(self, event=None):
+        selection = self.listbox.curselection()
+        if selection:
+            self.entry.delete(0, tk.END)
+            self.entry.insert(0, self.listbox.get(selection[0]))
+        self.hide()
+        if self.on_pick:
+            self.on_pick()
+        return "break"
+
+    def hide(self):
+        self.app.hide_popup(self.listbox)
+
+    def _focus_check(self):
+        try:
+            if self.app.root.focus_get() is not self.listbox:
+                self.hide()
+        except (KeyError, tk.TclError):
+            self.hide()
+
+
 class TireStorageMixin:
-    TIRE_STATUS_COLORS = {STATUS_STORED: "#22c55e", STATUS_SOON: "#f59e0b", STATUS_OVERDUE: "#ef4444",
+    TIRE_STATUS_COLORS = {STATUS_STORED: "#22c55e", STATUS_SOON: "#f59e0b", STATUS_OVERDUE: "#e53935",
                           STATUS_ISSUED: "#9e9e9e"}
+    # Фон строки - как в «Записях»: светлый оттенок цвета полоски (зелёный, жёлтый, красный, серый);
+    # без чередования через строку
+    TIRE_ROW_COLORS = {STATUS_STORED: "#edf7f0", STATUS_SOON: "#fdf7e7", STATUS_OVERDUE: "#fcf0f0",
+                       STATUS_ISSUED: "#f3f4f6"}
     TIRE_RECENT_DAYS = 92    # «Все» и «Выдано» по умолчанию - за 3 месяца
     TIRE_COLUMNS = ("id", "car_info", "client", "phone", "season", "size", "brand", "quantity", "rims", "location",
                     "received", "until", "price", "paid", "status", "notes")
@@ -102,6 +170,7 @@ class TireStorageMixin:
 
         self.tires_status_filter = "all"     # all / stored / overdue / issued
         self.tires_season_filter = None      # None / summer / winter / all
+        self.tires_radius_filter = None      # None / "R16" (посадочный диаметр, rim_of)
         self.tires_show_all_time = False
         self.tires_status_bar = ctk.CTkFrame(top, fg_color="transparent")
         self.tires_status_bar.pack(side=tk.LEFT)
@@ -130,6 +199,9 @@ class TireStorageMixin:
         second.pack(fill=tk.X, padx=10, pady=(0, 6))
         self.tires_season_bar = ctk.CTkFrame(second, fg_color="transparent")
         self.tires_season_bar.pack(side=tk.LEFT)
+        # Радиусы (R15, R16 …) - фишками рядом с сезоном
+        self.tires_radius_bar = ctk.CTkFrame(second, fg_color="transparent")
+        self.tires_radius_bar.pack(side=tk.LEFT, padx=(12, 0))
         self.tires_transfer_btn = ctk.CTkButton(
             second, text="", command=self.open_tire_transfer, height=30, corner_radius=8, font=("Arial", 12),
             fg_color="#fff3e0", hover_color="#ffe0b2", text_color="#e65100", border_width=1, border_color="#ffb74d")
@@ -179,7 +251,8 @@ class TireStorageMixin:
         tree.tag_configure(STATUS_ISSUED, foreground="#9e9e9e")
         tree.tag_configure(STATUS_OVERDUE, foreground="#c62828")
         tree.tag_configure(STATUS_SOON, foreground="#b45309")
-        tree.tag_configure("odd", background="#fafbfc")
+        for status, background in self.TIRE_ROW_COLORS.items():
+            tree.tag_configure(f"bg_{status}", background=background)
         self.make_tree_tooltip(tree, ["brand", "notes", "car_info"])
 
         menu = self.tires_context_menu = tk.Menu(
@@ -247,6 +320,11 @@ class TireStorageMixin:
         self.tires_season_filter = None if self.tires_season_filter == season else season
         self.refresh_tires()
 
+    def _tires_set_radius(self, rim):
+        """Фишка радиуса: показать только этот радиус; второй клик - снять"""
+        self.tires_radius_filter = None if self.tires_radius_filter == rim else rim
+        self.refresh_tires()
+
     def _tires_chip(self, parent, text, color, selected, command):
         ctk.CTkButton(parent, text=text, width=10, height=28, corner_radius=14,
                       font=("Arial", 12, "bold" if selected else "normal"),
@@ -269,13 +347,16 @@ class TireStorageMixin:
 
         sets = self.db.get_all_tire_storage()
         counts = {"all": 0, STATUS_STORED: 0, STATUS_SOON: 0, STATUS_OVERDUE: 0, STATUS_ISSUED: 0}
-        season_counts = {}
+        season_counts, radius_counts = {}, {}
+        radius_filter = getattr(self, "tires_radius_filter", None)
         rows, hidden_by_date = [], 0
         for tire in sets:
             shown_status = display_status(tire["status"], tire["store_until"], today)
             car_info = " ".join(x for x in (tire["car_brand"], tire["car_model"], tire["car_number"]) if x)
             if search:
                 digits = "".join(ch for ch in search if ch.isdigit())
+                if len(digits) == 11 and digits[0] in "78":   # «8 900 …» и «+7 (900) …» - один и тот же номер
+                    digits = digits[1:]
                 haystack = " ".join(str(x or "") for x in (
                     car_info, tire["client_name"], tire["tire_size"], tire["tire_brand"], tire["location"],
                     tire["notes"])).lower()
@@ -298,10 +379,15 @@ class TireStorageMixin:
             season_counts[tire["season"]] = season_counts.get(tire["season"], 0) + 1
             if season_filter and tire["season"] != season_filter:
                 continue
+            rim = rim_of(tire["tire_size"])
+            if rim:
+                radius_counts[rim] = radius_counts.get(rim, 0) + 1
+            if radius_filter and rim != radius_filter:
+                continue
             rows.append((tire, shown_status, car_info))
 
         for index, (tire, shown_status, car_info) in enumerate(rows):
-            tags = [shown_status] + (["odd"] if index % 2 else [])
+            tags = [shown_status, f"bg_{shown_status}"]
             item = tree.insert("", tk.END, image=self.tires_status_images.get(shown_status), tags=tags, values=(
                 tire["id"], car_info, self.display_name(tire["client_name"]),
                 self.display_phone(tire["client_phone"]), self.tire_season_label(tire["season"]),
@@ -332,6 +418,13 @@ class TireStorageMixin:
                 continue
             self._tires_chip(self.tires_season_bar, f"{self.tire_season_label(season)}  {count}", "#1565c0",
                              season_filter == season, lambda s=season: self._tires_set_season(s))
+        # Радиусы - по порядку (R13 … R22); пустые скрыты, кроме выбранного
+        for widget in self.tires_radius_bar.winfo_children():
+            widget.destroy()
+        rims = set(radius_counts) | ({radius_filter} if radius_filter else set())
+        for rim in sorted(rims, key=rim_sort_key):
+            self._tires_chip(self.tires_radius_bar, f"{rim}  {radius_counts.get(rim, 0)}", "#00838f",
+                             radius_filter == rim, lambda r=rim: self._tires_set_radius(r))
 
         total = len(sets)
         self.tires_count_label.configure(
@@ -403,9 +496,17 @@ class TireStorageMixin:
         tire = self.selected_tire()
         if not tire or tire["status"] != STATUS_ISSUED:
             return
-        if messagebox.askyesno(self.tr("common.confirm"), self.tr("tires.msg_confirm_return", tires=self.tire_title(tire))):
-            self.db.set_tire_storage_status(tire["id"], STATUS_STORED)
-            self.refresh_tires()
+        if not messagebox.askyesno(self.tr("common.confirm"), self.tr("tires.msg_confirm_return", tires=self.tire_title(tire))):
+            return
+        # Пока шины были у клиента, в их ячейку могли положить другие - как при приёме, переспрашиваем
+        taken = self.db.tire_location_taken(tire["location"], exclude_id=tire["id"])
+        if taken and not messagebox.askyesno(
+                self.tr("common.attention"),
+                self.tr("tires.msg_location_taken", location=tire["location"], tires=self.tire_title(taken)),
+                icon="warning"):
+            return
+        self.db.set_tire_storage_status(tire["id"], STATUS_STORED)
+        self.refresh_tires()
 
     def set_selected_tires_paid(self, is_paid):
         """Отметить оплату (доход в «Финансах» - сегодня) / снять (доход убирается)"""
@@ -532,13 +633,20 @@ class TireStorageMixin:
                                                          font=("Arial", 13))
         self.tire_season_switch.pack(fill=tk.X, pady=(0, 8))
 
+        # Размер - двумя полями со списками: «ширина/профиль» (205/55) и «радиус» (R16); в базе - «205/55 R16»
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill=tk.X)
-        self.tire_size_entry = self.works_cell(row, 0, self.tr("tires.size"),
-                                               self.form_entry(row, width=150, placeholder_text="205/55 R16"), 150)
-        self.tire_brand_entry = self.works_cell(row, 1, self.tr("tires.brand"), self.form_entry(row))
-        self.tire_quantity_entry = self.works_cell(row, 2, self.tr("warehouse.quantity_short"),
+        self.tire_size_entry = self.works_cell(row, 0, self.tr("tires.width_profile"),
+                                               self.form_entry(row, width=110, placeholder_text="205/55"), 110)
+        self.tire_radius_entry = self.works_cell(row, 1, self.tr("tires.radius"),
+                                                 self.form_entry(row, width=80, placeholder_text="R16"), 80)
+        self.tire_brand_entry = self.works_cell(row, 2, self.tr("tires.brand"), self.form_entry(row))
+        self.tire_quantity_entry = self.works_cell(row, 3, self.tr("warehouse.quantity_short"),
                                                    self.form_entry(row, width=60), 60)
+        self.tire_size_suggest = SuggestList(self, self.tire_size_entry, content, self.tire_width_profile_values,
+                                             on_pick=lambda: self.tire_radius_entry.focus_set())
+        self.tire_radius_suggest = SuggestList(self, self.tire_radius_entry, content, self.tire_radius_values,
+                                               on_pick=lambda: self.tire_brand_entry.focus_set())
 
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill=tk.X, pady=(8, 0))
@@ -569,20 +677,54 @@ class TireStorageMixin:
         self.tire_notes_entry = self.form_entry(body, placeholder_text=self.tr("tires.notes_placeholder"))
         self.tire_notes_entry.pack(fill=tk.X)
 
-        self.form_clear_error_on_type((self.tire_size_entry, self.tire_brand_entry, self.tire_quantity_entry,
+        self.form_clear_error_on_type((self.tire_size_entry, self.tire_radius_entry, self.tire_brand_entry,
+                                       self.tire_quantity_entry,
                                        self.tire_location_entry, self.tire_received_entry, self.tire_until_entry,
                                        self.tire_price_entry))
         return list(section)
 
     def tire_form_entries(self):
-        return (self.tire_size_entry, self.tire_brand_entry, self.tire_quantity_entry, self.tire_location_entry,
-                self.tire_received_entry, self.tire_until_entry, self.tire_price_entry, self.tire_notes_entry)
+        return (self.tire_size_entry, self.tire_radius_entry, self.tire_brand_entry, self.tire_quantity_entry,
+                self.tire_location_entry, self.tire_received_entry, self.tire_until_entry, self.tire_price_entry,
+                self.tire_notes_entry)
+
+    def _tire_sizes_in_base(self):
+        """Размеры комплектов в базе - разобранные на (ширина/профиль, радиус); один раз на открытие формы"""
+        cached = getattr(self, "_tire_sizes_cache", None)
+        if cached is None:
+            cached = self._tire_sizes_cache = [split_size(t["tire_size"]) for t in self.db.get_all_tire_storage()
+                                               if t["tire_size"]]
+        return cached
+
+    def tire_width_profile_values(self):
+        """Список «ширина/профиль»: сначала те, что уже встречались у вас (частые выше), потом обычные"""
+        counts = {}
+        for wp, _ in self._tire_sizes_in_base():
+            if wp:
+                counts[wp] = counts.get(wp, 0) + 1
+        used = sorted(counts, key=lambda wp: (-counts[wp], wp))
+        return used + [wp for wp in COMMON_WIDTH_PROFILES if wp not in counts]
+
+    def tire_radius_values(self):
+        """Список радиусов по порядку (R13 … R22, грузовые R14C …) и ваши необычные (ZR18, R17.5)"""
+        values = list(COMMON_RADII)
+        for _, radius in self._tire_sizes_in_base():
+            if radius and radius not in values:
+                values.append(radius)
+        return values
+
+    def tire_hide_popups(self):
+        for suggest in (getattr(self, "tire_size_suggest", None), getattr(self, "tire_radius_suggest", None)):
+            if suggest is not None:
+                suggest.hide()
 
     def reset_tire_form(self, tire_id=None):
         """Чистый раздел «Шины» (4 шт., принято сегодня, хранить полгода) или данные комплекта tire_id"""
         for entry in self.tire_form_entries():
             entry.delete(0, tk.END)
             entry.configure(border_color=self.wh_normal_border)
+        self.tire_hide_popups()
+        self._tire_sizes_cache = None   # списки размеров - заново из базы
         tire = self.db.get_tire_storage_by_id(tire_id) if tire_id else None
         if tire is None:
             today = date.today()
@@ -594,7 +736,9 @@ class TireStorageMixin:
             self.tire_paid_var.set(False)
         else:
             self.tire_season_switch.set(self.tr(f"tires.season_{tire['season']}") if tire["season"] in SEASONS else "")
-            for entry, value in ((self.tire_size_entry, tire["tire_size"]), (self.tire_brand_entry, tire["tire_brand"]),
+            width_profile, radius = split_size(tire["tire_size"])
+            for entry, value in ((self.tire_size_entry, width_profile), (self.tire_radius_entry, radius),
+                                 (self.tire_brand_entry, tire["tire_brand"]),
                                  (self.tire_quantity_entry, tire["quantity"]), (self.tire_location_entry, tire["location"]),
                                  (self.tire_notes_entry, tire["notes"])):
                 if value not in (None, ""):
@@ -620,10 +764,16 @@ class TireStorageMixin:
         if not season:
             messagebox.showwarning(self.tr("common.attention"), self.tr("tires.msg_choose_season"), parent=window)
             return
-        texts = {"tire_size": " ".join(self.tire_size_entry.get().split()),
+        self.tire_hide_popups()
+        # Размер из двух полей: «205 55» + «16» → «205/55 R16»; весь размер в первом поле - разбирается сам
+        size = size_from_fields(self.tire_size_entry.get(), self.tire_radius_entry.get())
+        if size is None:
+            self.form_mark_error(self.tire_radius_entry, "tires.msg_bad_radius", window)
+            return
+        texts = {"tire_size": size,
                  "tire_brand": " ".join(self.tire_brand_entry.get().split()),
                  "location": " ".join(self.tire_location_entry.get().split()).upper()}
-        entries = {"tire_size": self.tire_size_entry, "tire_brand": self.tire_brand_entry,
+        entries = {"tire_size": self.tire_size_entry, "tire_brand": self.tire_brand_entry,   # длинный размер - в 1-м поле
                    "location": self.tire_location_entry}
         for key, limit in TIRE_TEXT_LIMITS.items():
             if len(texts[key]) > limit:
@@ -638,6 +788,10 @@ class TireStorageMixin:
             received = parse_date(self.tire_received_entry.get())
         except ValueError:
             self.form_mark_error(self.tire_received_entry, "tires.msg_bad_date", window)
+            return
+        if received > date.today():
+            # Принять шины «завтра» нельзя - это опечатка; доход за оплаченное хранение ушёл бы в будущий день
+            self.form_mark_error(self.tire_received_entry, "tires.msg_received_future", window)
             return
         try:
             until = parse_date(self.tire_until_entry.get(), allow_empty=True)
@@ -654,7 +808,10 @@ class TireStorageMixin:
                                  max=self.format_money_limit())
             return
         tire_id = getattr(self, "wh_editing_tire_id", None)
-        taken = self.db.tire_location_taken(texts["location"], exclude_id=tire_id)
+        # Выданные шины ячейку не занимают - правим такой комплект (цену, примечание) без вопроса про ячейку
+        editing = self.db.get_tire_storage_by_id(tire_id) if tire_id else None
+        taken = None if editing and editing["status"] == STATUS_ISSUED else \
+            self.db.tire_location_taken(texts["location"], exclude_id=tire_id)
         if taken and not messagebox.askyesno(
                 self.tr("common.attention"),
                 self.tr("tires.msg_location_taken", location=texts["location"], tires=self.tire_title(taken)),

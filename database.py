@@ -2681,10 +2681,13 @@ class Database:
         conn.commit()
         conn.close()
 
-    def update_warehouse_part(self, part_id, part_name, quantity, price, status, notes, is_paid=None):
-        """Обновить данные запчасти"""
+    def update_warehouse_part(self, part_id, part_name, quantity, price, status, notes, is_paid=None,
+                              received_date=...):
+        """Обновить данные запчасти. received_date - дата прихода (None - стереть); не передана - не меняется"""
         conn = self.get_connection()
         cursor = conn.cursor()
+        if received_date is not ...:
+            cursor.execute("UPDATE warehouse_parts SET received_date = %s WHERE id = %s", (received_date, part_id))
         if is_paid is None:
             cursor.execute("""
                 UPDATE warehouse_parts

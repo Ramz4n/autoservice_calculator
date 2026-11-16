@@ -574,6 +574,8 @@ class AutoServiceApp(TireStorageMixin):
         # Язык интерфейса (переключение — в настройках, применяется после перезапуска)
         self.i18n = I18n(LOCALES_DIR, self.load_settings().get('language', 'ru'))
         self.tr = self.i18n.t
+        # Копировать / вставить во всех полях (и в русской раскладке), правый клик по полю - меню
+        self.setup_text_clipboard()
 
         self.root.protocol("WM_DELETE_WINDOW", self._confirm_close)
         self.root.title(self.tr("app.window_title"))
@@ -1504,91 +1506,74 @@ class AutoServiceApp(TireStorageMixin):
         except ValueError:
             pass
 
-    def setup_entry_context_menu(self, entry_widget):
-        """Добавляет контекстное меню с функциями копирования/вставки для поля ввода"""
-        # Создаем контекстное меню
-        context_menu = tk.Menu(entry_widget, tearoff=0)
+    # Windows: код клавиши у C, V, X, A один и тот же в любой раскладке (а буква разная: «с», «м», «ч», «ф»)
+    CLIPBOARD_KEYCODES = {67: "<<Copy>>", 86: "<<Paste>>", 88: "<<Cut>>", 65: "<<SelectAll>>"}
+    TEXT_WIDGET_CLASSES = ("Entry", "TEntry", "Text")   # внутри CTkEntry - Entry, внутри CTkTextbox - Text
 
-        def cut_text():
-            try:
-                if entry_widget.select_present():
-                    entry_widget.clipboard_clear()
-                    entry_widget.clipboard_append(entry_widget.selection_get())
-                    entry_widget.delete("sel.first", "sel.last")
-            except:
-                pass
+    def setup_text_clipboard(self):
+        """Копировать и вставлять в любом поле ввода программы: Ctrl+C / V / X / A работают и в русской раскладке
+        (Tk сам понимает их только в английской); правый клик - меню «Вырезать / Копировать / Вставить /
+        Выделить всё». Одно на все поля - на класс поля, а не на каждое поле отдельно"""
+        menu = self.text_context_menu = tk.Menu(
+            self.root, tearoff=0, bg="white", fg="#263238", bd=1, relief="solid", activebackground="#e3f2fd",
+            activeforeground="#0d1b2a", font=("Segoe UI", 11), disabledforeground="#b0b7bf")
+        self._text_menu_widget = None
+        for key, virtual in (("ctx.cut", "<<Cut>>"), ("ctx.copy", "<<Copy>>"), ("ctx.paste", "<<Paste>>"),
+                             (None, None), ("ctx.select_all", "<<SelectAll>>")):
+            if key is None:
+                menu.add_separator()
+            else:
+                menu.add_command(label="  " + self.tr(key), command=lambda v=virtual: self._text_menu_do(v))
+        for widget_class in self.TEXT_WIDGET_CLASSES:
+            self.root.bind_class(widget_class, "<Control-KeyPress>", self._text_clipboard_key, add="+")
+            self.root.bind_class(widget_class, "<Button-3>", self._show_text_context_menu, add="+")
 
-        def copy_text():
-            try:
-                if entry_widget.select_present():
-                    entry_widget.clipboard_clear()
-                    entry_widget.clipboard_append(entry_widget.selection_get())
-            except:
-                pass
+    def _text_clipboard_key(self, event):
+        """Ctrl+C / V / X / A по коду клавиши - в любой раскладке. Действие - обычное событие поля (<<Copy>> ...),
+        поэтому замки «Добавить работу», очистка вставленного телефона и VIN срабатывают как всегда"""
+        virtual = self.CLIPBOARD_KEYCODES.get(event.keycode)
+        if not virtual or event.state & 0x20000:   # Ctrl+Alt (AltGr) - это не копирование
+            return None
+        event.widget.event_generate(virtual)
+        return "break"
 
-        def paste_text():
-            try:
-                text = entry_widget.clipboard_get()
-                try:
-                    # Для CTkEntry используем insert в позицию курсора
-                    entry_widget.insert(tk.INSERT, text)
-                except:
-                    # Если не работает, вставляем в конец
-                    current = entry_widget.get()
-                    entry_widget.delete(0, tk.END)
-                    entry_widget.insert(0, current + text)
-            except:
-                pass
+    def _text_widget_editable(self, widget):
+        """Можно ли в поле вставлять и вырезать: не «только чтение» и не закрыто замком «Добавить работу»"""
+        try:
+            state = str(widget.cget("state"))
+        except tk.TclError:
+            state = "normal"
+        if state not in ("normal", ""):
+            return False
+        return not (hasattr(self, "works_lock_widgets") and self._works_lock_is_locked(widget))
 
-        def select_all():
-            try:
-                entry_widget.select_range(0, tk.END)
-                entry_widget.icursor(tk.END)
-            except:
-                pass
+    def _show_text_context_menu(self, event):
+        widget = event.widget
+        self._text_menu_widget = widget
+        try:
+            selected = bool(widget.tag_ranges("sel")) if widget.winfo_class() == "Text" else \
+                bool(widget.selection_present())
+        except tk.TclError:
+            selected = False
+        editable = self._text_widget_editable(widget)
+        menu = self.text_context_menu
+        menu.entryconfig(0, state="normal" if editable and selected else "disabled")   # вырезать
+        menu.entryconfig(1, state="normal" if selected else "disabled")                # копировать
+        menu.entryconfig(2, state="normal" if editable else "disabled")                # вставить
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
 
-        context_menu.add_command(label=self.tr("ctx.cut"), command=cut_text)
-        context_menu.add_command(label=self.tr("ctx.copy"), command=copy_text)
-        context_menu.add_command(label=self.tr("ctx.paste"), command=paste_text)
-        context_menu.add_separator()
-        context_menu.add_command(label=self.tr("ctx.select_all"), command=select_all)
-
-        def show_context_menu(event):
-            try:
-                context_menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                context_menu.grab_release()
-
-        # Привязываем контекстное меню к правой кнопке мыши
-        entry_widget.bind("<Button-3>", show_context_menu)
-
-        # Привязываем горячие клавиши (return "break" чтобы остановить стандартную обработку)
-        def paste_wrapper(e):
-            paste_text()
-            return "break"
-
-        def copy_wrapper(e):
-            copy_text()
-            return "break"
-
-        def cut_wrapper(e):
-            cut_text()
-            return "break"
-
-        def select_all_wrapper(e):
-            select_all()
-            return "break"
-
-        entry_widget.bind("<Control-v>", paste_wrapper)
-        entry_widget.bind("<Control-V>", paste_wrapper)
-        entry_widget.bind("<Control-m>", paste_wrapper)  # Ctrl+M (только на английской раскладке)
-        entry_widget.bind("<Control-M>", paste_wrapper)
-        entry_widget.bind("<Control-c>", copy_wrapper)
-        entry_widget.bind("<Control-C>", copy_wrapper)
-        entry_widget.bind("<Control-x>", cut_wrapper)
-        entry_widget.bind("<Control-X>", cut_wrapper)
-        entry_widget.bind("<Control-a>", select_all_wrapper)
-        entry_widget.bind("<Control-A>", select_all_wrapper)
+    def _text_menu_do(self, virtual):
+        """Пункт меню поля: то же событие, что от Ctrl+C / V / X / A"""
+        widget = self._text_menu_widget
+        if widget is None or not widget.winfo_exists():
+            return
+        widget.focus_set()
+        # В пустом CTkEntry стоит серая подсказка - вставлять надо вместо неё, а не после
+        outer = widget.master
+        if virtual == "<<Paste>>" and getattr(outer, "_placeholder_text_active", False):
+            outer._deactivate_placeholder()
+        widget.event_generate(virtual)
 
     def _confirm_close(self):
         """Подтверждение закрытия приложения."""
@@ -2603,10 +2588,7 @@ class AutoServiceApp(TireStorageMixin):
             entry.bind("<KeyRelease>", lambda e: self.works_update_card_marks(), add="+")
             entry.bind("<FocusOut>", lambda e: self.root.after(250, self.works_update_card_marks), add="+")
 
-        # Контекстное меню для VIN (правая кнопка - вставить)
-        self.vin_context_menu = tk.Menu(self.root, tearoff=0)
-        self.vin_context_menu.add_command(label=self.tr("works.context_paste"), command=self.paste_to_vin)
-        self.vin_entry.bind("<Button-3>", self.show_vin_context_menu)
+        # Правый клик по VIN (и любому полю) - общее меню «Вырезать / Копировать / Вставить» (setup_text_clipboard)
 
         # Данные встали (нашли по госномеру / телефону, открыли запись) - поля закрыты от случайной правки.
         # Поправить конкретное поле - карандаш ✎ справа в поле
@@ -2659,8 +2641,6 @@ class AutoServiceApp(TireStorageMixin):
         self.part_keyword_listbox.bind('<Double-Button-1>', self.on_part_keyword_select)
         self.part_keyword_listbox.bind('<ButtonRelease-1>', self.on_part_keyword_select)
         self.part_keyword_listbox.bind('<Return>', self.on_part_keyword_select)
-        # Добавляем контекстное меню для вставки
-        self.setup_entry_context_menu(self.part_name_entry)
 
         self.works_set_lookup_state(None)
         self.update_total_cost()
@@ -3257,20 +3237,6 @@ class AutoServiceApp(TireStorageMixin):
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         self.root.wait_window(dialog)
         return result["choice"]
-
-    def show_vin_context_menu(self, event):
-        """Показать контекстное меню для поля VIN"""
-        if "vin" in getattr(self, "works_locked", ()):
-            return
-        self.vin_context_menu.tk_popup(event.x_root, event.y_root)
-
-    def paste_to_vin(self):
-        """Вставить текст из буфера обмена в поле VIN"""
-        try:
-            clipboard_text = self.root.clipboard_get()
-            self.vin_entry.insert(tk.END, clipboard_text)
-        except tk.TclError:
-            pass  # Буфер обмена пуст
 
     def add_copy_button(self, parent, text):
         """Кнопка-значок рядом с текстом: по клику копирует text в буфер обмена"""
@@ -4088,6 +4054,13 @@ class AutoServiceApp(TireStorageMixin):
             if not selected:
                 messagebox.showwarning(self.tr("common.attention"), self.tr("works.msg_select_one_part"), parent=dialog)
                 return
+            # Цена на складе не указана - в наряд деталь пойдёт за 0: переспрашиваем (оплаченные заранее - и так за 0)
+            no_price = [p[1] for p in selected if not p[5] and not p[3]]
+            if no_price and not messagebox.askyesno(
+                    self.tr("common.confirm"),
+                    self.tr("works.msg_warehouse_no_price", names="\n".join(f"• {n}" for n in no_price)),
+                    parent=dialog):
+                return   # «Нет» - окно выбора остаётся, ничего не добавлено
             dialog.destroy()
             for part in selected:
                 self._add_warehouse_part_to_list(part)
@@ -4906,6 +4879,10 @@ class AutoServiceApp(TireStorageMixin):
 
     WAREHOUSE_STATUS_COLORS = {"в пути": "#3b82f6", "на складе": "#22c55e", "установлена": "#f59e0b",
                                "выдано": "#9e9e9e"}
+    # Фон строки - как в «Записях»: светлый оттенок цвета полоски статуса (синий, зелёный, жёлтый, серый -
+    # те же, что у записей «в работе», «выполнена», «ожидает», «просрочена»); без чередования через строку
+    WAREHOUSE_ROW_COLORS = {"в пути": "#eef4fc", "на складе": "#edf7f0", "установлена": "#fdf7e7",
+                            "выдано": "#f3f4f6"}
     WAREHOUSE_RECENT_DAYS = 92   # "Все" и "Выдано" по умолчанию - за 3 месяца
 
     def warehouse_status_label(self, status):
@@ -4969,7 +4946,8 @@ class AutoServiceApp(TireStorageMixin):
                         fieldbackground="white", foreground="#263238", borderwidth=0, indent=0)
         style.configure("Warehouse.Treeview.Heading", font=("Arial", 11, "bold"), foreground="#455a64",
                         background="#f5f7f9", relief="flat", padding=(6, 6))
-        style.map("Warehouse.Treeview", background=[("selected", "#d6e8fb")], foreground=[("selected", "#0d1b2a")])
+        style.map("Warehouse.Treeview", background=[("selected", self.BOOKINGS_SELECTED_BG)],
+                  foreground=[("selected", "#0d1b2a")])
         style.layout("Warehouse.Treeview.Item", [("Treeitem.padding", {"sticky": "nswe", "children": [
             ("Treeitem.image", {"side": "left", "sticky": ""}), ("Treeitem.text", {"sticky": "nswe"})]})])
         self.warehouse_tree = ttk.Treeview(table_frame, columns=columns, show="tree headings", height=15,
@@ -5015,7 +4993,9 @@ class AutoServiceApp(TireStorageMixin):
             image.put(color, to=(0, 0, 6, 26))
             self.warehouse_status_images[status] = image
         self.warehouse_tree.tag_configure("выдано", foreground="#9e9e9e")
-        self.warehouse_tree.tag_configure("odd", background="#fafbfc")
+        # Фон строки по статусу: у строки ровно один тег фона - bg_<статус>
+        for status, background in self.WAREHOUSE_ROW_COLORS.items():
+            self.warehouse_tree.tag_configure(f"bg_{status}", background=background)
 
         # Подсказка с полным текстом детали / примечания
         TreeviewTooltip(self.warehouse_tree, columns=["part_name", "notes"])
@@ -5251,7 +5231,7 @@ class AutoServiceApp(TireStorageMixin):
                                               self.hide_add_part_form)
         self.form_bind_keys(window, content, self.add_warehouse_part, self.hide_add_part_form,
                             lambda: (self.wh_car_hints.hide(),
-                                     self.hide_popup(self.wh_part_listbox)))
+                                     self.hide_popup(self.wh_part_listbox), self.tire_hide_popups()))
         self.form_clear_error_on_type((self.wh_car_number_entry, self.wh_new_brand_entry, self.wh_new_model_entry,
                                        self.wh_phone_entry, self.wh_part_name_entry, self.wh_quantity_entry, self.wh_price_entry))
 
@@ -5776,7 +5756,7 @@ class AutoServiceApp(TireStorageMixin):
             car_info = " ".join(x for x in (car_brand, car_model, car_number) if x)
             if search:
                 haystack = " ".join(str(x or "") for x in (car_number, car_info, client_name, client_phone, part_name)).lower()
-                digits = re.sub(r"\D", "", search)
+                digits = phone_mask_digits(search)   # «8 900 …» и «+7 (900) …» - один и тот же номер
                 if search not in haystack and not (digits and digits in re.sub(r"\D", "", str(client_phone or ""))):
                     continue
             # Выданные давно - только "за всё время" (их со временем много); в пути / на складе - всегда
@@ -5793,7 +5773,7 @@ class AutoServiceApp(TireStorageMixin):
 
         for index, (part_id, car_info, client_name, part_name, quantity, price, is_paid, part_status,
                     order_date, received_date, notes) in enumerate(rows):
-            tags = [part_status] + (["odd"] if index % 2 else [])
+            tags = [part_status, f"bg_{part_status}"]
             self.warehouse_tree.insert("", tk.END, image=self.warehouse_status_images.get(part_status), values=(
                 part_id,
                 car_info,
@@ -6021,7 +6001,8 @@ class AutoServiceApp(TireStorageMixin):
         }
         status_raw_to_display = {v: k for k, v in status_display_to_raw.items()}
         status_var = tk.StringVar(value=status_raw_to_display.get(part_data.get('status', 'в пути'), self.tr("warehouse.status_in_transit")))
-        status_combo = ctk.CTkComboBox(row4, variable=status_var,
+        # Только выбор из списка: вписанный руками статус ушёл бы в базу, и деталь пропала бы из всех фильтров
+        status_combo = ctk.CTkComboBox(row4, variable=status_var, state="readonly",
                                         values=list(status_display_to_raw.keys()), width=150)
         status_combo.pack(side=tk.LEFT)
 
@@ -6054,8 +6035,19 @@ class AutoServiceApp(TireStorageMixin):
                                        self.tr("warehouse.msg_price_number", max=self.format_money_limit()))
                 return
 
-            new_status = status_display_to_raw.get(status_var.get(), status_var.get())
+            new_status = status_display_to_raw.get(status_var.get())
+            if new_status is None:
+                messagebox.showwarning(self.tr("common.attention"), self.tr("warehouse.msg_choose_status"),
+                                       parent=edit_window)
+                return
             new_notes = notes_entry.get().strip() or None
+            # Дата прихода - как при смене статуса через меню: пришла на склад - сегодня, снова «в пути» - стёрта
+            old_status = part_data.get('status')
+            received_date = ...
+            if new_status == "на складе" and old_status != "на складе":
+                received_date = date.today()
+            elif new_status == "в пути" and old_status != "в пути":
+                received_date = None
 
             # Защита от смены статуса "выдано"
             if part_data.get('status') == 'выдано' and new_status != 'выдано':
@@ -6063,7 +6055,8 @@ class AutoServiceApp(TireStorageMixin):
                         parent=edit_window):
                     return
 
-            self.db.update_warehouse_part(part_id, new_part_name, new_quantity, new_price, new_status, new_notes, paid_var.get())
+            self.db.update_warehouse_part(part_id, new_part_name, new_quantity, new_price, new_status, new_notes,
+                                          paid_var.get(), received_date=received_date)
             edit_window.destroy()
             self.refresh_warehouse()
             messagebox.showinfo(self.tr("common.success"), self.tr("warehouse.msg_part_updated"))

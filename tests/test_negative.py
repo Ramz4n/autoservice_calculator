@@ -4,9 +4,9 @@
 
 from datetime import date, timedelta
 
-PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799", "Т209ТТ799", "Т210ТТ799"]
+PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799", "Т209ТТ799", "Т210ТТ799", "Т211ТТ799"]
 PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205", "+79000000206", "+79000000207",
-          "+79000000208", "+79000000209", "+79000000210"]
+          "+79000000208", "+79000000209", "+79000000210", "+79000000211"]
 
 
 def prepare(h):
@@ -166,6 +166,56 @@ def test_warehouse_rejects(h):
     h.expect_rejected("новая машина, неполный телефон", wh(phone10="9001"), "телефон")
     h.expect_rejected("госномер без первой буквы, ответ «Нет»", wh(plate="203тт799"), "пропущена первая буква",
                       answers=[False])
+
+
+def test_warehouse_edit_rejects(h):
+    """Склад → «Изменить»: неверное - предупреждение, деталь в базе не изменилась; ничего не выбрано -
+    «Выберите запчасть», ничего не меняется и окно не открывается"""
+    app = h.app
+    h.warehouse_form("т211тт799", "Lada", "Vesta", "9000000211", "Тест Склад Отказ", part="Тест деталь отказа",
+                     price="700")
+    part = h.warehouse_part("Тест деталь отказа")
+    if not h.check("деталь для проверок заказана", part, part):
+        return
+    part_id = part[0]
+
+    def row():
+        return h.q("SELECT part_name, quantity, price, status, notes, is_paid, received_date FROM warehouse_parts "
+                   "WHERE id = %s", (part_id,))
+
+    def rejected(label, text, **fields):
+        before, n = row(), len(h.dialogs)
+        opened = h.warehouse_edit(part_id, **fields)
+        new = h.dialogs_since(n)
+        h.check("«Изменить», " + label,
+                opened and any(d[0] in ("showwarning", "askyesno") and text in d[2].lower() for d in new)
+                and not any(d[0] == "showinfo" for d in new) and row() == before, (new, row()))
+
+    rejected("пустое название - не сохранено", "запчаст", name="   ")
+    for qty in ("0", "-1", "10000", "1.5", "abc"):
+        rejected(f"количество «{qty}» - не сохранено", "количество", qty=qty)
+    for price in ("abc", "0", "-5", "nan", "100000000"):
+        rejected(f"цена «{price}» - не сохранено", "цена", price=price)
+    rejected("статус вписан руками («абв») - не сохранено", "статус", status_text="абв")
+    h.warehouse_set_status(part_id, "выдано")
+    rejected("«выдано» → «на складе», ответ «Нет» - не сохранено", "вернуть", status="на складе", answers=[False])
+
+    app.switch_tab("warehouse")
+    app.refresh_warehouse()
+    for label, action in (("«Изменить»", app.edit_warehouse_part), ("«Удалить»", app.delete_warehouse_part),
+                          ("«На складе»", lambda: app.update_part_status("на складе")),
+                          ("«Выдано»", lambda: app.update_part_status("выдано")),
+                          ("«Оплачено»", lambda: app.set_warehouse_part_paid(True)),
+                          ("«Перейти к записи»", app.goto_booking_from_warehouse)):
+        app.warehouse_tree.selection_remove(app.warehouse_tree.selection())
+        before = h.q("SELECT id, status, is_paid FROM warehouse_parts ORDER BY id")
+        n = len(h.dialogs)
+        opened = h.new_windows(action)
+        h.check(f"ничего не выбрано, {label} - «Выберите запчасть», ничего не изменилось",
+                not opened and app.current_tab == "warehouse"
+                and any(d[0] == "showwarning" and "выберите запчасть" in d[2].lower() for d in h.dialogs_since(n))
+                and h.q("SELECT id, status, is_paid FROM warehouse_parts ORDER BY id") == before,
+                (h.dialogs_since(n), app.current_tab))
 
 
 def test_edit_rejects(h):
@@ -469,6 +519,17 @@ def test_tires_rejects(h):
         ("стоимость 0", dict(price="0"), None),
         ("стоимость буквами", dict(price="много"), None),
         ("размер длиннее 50", dict(size="2" * 51), "50"),
+        ("дата приёма завтра", dict(received=(date.today() + timedelta(days=1)).strftime("%d.%m.%Y")), "не позже"),
+        ("количество 10000", dict(qty="10000"), "количество"),
+        ("количество минус", dict(qty="-1"), "количество"),
+        ("количество дробное", dict(qty="1.5"), "количество"),
+        ("стоимость минус", dict(price="-5"), "цена"),
+        ("стоимость nan", dict(price="nan"), "цена"),
+        ("стоимость больше максимума", dict(price="100000000"), "цена"),
+        ("марка шин длиннее 100", dict(tire_brand="Б" * 101), "100"),
+        ("ячейка длиннее 50", dict(location="Я" * 51), "50"),
+        ("радиус «abc»", dict(size="205/55", radius="abc"), "радиус"),
+        ("радиус «16.7»", dict(size="205/55", radius="16.7"), "радиус"),
     ]
     for name, change, text in cases:
         fields = dict(good, plate="Т209ТТ799")
@@ -508,6 +569,16 @@ def test_tires_rejects(h):
     # Ничего не выбрано в таблице - предупреждение
     app.tires_tree.selection_set(())
     h.expect_rejected("ничего не выбрано - «Выдать» не работает", app.issue_selected_tires, app.tr("tires.msg_select"))
+    for label, action in (("«Изменить»", app.edit_selected_tires),
+                          ("«Отметить оплату»", lambda: app.set_selected_tires_paid(True)),
+                          ("«Снять оплату»", lambda: app.set_selected_tires_paid(False)),
+                          ("«Удалить»", app.delete_selected_tires),
+                          ("«Расписка»", app.save_selected_tire_receipt)):
+        app.tires_tree.selection_set(())
+        opened = []
+        h.expect_rejected(f"ничего не выбрано - {label} не работает",
+                          lambda a=action: opened.extend(h.new_windows(a)), app.tr("tires.msg_select"))
+        h.check(f"ничего не выбрано - {label}: окно не открылось", not opened and not app.add_part_form_visible)
 
     # Перенос: ничего не отмечено - ничего не переносится
     h.warehouse_form("т210тт799", "Kia", "Rio", "9000000210", "Тест Перенос Отказ", part="Тест шины отказ переноса")
@@ -603,6 +674,7 @@ def test_booking_master_rejects(h):
         bw["window"].withdraw(); bw["overlay"].withdraw(); bw["window"].grab_release()
         db.set_worker_day(master_id, day_off, None)
 
-TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_edit_rejects, test_positions_rejects,
+TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_warehouse_edit_rejects,
+         test_edit_rejects, test_positions_rejects,
          test_payment_rejects, test_finance_rejects, test_period_rejects, test_booking_master_rejects,
          test_bookings_middle_click_nothing_to_scroll, test_tables_middle_click_nothing_to_scroll, test_tires_rejects]

@@ -15,7 +15,8 @@ PLATES = ["Т301ТТ799", "Т302ТТ799", "Т303ТТ799", "Т304ТТ799", "Т305
           "Т323ТТ799", "Т324ТТ799", "Т325ТТ799",
           "Т326ТТ799", "Т327ТТ799", "Т328ТТ799", "Т329ТТ799", "Т330ТТ799", "Т331ТТ799", "Т332ТТ799",
           "Т333ТТ799", "Т334ТТ799", "Т335ТТ799", "Т336ТТ799",
-          "Т337ТТ799", "Т338ТТ799", "Т339ТТ799", "Т340ТТ799", "Т341ТТ799"]
+          "Т337ТТ799", "Т338ТТ799", "Т339ТТ799", "Т340ТТ799", "Т341ТТ799",
+          "Т342ТТ799", "Т343ТТ799", "Т344ТТ799", "Т345ТТ799", "Т346ТТ799"]
 PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+79000000305", "+79000000306",
           "+79000000307", "+79000000308", "+79000000309", "+79000000310", "+79000000311", "+79000000312",
           "+79000000313", "+79000000314", "+79000000315", "+79000000316", "+79000000317", "+79000000318",
@@ -25,7 +26,8 @@ PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+7900
           "+79000000327", "+79000000328",
           "+79000000329", "+79000000330", "+79000000331", "+79000000332", "+79000000334", "+79000000335",
           "+79000000336", "+79000000337", "+79000000338", "+79000000339",
-          "+79000000340", "+79000000341", "+79000000342", "+79000000343", "+79000000344"]
+          "+79000000340", "+79000000341", "+79000000342", "+79000000343", "+79000000344",
+          "+79000000345", "+79000000346", "+79000000347", "+79000000348", "+79000000349"]
 MASTER = "Тест Мастер"
 STAFF_POSITION, STAFF = "Тест-администратор", "Тест Админ"   # должность НЕ «с машинами»
 
@@ -1551,28 +1553,8 @@ def test_warehouse_edit_search_goto(h):
     app._warehouse_set_status(app.tr("bookings.filter_all"))
     app.warehouse_search_entry.delete(0, "end")
 
-    def edit(name=None, qty=None, price=None, status=None, notes=None, answers=()):
-        h.warehouse_select(part_id)
-        before = set(h.root.winfo_children())
-        app.edit_warehouse_part()
-        h.root.update()
-        win = next((x for x in h.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel)), None)
-        if win is None:
-            return False
-        name_e, qty_e, price_e, notes_e = h.find_widgets(win, ctk.CTkEntry)[:2] + h.find_widgets(win, ctk.CTkEntry)[2:4]
-        for entry, value in ((name_e, name), (qty_e, qty), (price_e, price), (notes_e, notes)):
-            if value is not None:
-                entry.delete(0, "end"); entry.insert(0, value)
-        if status is not None:
-            h.find_widgets(win, ctk.CTkComboBox)[0].set(app.warehouse_status_label(status))
-        h.answers[:] = list(answers)
-        h.find_button(win, app.tr("common.save")).invoke()
-        h.root.update()
-        h.answers[:] = []
-        if win.winfo_exists():
-            win.grab_release()
-            win.destroy()
-        return True
+    def edit(**fields):
+        return h.warehouse_edit(part_id, **fields)
 
     row = lambda: h.q("SELECT part_name, quantity, price, status, notes FROM warehouse_parts WHERE id = %s",
                       (part_id,))[0]
@@ -2166,6 +2148,264 @@ def test_tires_income(h):
             and row[0][1] == received, (row, received))
 
 
+def test_warehouse_edit_dates_paid_delete(h):
+    """Склад, обычная деталь: название с лишними пробелами - одним пробелом; «Изменить» → «На складе» - дата
+    прихода сегодня, снова «В пути» - стёрта, без смены статуса - не меняется; «Уже оплачено» в окне и через меню
+    (✓ в таблице); стёрли цену - пусто; «Удалить»: «Нет» - осталась, «Да» - строки нет"""
+    from datetime import timedelta
+    app = h.app
+    h.warehouse_form("т342тт799", "Lada", "Vesta", "9000000345", "Тест Склад Правка",
+                     part="  Тест   деталь   правки  ", qty="1", price="800")
+    part = h.warehouse_part("Тест деталь правки")
+    if not h.check("название с лишними пробелами - сохранено с одним пробелом", part, part):
+        return
+    part_id = part[0]
+
+    def row():
+        return h.q("SELECT status, received_date, is_paid, price, notes FROM warehouse_parts WHERE id = %s",
+                   (part_id,))[0]
+
+    def table_row():
+        h.warehouse_select(part_id)
+        return app.warehouse_tree.item(app.warehouse_tree.selection()[0], "values")
+
+    h.check("заказ: «в пути», даты прихода нет, не оплачено", row()[:3] == ("в пути", None, 0), row())
+    h.warehouse_edit(part_id, status="на складе")
+    h.check("«Изменить» → «На складе»: дата прихода - сегодня (как через меню)",
+            row()[:2] == ("на складе", date.today()), row())
+    h.warehouse_edit(part_id, status="в пути")
+    h.check("«Изменить» → «В пути»: дата прихода стёрта", row()[:2] == ("в пути", None), row())
+    h.warehouse_set_status(part_id, "на складе")
+    earlier = date.today() - timedelta(days=10)
+    h.q("UPDATE warehouse_parts SET received_date = %s WHERE id = %s", (earlier, part_id))
+    h.warehouse_edit(part_id, notes="Тест только примечание")
+    h.check("«Изменить» без смены статуса: дата прихода прежняя, примечание сохранено",
+            row()[1] == earlier and row()[4] == "Тест только примечание", row())
+
+    h.warehouse_edit(part_id, paid=True)
+    h.check("«Изменить», «Уже оплачено» - оплачено, в таблице ✓", row()[2] == 1 and table_row()[6] == "✓",
+            (row(), table_row()))
+    h.warehouse_edit(part_id, paid=False)
+    h.check("«Изменить», сняли «Уже оплачено» - не оплачено", row()[2] == 0 and table_row()[6] == "", row())
+    h.warehouse_select(part_id)
+    app.set_warehouse_part_paid(True)
+    h.check("меню «Оплачено» - оплачено", row()[2] == 1, row())
+    h.warehouse_select(part_id)
+    app.set_warehouse_part_paid(False)
+    h.check("меню «Не оплачено» - не оплачено", row()[2] == 0, row())
+
+    h.warehouse_edit(part_id, price="")
+    h.check("«Изменить», стёрли цену - цены нет, в таблице пусто", row()[3] is None and table_row()[5] == "",
+            (row(), table_row()))
+
+    h.warehouse_select(part_id)
+    h.answers[:] = [False]
+    app.delete_warehouse_part()
+    h.answers[:] = []
+    h.check("«Удалить», ответ «Нет» - деталь осталась", h.q("SELECT id FROM warehouse_parts WHERE id = %s", (part_id,)))
+    h.warehouse_select(part_id)
+    h.answers[:] = [True]
+    app.delete_warehouse_part()
+    h.answers[:] = []
+    h.root.update()
+    h.check("«Удалить», ответ «Да» - строки нет ни в базе, ни в таблице",
+            not h.q("SELECT id FROM warehouse_parts WHERE id = %s", (part_id,))
+            and str(part_id) not in h.warehouse_shown())
+
+
+def test_warehouse_order_money(h):
+    """Цена на складе - за всё количество: 4 шт. за 12 000 - в наряде 12 000 (не 48 000); без цены - за 0;
+    оплаченная заранее - за 0. Заказ (даже оплаченный) - не доход; после «Выполнено» доход и процент мастеру -
+    только от работы"""
+    app = h.app
+    names = ("Тест шины комплект", "Тест деталь без цены", "Тест деталь оплачена")
+    base = h.report()
+    h.warehouse_form("т343тт799", "Lada", "Vesta", "9000000346", "Тест Склад Цена", part=names[0], qty="4",
+                     price="12000")
+    h.warehouse_form("т343тт799", part=names[1], price="")
+    h.warehouse_form("т343тт799", part=names[2], price="2500", paid=True)
+    parts = [h.warehouse_part(n) for n in names]
+    if not h.check("три детали заказаны", all(parts), parts):
+        return
+    qty_price = h.q("SELECT quantity, price FROM warehouse_parts WHERE id = %s", (parts[0][0],))[0]
+    h.check("комплект: 4 шт., цена 12 000", qty_price[0] == 4 and float(qty_price[1]) == 12000, qty_price)
+    r = h.report()
+    h.check("заказ (и оплаченный заранее) - доход в «Отчётах» не изменился", near(r["income"], base["income"]),
+            (base["income"], r["income"]))
+    for p in parts:
+        h.warehouse_set_status(p[0], "на складе")
+
+    h.works_form("т343тт799", master=None, save=False)
+    # Без цены - вопрос; «Нет» - ничего не добавлено
+    n = len(h.dialogs)
+    h.answers[:] = [False]
+    offered = h.works_add_from_warehouse(list(names))
+    h.answers[:] = []
+    asked = [d for d in h.dialogs_since(n) if d[0] == "askyesno"]
+    h.check("«Со склада» предлагает все три", len(offered) == 3, offered)
+    h.check("деталь без цены - вопрос «не указана цена», в нём только она",
+            len(asked) == 1 and "не указана цена" in asked[0][2] and names[1] in asked[0][2]
+            and names[0] not in asked[0][2] and names[2] not in asked[0][2], asked)
+    h.check("ответ «Нет» - в наряд ничего не добавлено", not app.parts_list, app.parts_list)
+    n = len(h.dialogs)
+    h.works_add_from_warehouse([names[0], names[2]])
+    h.check("без детали без цены - вопроса нет", not any(d[0] == "askyesno" for d in h.dialogs_since(n)))
+    h.works_remove_part(names[0])
+    h.works_remove_part(names[2])
+    h.answers[:] = [True]
+    h.works_add_from_warehouse(list(names))
+    h.answers[:] = []
+    in_order = dict(app.parts_list)
+    h.check("в наряде комплект за 12 000 - цена за всё количество, не 4 × 12 000",
+            in_order.get(names[0]) == 12000.0, app.parts_list)
+    h.check("в наряде деталь без цены - за 0", in_order.get(names[1]) == 0.0, app.parts_list)
+    h.check("в наряде оплаченная заранее - за 0",
+            any(n.startswith(names[2]) and p == 0.0 for n, p in app.parts_list), app.parts_list)
+    app.worker_combo.set(MASTER)
+    h.add_work_item("Тест работа цены склада", 1000)
+    app.add_work()
+    h.root.update()
+    booking = h.q("SELECT b.id FROM bookings b JOIN client_cars c ON c.id = b.car_id "
+                  "WHERE c.car_number = 'Т343ТТ799' AND b.status = 'in_progress'")
+    if not h.check("наряд сохранён, запись «в работе»", booking, booking):
+        return
+    h.complete_booking(booking[0][0])
+    r = h.report()
+    h.check("«Выполнено»: доход +1000 - только работа, детали не входят", near(r["income"] - base["income"], 1000),
+            (base["income"], r["income"]))
+    h.check("«Выполнено»: мастеру - только от работы",
+            near(master_row(r)["total"] - master_row(base)["total"], 1000), (master_row(base), master_row(r)))
+    statuses = [h.warehouse_part(n)[1] for n in names]
+    h.check("«Выполнено»: все три «выдано»", statuses == ["выдано"] * 3, statuses)
+    h.delete_booking(booking[0][0])
+
+
+def test_warehouse_goto_and_lists(h):
+    """«Перейти к записи»: деталь из наряда - запись этого наряда, даже если у машины есть запись новее;
+    у машины нет записей / деталь без машины - предупреждение, вкладка та же. Выданное больше 3 месяцев назад
+    скрыто в «Все» и «Выдано», видно «за всё время» и поиском; «Показано N из M»; фишки статусов с числом,
+    как в базе; поиск по телефону в любом виде"""
+    from datetime import timedelta
+    app = h.app
+    # Деталь в наряде записи 1, потом у машины появилась запись 2 (на завтра)
+    work_id, booking1, _ = save_work(h, "т344тт799", "ТестПереход", "Модель", "9000000347", "Тест Склад Переход",
+                                     "Тест работа перехода", 600)
+    if not h.check("наряд сохранён", work_id and booking1, (work_id, booking1)):
+        return
+    h.warehouse_form("т344тт799", part="Тест деталь перехода", price="400")
+    part = h.warehouse_part("Тест деталь перехода")
+    h.warehouse_set_status(part[0], "на складе")
+    app.open_booking_in_add_work(booking1)
+    h.root.update()
+    h.works_add_from_warehouse(["Тест деталь перехода"])
+    app.add_work()
+    h.root.update()
+    h.check("деталь в наряде записи 1", h.warehouse_part("Тест деталь перехода")[2] == work_id)
+    h.booking_form("т344тт799")
+    car = h.car("Т344ТТ799")
+    bookings = h.q("SELECT id FROM bookings WHERE car_id = %s ORDER BY id", (car[0],))
+    if not h.check("у машины две записи", len(bookings) == 2, bookings):
+        return
+    h.warehouse_select(part[0])
+    app.goto_booking_from_warehouse()
+    h.root.update()
+    selected = [str(app.bookings_tree.item(i, "values")[0]) for i in app.bookings_tree.selection()]
+    h.check("«Перейти к записи» - запись наряда детали, а не более новая",
+            app.current_tab == "bookings" and selected == [str(booking1)], (selected, bookings))
+
+    # Машина без записей; деталь без машины
+    h.warehouse_form("т345тт799", "Lada", "Vesta", "9000000348", "Тест Склад Без Записи",
+                     part="Тест деталь без записи", price="300")
+    h.warehouse_form("", part="Тест деталь без машины", price="200")
+    no_booking, no_car = h.warehouse_part("Тест деталь без записи"), h.warehouse_part("Тест деталь без машины")
+    car_of = h.q("SELECT car_id FROM warehouse_parts WHERE id = %s", (no_car[0],)) if no_car else ()
+    h.check("деталь без госномера и телефона сохранена без машины", car_of and car_of[0][0] is None, car_of)
+    for label, p, text in (("у машины нет записей", no_booking, "не найдена"),
+                           ("деталь без машины", no_car, "не привязана")):
+        if not p:
+            continue
+        h.warehouse_select(p[0])
+        n = len(h.dialogs)
+        app.goto_booking_from_warehouse()
+        h.root.update()
+        h.check(f"«Перейти к записи», {label} - предупреждение, остались на складе",
+                any(d[0] == "showwarning" and text in d[2] for d in h.dialogs_since(n))
+                and app.current_tab == "warehouse", (h.dialogs_since(n), app.current_tab))
+
+    # Выдано давно
+    old = date.today() - timedelta(days=120)
+    old_id = app.db.add_warehouse_part(h.car("Т345ТТ799")[0], "Тест деталь давно выдана", order_date=old)
+    app.db.update_warehouse_part_status(old_id, "выдано", old)
+    app.switch_tab("warehouse")
+    app.warehouse_search_entry.delete(0, "end")
+    app.warehouse_show_all_time = False
+    app._warehouse_set_status(app.tr("bookings.filter_all"))
+    h.check("«Все»: выданная 4 месяца назад скрыта, кнопка «за всё время» видна",
+            str(old_id) not in h.warehouse_shown() and app.warehouse_range_btn.winfo_manager())
+    total = h.q("SELECT COUNT(*) FROM warehouse_parts")[0][0]
+    shown = len(h.warehouse_shown())
+    h.check("«Показано N из M» - видимые из всех",
+            app.warehouse_count_label.cget("text") == app.tr("bookings.count_shown", shown=shown, total=total),
+            app.warehouse_count_label.cget("text"))
+    cutoff = date.today() - timedelta(days=app.WAREHOUSE_RECENT_DAYS)
+    counts = dict(h.q("SELECT status, COUNT(*) FROM warehouse_parts WHERE NOT (status = 'выдано' "
+                      "AND COALESCE(received_date, order_date) < %s) GROUP BY status", (cutoff,)))
+    chips = sorted(b.cget("text") for b in app.warehouse_status_bar.winfo_children())
+    expected = sorted([f"●  {app.tr('bookings.filter_all')}  {sum(counts.values())}"] +
+                      [f"●  {app.warehouse_status_label(st)}  {n}" for st, n in counts.items() if n])
+    h.check("фишки статусов: число в каждой - как в базе, пустых нет", chips == expected, (chips, expected))
+    app._warehouse_set_status(app.warehouse_status_label("выдано"))
+    h.check("фильтр «Выдано» - давняя тоже скрыта", str(old_id) not in h.warehouse_shown())
+    app._warehouse_set_status(app.tr("bookings.filter_all"))
+    app._warehouse_toggle_all_time()
+    h.check("«за всё время» - давняя видна", str(old_id) in h.warehouse_shown())
+    app._warehouse_toggle_all_time()
+    app.warehouse_search_entry.insert(0, "давно выдана")
+    app.refresh_warehouse()
+    h.check("поиск находит давнюю и без «за всё время»", h.warehouse_shown() == [str(old_id)], h.warehouse_shown())
+    for text in ("+7 (900) 000-03-48", "8 900 000 03 48"):
+        app.warehouse_search_entry.delete(0, "end")
+        app.warehouse_search_entry.insert(0, text)
+        app.refresh_warehouse()
+        h.check(f"поиск по телефону «{text}» - все детали машины",
+                no_booking and {str(no_booking[0]), str(old_id)} <= set(h.warehouse_shown()), h.warehouse_shown())
+    app.warehouse_search_entry.delete(0, "end")
+    app.refresh_warehouse()
+
+
+def test_warehouse_english_ui(h):
+    """Интерфейс на английском: статусы на складе по-английски, а «Изменить» / меню записывают в базу
+    статус как всегда (по-русски) - деталь не пропадает из фильтров и «Со склада»"""
+    app = h.app
+    h.warehouse_form("т346тт799", "Lada", "Vesta", "9000000349", "Тест Склад English", part="Тест деталь english")
+    part = h.warehouse_part("Тест деталь english")
+    if not h.check("деталь заказана", part, part):
+        return
+    lang = app.i18n.lang
+    try:
+        app.i18n.load("en")
+        h.warehouse_edit(part[0], status="на складе")
+        row = h.q("SELECT status, received_date FROM warehouse_parts WHERE id = %s", (part[0],))[0]
+        h.check("en, «Изменить» → In stock: в базе «на складе», дата прихода сегодня",
+                row == ("на складе", date.today()), row)
+        h.warehouse_select(part[0])
+        shown_status = app.warehouse_tree.item(app.warehouse_tree.selection()[0], "values")[7]
+        h.check("en: в таблице статус по-английски",
+                shown_status == app.tr("warehouse.status_in_stock") and shown_status != "на складе", shown_status)
+        h.warehouse_set_status(part[0], "выдано")
+        h.answers[:] = [True]
+        h.warehouse_set_status(part[0], "на складе")
+        h.answers[:] = []
+        h.check("en, меню: «выдано» → «на складе» (с вопросом)",
+                h.warehouse_part("Тест деталь english")[1] == "на складе")
+        h.works_form("т346тт799", master=None, save=False)
+        h.check("en: деталь предлагается «Со склада»",
+                any(p[0] == part[0] for p in app.current_car_warehouse_parts), app.current_car_warehouse_parts)
+        app.clear_work_form()
+    finally:
+        app.i18n.load(lang)
+
+
 TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_works_one_record,
          test_warehouse_chain, test_staff_payment, test_finance_entries, test_report_other_period,
          test_new_owner, test_fire_worker, test_cancel_booking_with_works,
@@ -2177,4 +2417,6 @@ TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_w
          test_work_parts_mileage_vin, test_warehouse_edit_search_goto,
          test_staff_calendar_clicks, test_settings_dictionaries, test_info_windows_and_pdf,
          test_complete_twice, test_statistics_monthly,
-         test_tires_leave_parts, test_tires_income]
+         test_tires_leave_parts, test_tires_income,
+         test_warehouse_edit_dates_paid_delete, test_warehouse_order_money, test_warehouse_goto_and_lists,
+         test_warehouse_english_ui]

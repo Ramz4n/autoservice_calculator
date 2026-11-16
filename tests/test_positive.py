@@ -5,10 +5,12 @@ from datetime import date, timedelta
 
 PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799",
           "Т140ТТ799", "Т141ТТ799", "Т142ТТ799", "Т143ТТ799", "Т144ТТ799", "Т145ТТ799", "Т146ТТ799", "Т147ТТ799",
-          "Т148ТТ799", "Т149ТТ799", "Т150ТТ799", "Т151ТТ799", "Т152ТТ799", "Т153ТТ799"]
+          "Т148ТТ799", "Т149ТТ799", "Т150ТТ799", "Т151ТТ799", "Т152ТТ799", "Т153ТТ799",
+          "Т154ТТ799", "Т155ТТ799", "Т156ТТ799", "Т157ТТ799", "Т158ТТ799", "Т159ТТ799"]
 PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108",
           "+79000000140", "+79000000141", "+79000000142", "+79000000143", "+79000000144", "+79000000145", "+79000000146", "+79000000147",
-          "+79000000148", "+79000000149", "+79000000150", "+79000000151", "+79000000152", "+79000000153"]
+          "+79000000148", "+79000000149", "+79000000150", "+79000000151", "+79000000152", "+79000000153",
+          "+79000000154", "+79000000155", "+79000000156", "+79000000157", "+79000000158", "+79000000159"]
 
 
 def prepare(h):
@@ -1261,8 +1263,9 @@ def test_tires_edit_issue(h):
     app.warehouse_show_page("tires")
     app.show_add_part_form("tires", tire_id=tire_id)
     h.wait(300)
-    h.check("форма изменения: данные комплекта и машины",
-            app.tire_size_entry.get() == "205/55 R16" and app.tire_location_entry.get() == "А-12"
+    h.check("форма изменения: данные комплекта и машины (размер - двумя полями: 205/55 и R16)",
+            app.tire_size_entry.get() == "205/55" and app.tire_radius_entry.get() == "R16"
+            and app.tire_location_entry.get() == "А-12"
             and app.tire_season_switch.get() == app.tr("tires.season_winter") and app.tire_rims_var.get()
             and app.wh_car_number_entry.get() == "Т150ТТ799" and app.wh_selected_car_id is not None
             and app.wh_ok_button.cget("text") == app.tr("common.save"),
@@ -1330,7 +1333,7 @@ def test_tires_filters(h):
     h.check("сезон «Зимние» - летних нет", old["id"] not in {t["id"] for t in app.tires_rows.values()}
             and all(t["season"] == "winter" for t in app.tires_rows.values()))
     app.tires_season_filter = None
-    for text in ("185/65", "г-1", "т151тт", "000000151"):
+    for text in ("185/65", "г-1", "т151тт", "000000151", "8 900 000 01 51", "+7 (900) 000-01-51"):
         app.tires_search_entry.delete(0, "end")
         app.tires_search_entry.insert(0, text)
         app.refresh_tires()
@@ -1704,6 +1707,393 @@ def test_booking_slot_tooltip(h):
         h.root.update()
 
 
+def test_tires_cells_dates_lists(h):
+    """Шины: «скоро срок» на границах (сегодня и через 14 дней - скоро, через 15 - на хранении, вчера - истёк);
+    «хранить до» = дата приёма - можно; выданные ячейку не занимают (новый комплект туда - без вопроса,
+    изменить выданный - без вопроса про ячейку); «Вернуть на хранение» в занятую ячейку - вопрос («Нет» - выдано,
+    «Да» - на хранении); сменили машину комплекта - шины и подсказка у другой машины; выданные больше 3 месяцев
+    назад скрыты, видны «за всё время» и поиском; «Показано N из M»; фишка сезона - второй клик снимает;
+    перенос выданной запчасти - комплект «выдано»"""
+    from tires import display_status
+    app, db = h.app, h.app.db
+    t = date(2026, 2, 1)
+    h.check("«скоро срок»: срок сегодня и через 14 дней - скоро, через 15 - на хранении, вчера - истёк",
+            (display_status("stored", t, t), display_status("stored", t + timedelta(days=14), t),
+             display_status("stored", t + timedelta(days=15), t), display_status("stored", t - timedelta(days=1), t))
+            == ("soon", "soon", "stored", "overdue"))
+
+    today = date.today().strftime("%d.%m.%Y")
+    h.tires_form("т154тт799", "Kia", "Rio", "9000000154", "Тест Шины Ячейка", season="winter", location="З-1",
+                 received=today, until=today, notes="Тест шины ячейка выдана")
+    first = h.tire(notes="Тест шины ячейка выдана")
+    if not h.check("«хранить до» = дата приёма - сохранено, статус «скоро срок»",
+                   first and first["store_until"] == date.today()
+                   and display_status(first["status"], first["store_until"]) == "soon", first):
+        return
+    h.tires_select(first["id"])
+    app.issue_selected_tires()
+    cell_question = lambda since: [d for d in h.dialogs_since(since) if "уже лежат" in d[2]]
+    n = len(h.dialogs)
+    h.tires_form("Т154ТТ799", season="summer", location="з-1", notes="Тест шины ячейка новые")
+    second = h.tire(notes="Тест шины ячейка новые")
+    h.check("ячейка выданных свободна: новый комплект туда - без вопроса", second and not cell_question(n),
+            cell_question(n))
+    n = len(h.dialogs)
+    h.tires_form(None, season="winter", price="700", tire_id=first["id"])
+    first = db.get_tire_storage_by_id(first["id"])
+    h.check("изменить выданный комплект (цена) - без вопроса про ячейку, сохранено",
+            not cell_question(n) and float(first["price"] or 0) == 700 and first["status"] == "issued",
+            (cell_question(n), first))
+    h.tires_select(first["id"])
+    n = len(h.dialogs)
+    h.answers[:] = [True, False]   # вернуть? - да; ячейка занята - нет
+    app.return_selected_tires()
+    h.answers[:] = []
+    h.check("«Вернуть на хранение», ячейка занята, «Нет» - вопрос был, комплект «выдано»",
+            cell_question(n) and db.get_tire_storage_by_id(first["id"])["status"] == "issued", h.dialogs_since(n))
+    h.tires_select(first["id"])
+    h.answers[:] = [True, True]
+    app.return_selected_tires()
+    h.answers[:] = []
+    h.check("«Вернуть на хранение», «Да» - на хранении", db.get_tire_storage_by_id(first["id"])["status"] == "stored")
+
+    # Сменили машину у комплекта
+    other = db.get_or_create_car(db.get_or_create_client(full_name="Тест Шины Другая", phone="+79000000155"),
+                                 "Kia", "Rio", "Т155ТТ799")
+    h.tires_form("т155тт799", season="summer", location="З-2", tire_id=second["id"])
+    second = db.get_tire_storage_by_id(second["id"])
+    h.check("сменили машину - комплект у Т155ТТ799, новой строки нет",
+            second["car_id"] == other and h.q("SELECT COUNT(*) FROM tire_storage WHERE notes = %s",
+                                               ("Тест шины ячейка новые",))[0][0] == 1, second)
+    h.check("подсказка «На хранении» - у новой машины, у прежней этого комплекта нет",
+            "З-2" in app.find_car_by_plate("Т155ТТ799")["text"]
+            and "З-2" not in app.find_car_by_plate("Т154ТТ799")["text"])
+
+    # Выдано давно
+    h.tires_form("Т155ТТ799", season="all", notes="Тест шины выданы давно")
+    old = h.tire(notes="Тест шины выданы давно")
+    long_ago = date.today() - timedelta(days=200)
+    h.q("UPDATE tire_storage SET received_date = %s WHERE id = %s", (long_ago, old["id"]))
+    db.set_tire_storage_status(old["id"], "issued", long_ago + timedelta(days=10))
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("tires")
+    app.tires_search_entry.delete(0, "end")
+    app.tires_show_all_time, app.tires_status_filter, app.tires_season_filter = False, "all", None
+    app.refresh_tires()
+    shown = lambda: {t["id"] for t in app.tires_rows.values()}
+    total = h.q("SELECT COUNT(*) FROM tire_storage")[0][0]
+    h.check("«Все»: выданные полгода назад скрыты, кнопка «за всё время» видна",
+            old["id"] not in shown() and app.tires_range_btn.winfo_manager())
+    h.check("«Показано N из M»", app.tires_count_label.cget("text")
+            == app.tr("bookings.count_shown", shown=len(shown()), total=total), app.tires_count_label.cget("text"))
+    app._tires_set_status("issued")
+    h.check("«Выдано» - давние тоже скрыты", old["id"] not in shown())
+    app._tires_set_status("all")
+    app._tires_toggle_all_time()
+    h.check("«за всё время» - видны", old["id"] in shown())
+    app._tires_toggle_all_time()
+    app.tires_search_entry.insert(0, "выданы давно")
+    app.refresh_tires()
+    h.check("поиск находит давние и без «за всё время»", shown() == {old["id"]}, shown())
+    app.clear_tires_search()
+    app._tires_set_season("all")
+    h.check("фишка «Всесезонные» - только всесезонные", app.tires_season_filter == "all"
+            and all(t["season"] == "all" for t in app.tires_rows.values()))
+    app._tires_set_season("all")
+    h.check("второй клик по той же фишке - сезон снят", app.tires_season_filter is None)
+
+    # Перенос выданной запчасти - комплект «выдано» с датой
+    h.warehouse_form("т156тт799", "Kia", "Rio", "9000000156", "Тест Шины Перенос Выдано", part="Тест шины летние выданы")
+    part = h.warehouse_part("Тест шины летние выданы")
+    h.warehouse_set_status(part[0], "на складе")
+    h.warehouse_set_status(part[0], "выдано")
+    moved = db.get_tire_storage_by_id(db.move_warehouse_part_to_tires(part[0]))
+    h.check("перенос выданной запчасти - комплект «выдано», дата выдачи = дата прихода, летние",
+            moved and moved["status"] == "issued" and moved["issued_date"] == date.today()
+            and moved["season"] == "summer", moved)
+
+
+def test_warehouse_row_colors(h):
+    """«Склад» → «Запчасти» и «Шины»: строки залиты цветом статуса, как в «Записях» - у статуса один цвет
+    (без чередования через строку), тот же светлый оттенок, что у статуса записи с таким же цветом полоски;
+    выбранная строка - как в «Записях»"""
+    import tkinter.ttk as ttk
+    from tires import STATUS_STORED, STATUS_OVERDUE
+    app = h.app
+    h.warehouse_form("т157тт799", "Kia", "Rio", "9000000157", "Тест Склад Цвета", part="Тест деталь цвет в пути")
+    h.warehouse_form("Т157ТТ799", part="Тест деталь цвет на складе")
+    h.warehouse_set_status(h.warehouse_part("Тест деталь цвет на складе")[0], "на складе")
+    h.tires_form("Т157ТТ799", season="winter", notes="Тест шины цвет")
+    overdue = h.tire(notes="Тест шины цвет")
+    h.q("UPDATE tire_storage SET received_date = %s, store_until = %s WHERE id = %s",
+        (date.today() - timedelta(days=30), date.today() - timedelta(days=1), overdue["id"]))
+    h.tires_form("Т157ТТ799", season="summer", notes="Тест шины цвет хранение")
+
+    # Цвет строки статуса склада = цвет строки статуса записи с той же полоской
+    booking_bg = {app.BOOKING_STATUS_COLORS[s]: bg for s, bg in app.BOOKING_ROW_COLORS.items()}
+    for title, stripes, rows in (("запчасти", app.WAREHOUSE_STATUS_COLORS, app.WAREHOUSE_ROW_COLORS),
+                                 ("шины", app.TIRE_STATUS_COLORS, app.TIRE_ROW_COLORS)):
+        h.check(f"{title}: фон статуса - как у статуса «Записей» с тем же цветом полоски",
+                set(stripes) == set(rows) and all(rows[s] == booking_bg.get(stripes[s]) for s in stripes),
+                {s: (rows.get(s), booking_bg.get(stripes[s])) for s in stripes})
+
+    def check_tree(title, tree, colors, status_of):
+        items = tree.get_children()
+        if not h.check(f"{title}: в списке есть строки", items):
+            return
+        wrong, shown = [], {}
+        for index, item in enumerate(items):
+            tags = tree.item(item, "tags")
+            status = status_of(item, tags)
+            bg_tags = [t for t in tags if str(t).startswith("bg_")]
+            background = str(tree.tag_configure(f"bg_{status}", "background"))
+            if bg_tags != [f"bg_{status}"] or background != colors.get(status):
+                wrong.append((index, tags))
+            shown.setdefault(status, set()).add(background)
+        h.check(f"{title}: у каждой строки фон своего статуса", not wrong, wrong[:5])
+        h.check(f"{title}: у строк одного статуса один цвет (нет чередования через строку)",
+                all(len(c) == 1 for c in shown.values()) and len(items) >= 2, shown)
+
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("parts")
+    app.warehouse_search_entry.delete(0, "end")
+    app.warehouse_search_entry.insert(0, "Т157ТТ799")
+    app._warehouse_set_status(app.tr("bookings.filter_all"))
+    check_tree("запчасти", app.warehouse_tree, app.WAREHOUSE_ROW_COLORS,
+               lambda item, tags: next(t for t in tags if t in app.WAREHOUSE_ROW_COLORS))
+    app.clear_warehouse_search()
+
+    app.warehouse_show_page("tires")
+    app.tires_status_filter, app.tires_season_filter = "all", None
+    app.tires_search_entry.delete(0, "end")
+    app.tires_search_entry.insert(0, "Т157ТТ799")
+    app.refresh_tires()
+    check_tree("шины", app.tires_tree, app.TIRE_ROW_COLORS, lambda item, tags: next(
+        t for t in tags if t in app.TIRE_ROW_COLORS))
+    statuses = {next(t for t in app.tires_tree.item(i, "tags") if t in app.TIRE_ROW_COLORS)
+                for i in app.tires_tree.get_children()}
+    h.check("шины: просроченный и на хранении - разные цвета", {STATUS_STORED, STATUS_OVERDUE} <= statuses
+            and app.TIRE_ROW_COLORS[STATUS_STORED] != app.TIRE_ROW_COLORS[STATUS_OVERDUE], statuses)
+    app.clear_tires_search()
+    h.check("выбранная строка на складе - как в «Записях»",
+            app.BOOKINGS_SELECTED_BG in str(ttk.Style().map("Warehouse.Treeview", "background")))
+
+
+def test_text_clipboard(h):
+    """Копировать / вставить в полях (на примере «Шины» → «Изменить» → «Примечание»): Ctrl+C / V / X / A в русской
+    раскладке (по коду клавиши) и в английской; правый клик по полю - меню: «Копировать», «Вставить» (в пустое поле -
+    вместо серой подсказки, а не после неё), «Выделить всё»; в поле под замком «Добавить работу» вставить нельзя,
+    копировать можно"""
+    app = h.app
+    note = "Тест примечание для копирования"
+    h.tires_form("т158тт799", "Kia", "Rio", "9000000158", "Тест Копирование", season="winter", notes=note)
+    tire = h.tire(notes=note)
+    if not h.check("комплект сохранён", tire):
+        return
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("tires")
+    app.show_add_part_form("tires", tire_id=tire["id"])
+    h.wait(300)
+    notes = app.tire_notes_entry._entry
+    size = app.tire_size_entry._entry
+
+    from types import SimpleNamespace
+    h.check("Ctrl+клавиша в полях ввода - обработчик программы (класс Entry)",
+            "_text_clipboard_key" in h.root.bind_class("Entry", "<Control-KeyPress>"))
+
+    def key(widget, keycode, keysym):
+        """Ctrl+клавиша. keysym не задан - настоящее нажатие (Tk берёт букву из включённой раскладки); задан - Tk
+        не сымитирует букву чужой раскладки, и обработчику класса Entry отдаётся то, что Tk присылает в ней"""
+        widget.focus_force()
+        h.root.update()
+        if keysym:
+            app._text_clipboard_key(SimpleNamespace(keycode=keycode, keysym=keysym, state=0x4, widget=widget))
+        else:   # настоящее нажатие в той раскладке, что сейчас включена
+            widget.event_generate("<Control-KeyPress>", keycode=keycode)
+        h.root.update()
+
+    def clipboard():
+        try:
+            return h.root.clipboard_get()
+        except Exception:
+            return None
+
+    try:
+        h.check("форма изменения: примечание комплекта в поле", app.tire_notes_entry.get() == note,
+                app.tire_notes_entry.get())
+        for layout, keys in (("русская раскладка", ("Cyrillic_ef", "Cyrillic_es")),
+                            ("английская раскладка", ("a", "c")), ("настоящее нажатие", (None, None))):
+            h.root.clipboard_clear()
+            notes.selection_clear()
+            key(notes, 65, keys[0])
+            h.check(f"{layout}: Ctrl+A - выделено всё примечание", notes.selection_present()
+                    and notes.selection_get() == note)
+            key(notes, 67, keys[1])
+            h.check(f"{layout}: Ctrl+C - примечание в буфере", clipboard() == note, clipboard())
+
+        h.root.clipboard_clear()
+        h.root.clipboard_append(" вставка")
+        notes.selection_clear()   # выделенное вставка заменила бы - вставляем в конец
+        notes.icursor("end")
+        key(notes, 86, "Cyrillic_em")
+        h.check("Ctrl+V (русская раскладка) - вставлено", app.tire_notes_entry.get() == note + " вставка",
+                app.tire_notes_entry.get())
+        notes.selection_range(len(note), "end")
+        key(notes, 88, "Cyrillic_che")
+        h.check("Ctrl+X (русская раскладка) - вырезано, в буфере", app.tire_notes_entry.get() == note
+                and clipboard() == " вставка", (app.tire_notes_entry.get(), clipboard()))
+
+        # Меню правого клика (пункты: 0 вырезать, 1 копировать, 2 вставить, 4 выделить всё)
+        menu = app.text_context_menu
+        labels = [menu.entrycget(i, "label").strip() for i in (0, 1, 2, 4)]
+        h.check("меню поля: Вырезать / Копировать / Вставить / Выделить всё",
+                labels == [app.tr(k) for k in ("ctx.cut", "ctx.copy", "ctx.paste", "ctx.select_all")], labels)
+        h.root.clipboard_clear()
+        app._text_menu_widget = notes
+        menu.invoke(4)
+        menu.invoke(1)
+        h.check("меню: «Выделить всё», «Копировать» - примечание в буфере", clipboard() == note, clipboard())
+        h.check("в пустом поле размера - серая подсказка", app.tire_size_entry._placeholder_text_active)
+        app._text_menu_widget = size
+        menu.invoke(2)
+        h.root.update()
+        h.check("меню: «Вставить» в пустое поле - вместо подсказки, не после неё", app.tire_size_entry.get() == note,
+                app.tire_size_entry.get())
+    finally:
+        app.hide_add_part_form()
+
+    # Поле под замком «Добавить работу»: вставить нельзя, копировать можно
+    h.works_form("Т158ТТ799", master=None, save=False)
+    h.root.update()
+    brand = app.car_brand_entry._entry
+    if h.check("«Добавить работу»: марка найденной машины под замком", "brand" in app.works_locked, app.works_locked):
+        h.check("под замком: в меню «Вставить» и «Вырезать» недоступны", not app._text_widget_editable(brand))
+        h.root.clipboard_clear()
+        h.root.clipboard_append("Мусор")
+        key(brand, 86, "Cyrillic_em")
+        h.check("под замком: Ctrl+V - марка не изменилась", app.car_brand_entry.get() == "Kia",
+                app.car_brand_entry.get())
+        brand.selection_range(0, "end")
+        key(brand, 67, "Cyrillic_es")
+        h.check("под замком: Ctrl+C - копируется", clipboard() == "Kia", clipboard())
+    app.clear_work_form()
+
+
+def test_tires_size_radius(h):
+    """Размер шин двумя полями: «ширина/профиль» и «радиус» - со списками (вошли в поле - все, вводят - подходящие,
+    выбрали - в поле, курсор дальше; ваши размеры - первыми); как ни впиши («205 55» + «16», «205\\55» + «р17»,
+    весь размер в первом поле) - в базе «205/55 R16»; изменить - поля разобраны, новый радиус сохраняется.
+    Фишки радиусов над таблицей: по порядку, числа как в базе, фильтр, второй клик снимает"""
+    from collections import Counter
+    from tires import (size_from_fields, split_size, rim_of, normalize_radius, COMMON_RADII,
+                       COMMON_WIDTH_PROFILES)
+    app = h.app
+    h.check("правила: «205 55»+«16», «205\\55»+«р17», «205-55»+«R 18», весь размер в 1-м поле, 16с, zr18, 31х10,5",
+            [size_from_fields(*x) for x in (("205 55", "16"), ("205\\55", "р17"), ("205-55", "R 18"),
+                                             ("195/65r15", ""), ("205 55 16", "R17"), ("195/75", "16с"),
+                                             ("225/45", "zr18"), ("31х10,5", "15"), ("", "R16"), ("", ""))]
+            == ["205/55 R16", "205/55 R17", "205/55 R18", "195/65 R15", "205/55 R16", "195/75 R16C", "225/45 ZR18",
+                "31x10.5 R15", "R16", ""])
+    h.check("правила: не радиус («abc», «16.7») - нельзя", normalize_radius("abc") is None
+            and size_from_fields("205/55", "16.7") is None)
+    h.check("правила: из базы - на два поля; посадочный диаметр для фишек",
+            split_size("225/45 ZR18") == ("225/45", "ZR18") and split_size("R16") == ("", "R16")
+            and split_size("что-то своё") == ("что-то своё", "")
+            and [rim_of(s) for s in ("195/75 R16C", "225/45 ZR18", "235/65 R17.5", "205/55")]
+            == ["R16", "R18", "R17.5", None])
+
+    # Форма: списки
+    h.tires_form("т159тт799", "Kia", "Rio", "9000000159", "Тест Шины Размер", season="winter", size="235/75",
+                 radius="15", notes="Тест шины размер 1")
+    first = h.tire(notes="Тест шины размер 1")
+    h.check("«235/75» + «15» - в базе «235/75 R15»", first and first["tire_size"] == "235/75 R15", first)
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("tires")
+    app.show_add_part_form("tires")
+    h.wait(300)
+    try:
+        wp, radius = app.tire_size_suggest, app.tire_radius_suggest
+        listed = lambda s: list(s.listbox.get(0, "end")) if s.listbox.popup_frame.winfo_ismapped() else []
+        app.tire_size_entry.focus_force()
+        h.wait(100)
+        used = {split_size(t["tire_size"])[0] for t in app.db.get_all_tire_storage() if t["tire_size"]}
+        values = listed(wp)
+        first_common = next((i for i, v in enumerate(values) if v in COMMON_WIDTH_PROFILES and v not in used),
+                            len(values))
+        h.check("вошли в «ширина/профиль» - список: ваши размеры (235/75) - раньше обычных, которых у вас нет",
+                "235/75" in values and values.index("235/75") < first_common
+                and all(v in used for v in values[:first_common]), values[:first_common + 2])
+        app.tire_radius_entry.focus_force()
+        h.wait(250)
+        h.check("вошли в «радиус» - список R13 … R22, грузовые", listed(radius)[:len(COMMON_RADII)] == list(COMMON_RADII),
+                listed(radius))
+        h.check("ушли из «ширина/профиль» - её список спрятан", not listed(wp))
+        h.wait(100)
+        app.tire_radius_entry.insert(0, "17")
+        radius.on_key()
+        h.check("вписали «17» - в списке R17 (и нет R16)", "R17" in listed(radius) and "R16" not in listed(radius),
+                listed(radius))
+        radius.listbox.selection_clear(0, "end")
+        radius.listbox.selection_set(listed(radius).index("R17"))
+        radius.pick()
+        h.wait(100)
+        h.check("выбрали R17 - в поле, список спрятан, курсор в «Марка шин»",
+                app.tire_radius_entry.get() == "R17" and not listed(radius)
+                and app.root.focus_get() == app.tire_brand_entry._entry, app.tire_radius_entry.get())
+        app.tire_size_entry.focus_force()
+        h.wait(100)   # поле получило фокус (серая подсказка убрана) - теперь вписываем
+        app.tire_size_entry.insert(0, "2055")
+        wp.on_key()
+        h.check("вписали «2055» - в списке 205/55 (без «/»)", "205/55" in listed(wp), listed(wp))
+        wp.listbox.selection_clear(0, "end")
+        wp.listbox.selection_set(listed(wp).index("205/55"))
+        wp.pick()
+        h.wait(100)
+        h.check("выбрали 205/55 - в поле, курсор в «Радиус»", app.tire_size_entry.get() == "205/55"
+                and app.root.focus_get() == app.tire_radius_entry._entry, app.tire_size_entry.get())
+    finally:
+        app.hide_add_part_form()
+
+    # Как ни впиши - в базе одинаково
+    for size, rad, note, expected in (("205 55", "16", "Тест шины размер 2", "205/55 R16"),
+                                      ("205\\55", "р17", "Тест шины размер 3", "205/55 R17"),
+                                      ("195/65r15", "", "Тест шины размер 4", "195/65 R15")):
+        h.tires_form("Т159ТТ799", season="summer", size=size, radius=rad, notes=note)
+        tire = h.tire(notes=note)
+        h.check(f"«{size}» + «{rad}» - в базе «{expected}»", tire and tire["tire_size"] == expected, tire)
+
+    # Изменить: поля разобраны, новый радиус
+    second = h.tire(notes="Тест шины размер 2")
+    app.show_add_part_form("tires", tire_id=second["id"])
+    h.wait(300)
+    h.check("изменить: размер разобран на два поля", (app.tire_size_entry.get(), app.tire_radius_entry.get())
+            == ("205/55", "R16"), (app.tire_size_entry.get(), app.tire_radius_entry.get()))
+    app.hide_add_part_form()
+    h.tires_form(None, season="summer", radius="R18", tire_id=second["id"])
+    h.check("изменили радиус - «205/55 R18»", app.db.get_tire_storage_by_id(second["id"])["tire_size"] == "205/55 R18")
+
+    # Фишки радиусов
+    app.switch_tab("warehouse")
+    app.warehouse_show_page("tires")
+    app.tires_search_entry.delete(0, "end")
+    app.tires_show_all_time = True
+    app.tires_status_filter, app.tires_season_filter, app.tires_radius_filter = "all", None, None
+    app.refresh_tires()
+    counts = Counter(r for r in (rim_of(t["tire_size"]) for t in app.db.get_all_tire_storage()) if r)
+    chips = [b.cget("text") for b in app.tires_radius_bar.winfo_children()]
+    expected = [f"{rim}  {counts[rim]}" for rim in sorted(counts, key=lambda r: float(r[1:]))]
+    h.check("фишки радиусов: по порядку, число - как в базе", chips == expected, (chips, expected))
+    app._tires_set_radius("R15")
+    rows = list(app.tires_rows.values())
+    h.check("фишка R15 - только R15, наши R15 в списке", rows and all(rim_of(t["tire_size"]) == "R15" for t in rows)
+            and {first["id"], h.tire(notes="Тест шины размер 4")["id"]} <= {t["id"] for t in rows},
+            [t["tire_size"] for t in rows])
+    app._tires_set_radius("R15")
+    h.check("второй клик по R15 - фильтр снят", app.tires_radius_filter is None
+            and len(app.tires_rows) >= len(rows))
+    app.tires_show_all_time = False
+
+
 TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booking_region_continues,
          test_booking_pick_car_clears_error, test_warehouse_pick_car, test_work_pick_car,
          test_work_from_booking, test_work_new_car, test_work_brand_from_catalog, test_car_hints_same_everywhere,
@@ -1714,4 +2104,4 @@ TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booki
          test_positions, test_finance_category_follows_switch, test_users_and_roles,
          test_locales, test_login, test_bookings_no_phone_red, test_bookings_row_colors, test_bookings_middle_click_scroll, test_tables_middle_click_scroll,
          test_tires_rules, test_tires_accept, test_tires_edit_issue, test_tires_filters, test_tires_transfer, test_tires_hint_soon_receipt,
-         test_booking_slot_tooltip, test_period_follows_new_day, test_booking_with_master]
+         test_tires_cells_dates_lists, test_warehouse_row_colors, test_text_clipboard, test_tires_size_radius, test_booking_slot_tooltip, test_period_follows_new_day, test_booking_with_master]

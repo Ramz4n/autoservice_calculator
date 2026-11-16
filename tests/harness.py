@@ -331,9 +331,10 @@ class Harness:
 
     def tires_form(self, plate, brand=None, model=None, phone10=None, name=None, season="winter", size=None,
                    tire_brand=None, qty=None, location=None, received=None, until=None, price=None, paid=None,
-                   rims=None, notes=None, tire_id=None, save=True, close=True, to_catalog=True):
+                   rims=None, notes=None, tire_id=None, save=True, close=True, to_catalog=True, radius=None):
         """Склад → «Шины» → «Принять шины» (или изменить комплект tire_id): госномер, данные новой машины,
         раздел «Шины», «Принять на хранение». season - summer / winter / all / None (не выбран).
+        size - поле «ширина/профиль» (можно и весь размер «205/55 R16» - разберётся сам), radius - «радиус».
         Поля, переданные как None, остаются как в форме"""
         app = self.app
         if to_catalog and brand and model:
@@ -348,6 +349,7 @@ class Harness:
             self.root.update()
         for entry, value in ((app.wh_new_brand_entry, brand), (app.wh_new_model_entry, model),
                              (app.wh_new_client_name_entry, name), (app.tire_size_entry, size),
+                             (app.tire_radius_entry, radius),
                              (app.tire_brand_entry, tire_brand), (app.tire_quantity_entry, qty),
                              (app.tire_location_entry, location), (app.tire_received_entry, received),
                              (app.tire_until_entry, until), (app.tire_price_entry, price),
@@ -379,7 +381,7 @@ class Harness:
         app.switch_tab("warehouse")
         app.warehouse_show_page("tires")
         app.tires_show_all_time = True
-        app.tires_status_filter, app.tires_season_filter = "all", None
+        app.tires_status_filter, app.tires_season_filter, app.tires_radius_filter = "all", None, None
         app.refresh_tires()
         item = next((i for i, t in app.tires_rows.items() if t["id"] == tire_id), None)
         if item is None:
@@ -440,6 +442,46 @@ class Harness:
             return False
         app.warehouse_tree.selection_set(item)
         return True
+
+    def warehouse_edit(self, part_id, name=None, qty=None, price=None, status=None, notes=None, paid=None,
+                       status_text=None, answers=()):
+        """Склад → выбрать деталь → «Изменить»: поля (None - как было), статус (status - как в базе, по-русски;
+        status_text - текст в поле статуса как есть), «Уже оплачено», «Сохранить». Окно, если осталось открытым
+        (отказ), закрывается. False - окно не открылось"""
+        app = self.app
+        if not self.warehouse_select(part_id):
+            return False
+        before = set(self.root.winfo_children())
+        app.edit_warehouse_part()
+        self.root.update()
+        win = next((x for x in self.root.winfo_children() if x not in before and isinstance(x, ctk.CTkToplevel)), None)
+        if win is None:
+            return False
+        name_e, qty_e, price_e, notes_e = self.find_widgets(win, ctk.CTkEntry)[:4]
+        for entry, value in ((name_e, name), (qty_e, qty), (price_e, price), (notes_e, notes)):
+            if value is not None:
+                entry.delete(0, "end"); entry.insert(0, value)
+        combo = self.find_widgets(win, ctk.CTkComboBox)[0]
+        if status is not None:
+            combo.set(app.warehouse_status_label(status))
+        if status_text is not None:
+            combo.set(status_text)
+        if paid is not None:
+            box = self.find_widgets(win, ctk.CTkCheckBox)[0]
+            box.select() if paid else box.deselect()
+        self.answers[:] = list(answers)
+        self.find_button(win, app.tr("common.save")).invoke()
+        self.root.update()
+        self.answers[:] = []
+        if win.winfo_exists():
+            win.grab_release()
+            win.destroy()
+        return True
+
+    def warehouse_shown(self):
+        """id деталей, которые сейчас видны в таблице склада (строками)"""
+        tree = self.app.warehouse_tree
+        return [str(tree.item(i, "values")[0]) for i in tree.get_children()]
 
     def new_windows(self, action):
         """Выполнить действие и вернуть окна (CTkToplevel), которые оно открыло - и закрыть их"""
