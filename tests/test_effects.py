@@ -16,7 +16,8 @@ PLATES = ["Т301ТТ799", "Т302ТТ799", "Т303ТТ799", "Т304ТТ799", "Т305
           "Т326ТТ799", "Т327ТТ799", "Т328ТТ799", "Т329ТТ799", "Т330ТТ799", "Т331ТТ799", "Т332ТТ799",
           "Т333ТТ799", "Т334ТТ799", "Т335ТТ799", "Т336ТТ799",
           "Т337ТТ799", "Т338ТТ799", "Т339ТТ799", "Т340ТТ799", "Т341ТТ799",
-          "Т342ТТ799", "Т343ТТ799", "Т344ТТ799", "Т345ТТ799", "Т346ТТ799"]
+          "Т342ТТ799", "Т343ТТ799", "Т344ТТ799", "Т345ТТ799", "Т346ТТ799",
+          "Т347ТТ799", "Т348ТТ799", "Т349ТТ799"]
 PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+79000000305", "+79000000306",
           "+79000000307", "+79000000308", "+79000000309", "+79000000310", "+79000000311", "+79000000312",
           "+79000000313", "+79000000314", "+79000000315", "+79000000316", "+79000000317", "+79000000318",
@@ -27,7 +28,8 @@ PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+7900
           "+79000000329", "+79000000330", "+79000000331", "+79000000332", "+79000000334", "+79000000335",
           "+79000000336", "+79000000337", "+79000000338", "+79000000339",
           "+79000000340", "+79000000341", "+79000000342", "+79000000343", "+79000000344",
-          "+79000000345", "+79000000346", "+79000000347", "+79000000348", "+79000000349"]
+          "+79000000345", "+79000000346", "+79000000347", "+79000000348", "+79000000349",
+          "+79000000350", "+79000000351", "+79000000352"]
 MASTER = "Тест Мастер"
 STAFF_POSITION, STAFF = "Тест-администратор", "Тест Админ"   # должность НЕ «с машинами»
 
@@ -2406,6 +2408,119 @@ def test_warehouse_english_ui(h):
         app.i18n.load(lang)
 
 
+def test_booking_vin_custom_time_to_work(h):
+    """«Записать клиента» → другие разделы: VIN и своё время записи видны в «Записях» (время - по порядку
+    среди записей на время кнопок), в «Добавить работу» по этой записи (VIN подставлен); сохранили наряд -
+    VIN машины не потерялся, наряд привязан к записи"""
+    from datetime import timedelta
+    app = h.app
+    day = date.today() + timedelta(days=5)
+    vin = "TESTVIN0000000347"
+    h.booking_form("Т347ТТ799", "ТестВин", "Модель", "9000000350", "Тест Вин Время", day=day, custom_time="915",
+                   vin=vin)
+    car = h.car("Т347ТТ799")
+    rows = h.q("SELECT id, booking_time FROM bookings WHERE car_id = %s", (car[0],)) if car else ()
+    if not h.check("запись на своё время 09:15 с VIN", rows and rows[0][1] == "09:15"
+                   and h.q("SELECT vin FROM client_cars WHERE id = %s", (car[0],))[0][0] == vin, rows):
+        return
+    booking_id = rows[0][0]
+    # Запись на время кнопки в тот же день - для порядка в «Записях»
+    slot = next(t for t in h.m.booking_time_slots() if t > "09:15")
+    h.booking_form("Т348ТТ799", "ТестВин", "Модель", "9000000351", "Тест Вин Кнопка", day=day, time=slot)
+    other = h.q("SELECT b.id FROM bookings b JOIN client_cars c ON c.id = b.car_id WHERE c.car_number = 'Т348ТТ799'")
+
+    # «Записи»: время 09:15 в строке, и строка - раньше записи на время кнопки
+    if h.check("«Записи»: запись видна", h.bookings_select(booking_id)):
+        tree = app.bookings_tree
+        index = {str(tree.item(i, "values")[0]): (n, tree.item(i, "values"))
+                 for n, i in enumerate(tree.get_children())}
+        mine, theirs = index.get(str(booking_id)), index.get(str(other[0][0]) if other else "")
+        # Сортировка по дате и времени: новые сверху (▼) - 09:15 ниже, старые сверху (▲) - выше
+        earlier_first = not app.bookings_sort_desc
+        h.check("«Записи»: время «09:15», по порядку относительно записи на " + slot,
+                mine and mine[1][3] == "09:15" and theirs and (mine[0] < theirs[0]) == earlier_first,
+                (mine and mine[1][3], mine and mine[0], theirs and theirs[0], app.bookings_sort_desc))
+
+    # «Добавить работу» по записи: VIN подставлен; наряд сохранён - VIN машины тот же
+    app.switch_tab("works")
+    app.clear_work_form()
+    app.open_booking_in_add_work(booking_id)
+    h.root.update()
+    h.check("«Добавить работу» по записи: VIN машины подставлен", app.vin_var.get() == vin, app.vin_var.get())
+    app.refresh_workers_combo()
+    app.worker_combo.set(MASTER)
+    h.add_work_item("Тест работа вин время", 900)
+    app.add_work()
+    h.root.update()
+    work = h.q("SELECT id, booking_id FROM works WHERE description = 'Тест работа вин время'")
+    h.check("наряд привязан к записи на своё время", work and work[0][1] == booking_id, work)
+    h.check("после наряда VIN машины прежний",
+            h.q("SELECT vin FROM client_cars WHERE id = %s", (car[0],))[0][0] == vin)
+    app.clear_work_form()
+
+
+def test_tires_menus_follow_changes(h):
+    """Склад → «Шины»: списки «Сезон» и «Радиус» следуют за базой - приняли комплект с новым радиусом -
+    он появился с числом; выбрали его - числа у статусов и сезонов только для него; выдали - при «На хранении»
+    нашего комплекта нет, а выбранный радиус остаётся; удалили - число радиуса как до приёма"""
+    app = h.app
+
+    def menu_items(menu):
+        return {t.rsplit(None, 1)[0]: int(t.split()[-1]) for t in menu.cget("values")}
+
+    def show(status="all", season=None, radius=None):
+        app.switch_tab("warehouse")
+        app.warehouse_show_page("tires")
+        app.tires_search_entry.delete(0, "end")
+        app.tires_show_all_time = True
+        app.tires_status_filter, app.tires_season_filter, app.tires_radius_filter = status, season, radius
+        app.refresh_tires()
+
+    show()
+    before = menu_items(app.tires_radius_menu).get("R24", 0)
+    h.tires_form("Т349ТТ799", "ТестШины", "Модель", "9000000352", "Тест Шины Списки", season="all", size="305/30",
+                 radius="R24", notes="Тест шины списки")
+    tire = h.tire(notes="Тест шины списки")
+    if not h.check("комплект R24 принят", tire and tire["tire_size"] == "305/30 R24", tire):
+        return
+    show()
+    h.check("принят - в списке «Радиус» R24 стало на 1 больше",
+            menu_items(app.tires_radius_menu).get("R24") == before + 1, menu_items(app.tires_radius_menu))
+    show(radius="R24")
+    rows = list(app.tires_rows.values())
+    status_all = next(b for b in app.tires_status_bar.winfo_children() if hasattr(b, "invoke"))
+    seasons = menu_items(app.tires_season_menu)
+    h.check("выбран R24: строк столько, сколько R24; «Все» у статусов и сезонов - столько же",
+            len(rows) == before + 1 and int(status_all.cget("text").split()[-1]) == len(rows)
+            and seasons.get(app.tr("bookings.filter_all")) == len(rows)
+            and app.tires_radius_menu.get().startswith("R24"), (len(rows), status_all.cget("text"), seasons))
+    h.check("выбран R24: сезон «Всесезонные» есть с числом", seasons.get(app.tire_season_label("all"), 0) >= 1,
+            seasons)
+
+    if h.tires_select(tire["id"]):
+        app.issue_selected_tires()
+        h.root.update()
+    show(status="stored", radius="R24")
+    stored_r24 = [t for t in app.db.get_all_tire_storage()
+                  if t["status"] == "stored" and str(t["tire_size"] or "").endswith("R24")]
+    h.check("выдали: «На хранении» + R24 - нашего комплекта нет, R24 остался выбранным, число - только на хранении",
+            tire["id"] not in {t["id"] for t in app.tires_rows.values()}
+            and app.tires_radius_menu.get().startswith("R24")
+            and menu_items(app.tires_radius_menu).get("R24") == len(stored_r24), menu_items(app.tires_radius_menu))
+
+    if h.tires_select(tire["id"]):
+        app.delete_selected_tires()
+        h.root.update()
+    show()
+    h.check("удалили - R24 в списке столько же, сколько было до приёма",
+            menu_items(app.tires_radius_menu).get("R24", 0) == before, menu_items(app.tires_radius_menu))
+    show(radius="R24")
+    h.check("выбран радиус, которого больше нет, - он в списке с 0, строк нет (выбор не пропадает молча)",
+            before or (menu_items(app.tires_radius_menu).get("R24") == 0 and not app.tires_rows),
+            menu_items(app.tires_radius_menu))
+    show()
+
+
 TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_works_one_record,
          test_warehouse_chain, test_staff_payment, test_finance_entries, test_report_other_period,
          test_new_owner, test_fire_worker, test_cancel_booking_with_works,
@@ -2419,4 +2534,5 @@ TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_w
          test_complete_twice, test_statistics_monthly,
          test_tires_leave_parts, test_tires_income,
          test_warehouse_edit_dates_paid_delete, test_warehouse_order_money, test_warehouse_goto_and_lists,
+         test_booking_vin_custom_time_to_work, test_tires_menus_follow_changes,
          test_warehouse_english_ui]

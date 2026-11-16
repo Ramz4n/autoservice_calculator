@@ -33,7 +33,8 @@ from database import Database
 import web_sync
 from plates import plate_problem, plate_may_continue, PLATE_EXAMPLE
 from car_catalog import CarAutocomplete, catalog_car_names
-from input_rules import parse_money, parse_quantity, parse_percent, MONEY_MAX, QUANTITY_MAX
+from input_rules import (parse_money, parse_quantity, parse_percent, parse_time, format_time_typing, MONEY_MAX,
+                         QUANTITY_MAX)
 from i18n import I18n, SUPPORTED_LANGUAGES
 from sms_notifications import send_sms_notification
 from autoscroll import MiddleClickAutoscroll, enable_autoscroll
@@ -1121,15 +1122,16 @@ class AutoServiceApp(TireStorageMixin):
         tk.Frame(content, width=width, height=0).pack()
         return content
 
-    def form_section(self, content, title):
-        """Блок формы: заголовок и белая карточка; возвращает (карточка, область для полей)"""
-        ctk.CTkLabel(content, text=title.rstrip(':').upper(), font=("Arial", 12, "bold"),
-                     text_color="#607d8b", anchor="w").pack(fill=tk.X, padx=4, pady=(4, 2))
+    def form_section(self, content, title, compact=False):
+        """Блок формы: заголовок и белая карточка; возвращает (карточка, область для полей).
+        compact - отступы меньше (длинные формы - чтобы влезали на небольшой экран)"""
+        ctk.CTkLabel(content, text=title.rstrip(':').upper(), font=("Arial", 12, "bold"), height=20 if compact else 28,
+                     text_color="#607d8b", anchor="w").pack(fill=tk.X, padx=4, pady=(2, 1) if compact else (4, 2))
         card = ctk.CTkFrame(content, fg_color="white", corner_radius=10, border_width=1,
                             border_color=self.FORM_CARD_BORDER)
-        card.pack(fill=tk.X, pady=(0, 8))
+        card.pack(fill=tk.X, pady=(0, 5 if compact else 8))
         body = ctk.CTkFrame(card, fg_color="transparent")
-        body.pack(fill=tk.X, padx=14, pady=10)
+        body.pack(fill=tk.X, padx=12 if compact else 14, pady=7 if compact else 10)
         return card, body
 
     def form_label(self, parent, text, required=False):
@@ -9102,10 +9104,21 @@ class AutoServiceApp(TireStorageMixin):
 
         # Оформление формы - общие функции form_* (как в "Добавить запчасть")
         time_cols = 6  # время - сетка кнопок по 6 в ряд
-        content = self.form_content(add_window)
+        content = self.form_content(add_window, width=0)
+        # Две колонки - окно ниже (на небольших экранах не хватает именно высоты): слева машина, клиент,
+        # примечание; справа дата и время, мастер
+        columns = ctk.CTkFrame(content, fg_color="transparent")
+        columns.pack(fill=tk.X)
+        columns.grid_columnconfigure((0, 1), weight=1, uniform="booking_cols")
+        left_col = ctk.CTkFrame(columns, fg_color="transparent")
+        left_col.grid(row=0, column=0, sticky="new", padx=(0, 8))
+        right_col = ctk.CTkFrame(columns, fg_color="transparent")
+        right_col.grid(row=0, column=1, sticky="new", padx=(8, 0))
+        for col in (left_col, right_col):
+            tk.Frame(col, width=450, height=0).pack()
 
-        def section(title):
-            return self.form_section(content, title)
+        def section(title, col=left_col):
+            return self.form_section(col, title, compact=True)
 
         field_label = self.form_label
         make_entry = self.form_entry
@@ -9120,10 +9133,18 @@ class AutoServiceApp(TireStorageMixin):
 
         # === АВТОМОБИЛЬ ===
         car_card, car_body = section(self.tr("bookings.section_car"))
-        field_label(car_body, self.tr("works.car_number"), required=True).pack(fill=tk.X)
-        car_number_entry = make_entry(car_body, placeholder_text="А123БВ777")
-        car_number_entry.pack(fill=tk.X)
-        car_status_label = ctk.CTkLabel(car_body, text="", font=("Arial", 13, "bold"), anchor="w")
+        # Госномер и VIN - в одну строку (госномер короче)
+        car_top = ctk.CTkFrame(car_body, fg_color="transparent")
+        car_top.pack(fill=tk.X)
+        car_top.grid_columnconfigure(0, weight=2, uniform="car_top")
+        car_top.grid_columnconfigure(1, weight=3, uniform="car_top")
+        field_label(car_top, self.tr("works.car_number"), required=True).grid(row=0, column=0, sticky="w")
+        car_number_entry = make_entry(car_top, placeholder_text="А123БВ777")
+        car_number_entry.grid(row=1, column=0, sticky="ew")
+        # Длинная надпись (машина и шины на хранении) - переносится по словам, иначе колонка и окно
+        # растягиваются шире экрана
+        car_status_label = ctk.CTkLabel(car_body, text="", font=("Arial", 13, "bold"), anchor="w",
+                                        justify=tk.LEFT, wraplength=420)
 
         # Марка/модель - только для нового авто (показывается динамически)
         car_details_frame = ctk.CTkFrame(car_body, fg_color="transparent")
@@ -9140,6 +9161,29 @@ class AutoServiceApp(TireStorageMixin):
         # Подсказки марки и модели - одни на все формы (car_catalog.py); после модели - курсор в телефон
         car_hints = CarAutocomplete(self, brand_entry, model_entry, content)
         hide_brand_list, hide_model_list = car_hints.hide_brands, car_hints.hide_models
+
+        # VIN - необязательно; как в «Добавить работу»: без пробелов, заглавными, до 17, счётчик символов.
+        # Машина найдена по госномеру - её VIN подставляется (можно поправить)
+        vin_head = ctk.CTkFrame(car_top, fg_color="transparent")
+        vin_head.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        field_label(vin_head, self.tr("works.vin").rstrip(":")).pack(side=tk.LEFT)
+        vin_counter = ctk.CTkLabel(vin_head, text="", font=("Arial", 11), height=20)
+        vin_counter.pack(side=tk.RIGHT)
+        vin_var = tk.StringVar()
+        vin_entry = make_entry(car_top, textvariable=vin_var)
+        vin_entry.configure(font=("Consolas", 13))
+        vin_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+
+        def on_vin_change(*args):
+            value = vin_var.get()
+            cleaned = re.sub(r"\s", "", value).upper()[:VIN_LENGTH]
+            if cleaned != value:
+                vin_var.set(cleaned)
+            length = len(cleaned)
+            vin_counter.configure(text=f"{length}/{VIN_LENGTH}" if length else "",
+                                  text_color="#22c55e" if length == VIN_LENGTH else "#ef4444")
+
+        vin_var.trace_add("write", on_vin_change)
 
         car_state = [None]
 
@@ -9162,7 +9206,7 @@ class AutoServiceApp(TireStorageMixin):
                 state = "found"
             plate_error = self.show_plate_error(
                 car_number_entry, car_card, car_status_label, restore=restore_car_status,
-                place_label=lambda: car_status_label.pack(fill=tk.X, pady=(6, 0), after=car_number_entry),
+                place_label=lambda: car_status_label.pack(fill=tk.X, pady=(6, 0), after=car_top),
                 fit=fit_window)
             if not plate_error:
                 self.form_set_card_state(car_card, state)
@@ -9179,7 +9223,7 @@ class AutoServiceApp(TireStorageMixin):
             car_status_text[0] = text
             if text:
                 car_status_label.configure(text=text, text_color=self.FORM_STATE_COLORS.get(state, "#ef6c00"))
-                car_status_label.pack(fill=tk.X, pady=(6, 0), after=car_number_entry)
+                car_status_label.pack(fill=tk.X, pady=(6, 0), after=car_top)
             else:
                 car_status_label.pack_forget()
             update_card_marks()
@@ -9226,7 +9270,7 @@ class AutoServiceApp(TireStorageMixin):
         # Что подставил поиск по госномеру: {"number": госномер, "filled": {поле: значение}} -
         # госномер поправили - это убираем (если руками не меняли)
         plate_fill = [None]
-        plate_fill_fields = {"name": name_entry, "phone": phone_entry}
+        plate_fill_fields = {"name": name_entry, "phone": phone_entry, "vin": vin_entry}
 
         plate_hint = [None]   # номер, для которого показана подсказка "есть в базе - Tab, чтобы подставить"
 
@@ -9283,6 +9327,8 @@ class AutoServiceApp(TireStorageMixin):
                         phone_digits = ''.join(c for c in owner_phone if c.isdigit())
                         if len(phone_digits) >= 10:
                             self.set_phone_value(phone_entry, phone_digits[-10:])
+                    if car_info.get('vin'):
+                        vin_var.set(car_info['vin'])
                     plate_fill[0] = {"number": car_num, "filled": self.autofilled_diff(plate_fill_fields, before)}
                 else:
                     # Авто не найдено - показываем поля марки/модели, сбрасываем данные
@@ -9394,9 +9440,9 @@ class AutoServiceApp(TireStorageMixin):
             entry.bind("<FocusOut>", lambda e: add_window.after(250, update_card_marks), add="+")
 
         # === ДАТА И ВРЕМЯ ===
-        _, when_body = section(self.tr("bookings.section_datetime"))
+        _, when_body = section(self.tr("bookings.section_datetime"), right_col)
         date_row = ctk.CTkFrame(when_body, fg_color="transparent")
-        date_row.pack(fill=tk.X, pady=(0, 8))
+        date_row.pack(fill=tk.X, pady=(0, 6))
 
         # Календарь для выбора даты
         date_entry = DateEntry(
@@ -9415,10 +9461,10 @@ class AutoServiceApp(TireStorageMixin):
         # Быстрый выбор: сегодня / завтра
         quick_dates = {}
         for label_key, days in (("bookings.btn_today", 0), ("bookings.btn_tomorrow", 1)):
-            quick_btn = ctk.CTkButton(date_row, text=self.tr(label_key), width=90, height=30, corner_radius=8,
+            quick_btn = ctk.CTkButton(date_row, text=self.tr(label_key), width=70, height=30, corner_radius=8,
                                       font=("Arial", 13), border_width=1, border_color="#c5cdd6",
                                       command=lambda d=days: set_booking_date(date.today() + timedelta(days=d)))
-            quick_btn.pack(side=tk.LEFT, padx=(8, 0))
+            quick_btn.pack(side=tk.LEFT, padx=(6, 0))
             quick_dates[days] = quick_btn
 
         def set_booking_date(day):
@@ -9506,13 +9552,13 @@ class AutoServiceApp(TireStorageMixin):
             # Ячейка с отступом сверху/справа - в угол ложится красный кружок с числом записей
             cell = ctk.CTkFrame(time_grid, fg_color="transparent")
             cell.grid(row=i // time_cols, column=i % time_cols, sticky="ew", padx=1, pady=1)
-            btn = ctk.CTkButton(cell, text=slot, width=50, height=30, font=("Arial", 13),
+            btn = ctk.CTkButton(cell, text=slot, width=50, height=28, font=("Arial", 13),
                                 corner_radius=8, border_width=1, border_color="#c5cdd6",
-                                command=lambda s=slot: select_time(s))
-            btn.pack(fill=tk.X, padx=(0, 7), pady=(7, 0))
+                                command=lambda s=slot: pick_slot(s))
+            btn.pack(fill=tk.X, padx=(0, 7), pady=(6, 0))
             badge = ctk.CTkLabel(cell, text="", width=16, height=16, corner_radius=8,
                                  fg_color="#e53935", text_color="white", font=("Arial", 10, "bold"))
-            badge.bind("<Button-1>", lambda e, s=slot: select_time(s))
+            badge.bind("<Button-1>", lambda e, s=slot: pick_slot(s))
             for w in (btn, badge):
                 w.bind("<Enter>", lambda e, s=slot: show_slot_tooltip(s), add="+")
                 w.bind("<Leave>", hide_slot_tooltip, add="+")
@@ -9541,11 +9587,93 @@ class AutoServiceApp(TireStorageMixin):
 
         add_window.bind("<Destroy>", lambda e: hide_slot_tooltip() if e.widget is add_window else None, add="+")
 
+        # Своё время (не из кнопок) - справа в строке даты: 11:30, 9.15, 930 → 09:30. Вписали - кнопки времени
+        # не выбраны; нажали кнопку - своё время стирается. Рамка: зелёная - время понято, красная - не время
+        custom_time_entry = make_entry(date_row, width=62, placeholder_text="11:30")
+        custom_time_entry.pack(side=tk.RIGHT)
+        ctk.CTkLabel(date_row, text=self.tr("bookings.custom_time") + ":", font=("Arial", 13)).pack(
+            side=tk.RIGHT, padx=(8, 6))
+        self.attach_hover_tip(custom_time_entry, self.tr("bookings.custom_time_format"))
+        custom_time_border = custom_time_entry.cget("border_color")
+
+        def mark_custom_time(state):
+            """"ok" - зелёная рамка, "bad" - красная, None - обычная"""
+            custom_time_entry.configure(border_color={"ok": "#43a047", "bad": self.FORM_ERROR_BORDER}.get(
+                state, custom_time_border))
+
+        def custom_time_value():
+            """Своё время "ЧЧ:ММ"; "" - не вписано (или серая подсказка); None - вписано не время"""
+            if getattr(custom_time_entry, "_placeholder_text_active", False):
+                return ""
+            try:
+                return parse_time(custom_time_entry.get())
+            except ValueError:
+                return None
+
+        custom_last = [""]   # текст поля до нажатия - понять, дописывают или стирают
+
+        def custom_time_key(event):
+            """Второе «:» (и точка / пробел вместо него) и буквы не вводятся - «:» уже есть или допишется сама"""
+            char = getattr(event, "char", "")
+            if not char or not char.isprintable() or (event.state & 0x4):   # Ctrl+V, стрелки, Backspace
+                return None
+            try:
+                selected = custom_time_entry._entry.selection_present()
+            except tk.TclError:
+                selected = False
+            if char in ":.,- " and ":" in custom_time_entry.get() and not selected:
+                return "break"
+            if not char.isdigit() and char not in ":.,- ":
+                return "break"
+            return None
+
+        def format_custom_time():
+            if getattr(custom_time_entry, "_placeholder_text_active", False):
+                return
+            text = custom_time_entry.get()
+            formatted = format_time_typing(text, grew=len(text) > len(custom_last[0]))
+            if formatted != text:
+                custom_time_entry.delete(0, tk.END)
+                custom_time_entry.insert(0, formatted)
+                custom_time_entry.icursor(tk.END)
+            custom_last[0] = formatted
+
+        custom_time_entry._entry.bind("<KeyPress>", custom_time_key, add="+")
+
+        def on_custom_time(event=None):
+            format_custom_time()
+            value = custom_time_value()
+            if value:
+                mark_custom_time("ok")
+                select_time(value)
+            elif value is None:
+                # Ещё вписывают («11:», «11:3») - рамка обычная; неверное («25:00») - красная
+                typing = re.fullmatch(r"\d{1,2}:\d?", custom_time_entry.get()) and not re.fullmatch(
+                    r"(2[4-9]|[3-9]\d):\d?", custom_time_entry.get())
+                mark_custom_time(None if typing else "bad")
+                selected_time[0] = None
+                select_time(None)
+            else:
+                mark_custom_time(None)
+                if selected_time[0] not in time_buttons:
+                    update_available_times()   # своё время стёрли - снова время кнопкой
+
+        custom_time_entry.bind("<KeyRelease>", on_custom_time, add="+")
+
+        def pick_slot(slot):
+            if slot in past_slots:
+                return
+            if custom_time_entry.get() and not getattr(custom_time_entry, "_placeholder_text_active", False):
+                custom_time_entry.delete(0, tk.END)
+                custom_last[0] = ""
+                mark_custom_time(None)
+            select_time(slot)
+
         # Статус (показывается, если на сегодня свободного времени не осталось)
         slot_status_label = ctk.CTkLabel(when_body, text="", font=("Arial", 13), text_color="#ef6c00", anchor="w")
         # Кто из мастеров в этот день не работает и сколько машин можно на одно время (вкладка "Сотрудники")
         staff_label = ctk.CTkLabel(when_body, text="", font=("Arial", 13), text_color="#ef6c00", anchor="w",
-                                   justify=tk.LEFT, wraplength=440)
+                                   justify=tk.LEFT, wraplength=420)
 
         def update_staff_label(booking_date):
             try:
@@ -9583,9 +9711,13 @@ class AutoServiceApp(TireStorageMixin):
             update_staff_label(booking_date)
             refresh_slot_counts()
             rebuild_master_buttons(booking_date)
-            # Выбранное время оставляем, если оно ещё доступно, иначе - первое свободное (лучше - где есть место)
+            # Выбранное время оставляем, если оно ещё доступно, иначе - первое свободное (лучше - где есть место);
+            # вписано своё время - оно
             open_slots = [s for s in free if s not in full_slots] or free
             slot = selected_time[0] if selected_time[0] in free else (open_slots[0] if open_slots else None)
+            custom = custom_time_value()
+            if custom or custom is None:
+                slot = custom
             selected_time[0] = None
             button_look.clear()   # занятость поменялась - перерисовать все кнопки
             select_time(slot)
@@ -9607,13 +9739,13 @@ class AutoServiceApp(TireStorageMixin):
 
         # === МАСТЕР (необязательно): к кому записать. Мастер, уже записанный на это время, и мастер,
         # который в этот день не работает, недоступны - к одному мастеру на одно время одна машина ===
-        _, master_body = section(self.tr("bookings.section_master"))
+        _, master_body = section(self.tr("bookings.section_master"), right_col)
         master_grid = ctk.CTkFrame(master_body, fg_color="transparent")
         master_grid.pack(fill=tk.X)
         master_cols = 3
         master_grid.grid_columnconfigure(tuple(range(master_cols)), weight=1, uniform="master")
         master_warning_label = ctk.CTkLabel(master_body, text="", font=("Arial", 13), text_color="#c62828",
-                                            anchor="w", justify=tk.LEFT, wraplength=440)
+                                            anchor="w", justify=tk.LEFT, wraplength=420)
         selected_master = [None]   # id выбранного мастера; None - «Любой»
         master_buttons = {}        # id мастера (None - «Любой») -> кнопка
         master_names = {}          # id -> имя
@@ -9670,6 +9802,7 @@ class AutoServiceApp(TireStorageMixin):
                     look = dict(state="normal", fg_color="white", text_color="black", hover_color="#dbe6f3",
                                 border_color="#c5cdd6")
                 btn.configure(text=text, **look)
+            layout_master_buttons()
             warning = master_warning(selected_master[0], busy)
             was_shown = bool(master_warning_label.winfo_manager())
             if warning:
@@ -9680,6 +9813,25 @@ class AutoServiceApp(TireStorageMixin):
             elif was_shown:
                 master_warning_label.pack_forget()
                 fit_window()
+
+        master_layout = [None]   # сколько кнопок мастеров в ряд сейчас
+
+        def layout_master_buttons():
+            """Кнопки мастеров - по 3 в ряд, а если длинные имена («Имя — занят») не влезают в колонку
+            формы - по 2 (или по 1): иначе колонка, а с ней и окно, становятся шире"""
+            if not master_buttons:
+                return
+            master_grid.update_idletasks()
+            widest = max(btn.winfo_reqwidth() for btn in master_buttons.values()) + 6
+            cols = next((n for n in (3, 2) if n * widest <= 426), 1)
+            if master_layout[0] == cols:
+                return
+            master_layout[0] = cols
+            master_grid.grid_columnconfigure(tuple(range(3)), weight=0, uniform="")
+            master_grid.grid_columnconfigure(tuple(range(cols)), weight=1, uniform="master")
+            for i, btn in enumerate(master_buttons.values()):
+                btn.grid(row=i // cols, column=i % cols, sticky="ew", padx=(0, 6), pady=(0, 4))
+            fit_window()
 
         def select_master(worker_id):
             selected_master[0] = worker_id
@@ -9706,11 +9858,12 @@ class AutoServiceApp(TireStorageMixin):
             for btn in master_buttons.values():
                 btn.destroy()
             master_buttons.clear()
+            master_layout[0] = None
             for i, worker_id in enumerate([None] + [wid for wid, _ in masters]):
-                btn = ctk.CTkButton(master_grid, text="", height=30, font=("Arial", 13), corner_radius=8,
+                btn = ctk.CTkButton(master_grid, text="", height=28, font=("Arial", 13), corner_radius=8,
                                     border_width=1, border_color="#c5cdd6",
                                     command=lambda w=worker_id: select_master(w))
-                btn.grid(row=i // master_cols, column=i % master_cols, sticky="ew", padx=(0, 6), pady=(0, 6))
+                btn.grid(row=i // master_cols, column=i % master_cols, sticky="ew", padx=(0, 6), pady=(0, 4))
                 master_buttons[worker_id] = btn
             fit_window()
 
@@ -9775,7 +9928,8 @@ class AutoServiceApp(TireStorageMixin):
         def mark_error(entry, message_key):
             self.form_mark_error(entry, message_key, add_window)
 
-        self.form_clear_error_on_type((car_number_entry, brand_entry, model_entry, phone_entry, name_entry))
+        self.form_clear_error_on_type((car_number_entry, brand_entry, model_entry, vin_entry, phone_entry, name_entry,
+                                       custom_time_entry))
 
         def save_booking():
             """Сохранить запись"""
@@ -9786,6 +9940,7 @@ class AutoServiceApp(TireStorageMixin):
             phone_raw = phone_entry.get().strip()
             date_str = date_entry.get_date().strftime("%d.%m.%Y")
             time_str = selected_time[0]
+            custom_time = custom_time_value()
 
             # Получаем информацию об авто
             number = car_number_entry.get().strip().upper()
@@ -9832,16 +9987,43 @@ class AutoServiceApp(TireStorageMixin):
                 mark_error(name_entry, "bookings.msg_enter_client_name")
                 return
 
+            # Своё время: не время - ошибка; сегодня и уже прошло - нельзя
+            if custom_time is None:
+                mark_error(custom_time_entry, "bookings.msg_bad_time")
+                return
+            if custom_time:
+                time_str = custom_time
+                if (date_entry.get_date() == date.today()
+                        and custom_time <= datetime.now().strftime("%H:%M")):
+                    self.form_mark_error(custom_time_entry, "bookings.msg_time_past", add_window, time=custom_time)
+                    return
+
             if not time_str:
                 messagebox.showwarning(self.tr("common.attention"), self.tr("bookings.msg_no_slots_today"), parent=add_window)
                 return
+
+            # VIN: короче 17 - переспросить; уже у другой машины - не сохраняем (две машины с одним VIN)
+            vin = vin_var.get().strip().upper()
+            if vin and len(vin) < VIN_LENGTH:
+                if not messagebox.askyesno(self.tr("common.attention"),
+                                           self.tr("works.vin_too_short", count=len(vin), required=VIN_LENGTH),
+                                           parent=add_window):
+                    vin_entry.focus_set()
+                    return
+            if vin:
+                clash = self.db.find_other_car(existing_car_id or 0, None, vin)
+                if clash and clash[1]["car_number"].upper() != number:
+                    other = clash[1]
+                    title = " ".join(x for x in (other["car_brand"], other["car_model"], other["car_number"]) if x)
+                    self.form_mark_error(vin_entry, "bookings.msg_vin_taken", add_window, vin=vin, car=title,
+                                         owner=other["owner_name"] or self.tr("common.no_name"))
+                    return
 
             # В базу - без форматирования, +7XXXXXXXXXX
             phone = "+" + phone_digits
 
             # Парсим дату
             try:
-                from datetime import datetime
                 booking_date = datetime.strptime(date_str, "%d.%m.%Y").date()
             except:
                 messagebox.showerror(self.tr("common.error"), self.tr("bookings.msg_invalid_date"), parent=add_window)
@@ -9948,6 +10130,10 @@ class AutoServiceApp(TireStorageMixin):
                 # Создаём новую машину только если не выбрана существующая
                 car_id = self.db.get_or_create_car(client_id, brand, model, number)
 
+            # VIN - в карточку машины (пусто - прежний VIN не стираем)
+            if vin and car_id:
+                self.db.set_car_vin(car_id, vin)
+
             # Сохраняем запись
             notes = notes_entry.get().strip()
             booking_id = self.db.add_booking(
@@ -9970,7 +10156,8 @@ class AutoServiceApp(TireStorageMixin):
         self.form_bind_keys(add_window, content, save_booking, on_close,
                             lambda: (hide_brand_list(), hide_model_list(), hide_notes_keyword_list()))
 
-        form_entries = (car_number_entry, brand_entry, model_entry, phone_entry, name_entry, notes_entry)
+        form_entries = (car_number_entry, brand_entry, model_entry, vin_entry, phone_entry, name_entry, notes_entry,
+                        custom_time_entry)
         just_built = [True]
         normal_border = car_number_entry.cget("border_color")
 
@@ -9983,6 +10170,8 @@ class AutoServiceApp(TireStorageMixin):
                     entry.delete(0, tk.END)
                 entry.configure(border_color=normal_border)
             self.restore_placeholder(car_number_entry)
+            self.restore_placeholder(custom_time_entry)
+            custom_last[0] = ""
             car_found_by_number[0] = False
             found_car_id[0] = None
             phone_fill[0] = None

@@ -6,11 +6,12 @@ from datetime import date, timedelta
 PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799",
           "Т140ТТ799", "Т141ТТ799", "Т142ТТ799", "Т143ТТ799", "Т144ТТ799", "Т145ТТ799", "Т146ТТ799", "Т147ТТ799",
           "Т148ТТ799", "Т149ТТ799", "Т150ТТ799", "Т151ТТ799", "Т152ТТ799", "Т153ТТ799",
-          "Т154ТТ799", "Т155ТТ799", "Т156ТТ799", "Т157ТТ799", "Т158ТТ799", "Т159ТТ799"]
+          "Т154ТТ799", "Т155ТТ799", "Т156ТТ799", "Т157ТТ799", "Т158ТТ799", "Т159ТТ799", "Т160ТТ799", "Т161ТТ799", "Т162ТТ799", "Т163ТТ799"]
 PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108",
           "+79000000140", "+79000000141", "+79000000142", "+79000000143", "+79000000144", "+79000000145", "+79000000146", "+79000000147",
           "+79000000148", "+79000000149", "+79000000150", "+79000000151", "+79000000152", "+79000000153",
-          "+79000000154", "+79000000155", "+79000000156", "+79000000157", "+79000000158", "+79000000159"]
+          "+79000000154", "+79000000155", "+79000000156", "+79000000157", "+79000000158", "+79000000159",
+          "+79000000160", "+79000000161", "+79000000163"]
 
 
 def prepare(h):
@@ -228,7 +229,8 @@ def test_work_merge_keeps_mileage_vin(h):
 
 def test_input_rules_boundaries(h):
     """Правила чисел (input_rules.py) на границах: допустимые крайние значения проходят, соседние - нет"""
-    from input_rules import parse_money, parse_quantity, parse_percent, MONEY_MAX, QUANTITY_MAX
+    from input_rules import (parse_money, parse_quantity, parse_percent, parse_time, format_time_typing, MONEY_MAX,
+                             QUANTITY_MAX)
 
     def value(func, text, **kw):
         try:
@@ -237,6 +239,14 @@ def test_input_rules_boundaries(h):
             return "ошибка"
 
     cases = [  # (функция, ввод, ожидание)
+        # своё время записи: ЧЧ:ММ, 00:00…23:59
+        (parse_time, "", ""), (parse_time, "11:30", "11:30"), (parse_time, "9.15", "09:15"),
+        (parse_time, "9 05", "09:05"), (parse_time, "11-30", "11:30"), (parse_time, "1130", "11:30"),
+        (parse_time, "930", "09:30"), (parse_time, "9", "09:00"), (parse_time, "11:", "11:00"),
+        (parse_time, "9:", "09:00"), (parse_time, "00:00", "00:00"), (parse_time, "11:3", "ошибка"),
+        (parse_time, "23:59", "23:59"), (parse_time, "24:00", "ошибка"), (parse_time, "11:60", "ошибка"),
+        (parse_time, "abc", "ошибка"), (parse_time, "1:5", "ошибка"), (parse_time, "12345", "ошибка"),
+        (parse_time, "11:30:00", "ошибка"),
         (parse_money, "0,01", 0.01), (parse_money, "0.005", 0.01), (parse_money, "0,004", "ошибка"),
         (parse_money, "0", "ошибка"), (parse_money, "1", 1.0), (parse_money, "1 500", 1500.0),
         (parse_money, "1500,5", 1500.5), (parse_money, "12.", 12.0), (parse_money, ".5", 0.5),
@@ -254,6 +264,13 @@ def test_input_rules_boundaries(h):
              if value(f, text) != expected]
     h.check(f"{len(cases)} граничных значений разобраны верно", not wrong, wrong)
     h.check("пустая цена на складе разрешена (неизвестна)", parse_money("", allow_empty=True) is None)
+    typing = [  # (текст поля, дописывают ли, что станет) - «:» дописывается сама, вторая не ставится
+        ("1", True, "1"), ("11", True, "11:"), ("11::", True, "11:"), ("11:3", True, "11:3"),
+        ("11:305", True, "11:30"), ("9", True, "9:"), ("9::", True, "9:"), ("93", True, "9:3"),
+        ("1130", True, "11:30"), ("930", True, "9:30"), ("11.30", True, "11:30"), ("11 3", True, "11:3"),
+        ("11", False, "11"), ("9", False, "9"), ("1а1", True, "11:"), (":", True, "")]
+    wrong = [(t, g, format_time_typing(t, g), e) for t, g, e in typing if format_time_typing(t, g) != e]
+    h.check(f"{len(typing)} случаев ввода времени: «:» сама, вторая не ставится", not wrong, wrong)
 
 
 def test_boundaries_in_forms(h):
@@ -587,7 +604,7 @@ def test_booking_pick_car_clears_error(h):
     bw["open"]()
     h.wait(300)
     win = bw["window"]
-    plate_e, brand_e, model_e, phone_e, name_e = h.find_widgets(win, ctk.CTkEntry)[:5]
+    plate_e, _vin_e, brand_e, model_e, phone_e, name_e = h.find_widgets(win, ctk.CTkEntry)[:6]
     normal = plate_e.cget("border_color")
     red = app.FORM_ERROR_BORDER
     try:
@@ -2086,18 +2103,213 @@ def test_tires_size_radius(h):
     app.tires_status_filter, app.tires_season_filter, app.tires_radius_filter = "all", None, None
     app.refresh_tires()
     counts = Counter(r for r in (rim_of(t["tire_size"]) for t in app.db.get_all_tire_storage()) if r)
-    chips = [b.cget("text") for b in app.tires_radius_bar.winfo_children()]
+    def items(menu):
+        return list(menu.cget("values"))
+
+    def number(text):
+        return int(text.split()[-1])
+
+    def pick(menu, text):
+        menu.set(text)
+        menu._command(text)
+    all_text = app.tr("bookings.filter_all")
+    season_menu, radius_menu = app.tires_season_menu, app.tires_radius_menu
+    texts = items(radius_menu)
     expected = [f"{rim}  {counts[rim]}" for rim in sorted(counts, key=lambda r: float(r[1:]))]
-    h.check("фишки радиусов: по порядку, число - как в базе", chips == expected, (chips, expected))
-    app._tires_set_radius("R15")
+    h.check("радиусы - выпадающим списком: «Все» первой, дальше по порядку, число - как в базе",
+            texts[1:] == expected and texts[0] == f"{all_text}  {len(app.tires_rows)}"
+            and radius_menu.get() == texts[0], (texts, expected))
+    h.check("сезон и радиус - не кнопками: на панели только подпись и список",
+            len(app.tires_season_bar.winfo_children()) == 2 and len(app.tires_radius_bar.winfo_children()) == 2,
+            (app.tires_season_bar.winfo_children(), app.tires_radius_bar.winfo_children()))
+    pick(radius_menu, next(t for t in texts if t.startswith("R15 ")))
     rows = list(app.tires_rows.values())
-    h.check("фишка R15 - только R15, наши R15 в списке", rows and all(rim_of(t["tire_size"]) == "R15" for t in rows)
-            and {first["id"], h.tire(notes="Тест шины размер 4")["id"]} <= {t["id"] for t in rows},
-            [t["tire_size"] for t in rows])
-    app._tires_set_radius("R15")
-    h.check("второй клик по R15 - фильтр снят", app.tires_radius_filter is None
+    h.check("выбрали R15 - только R15, наши R15 в списке", rows and all(rim_of(t["tire_size"]) == "R15" for t in rows)
+            and {first["id"], h.tire(notes="Тест шины размер 4")["id"]} <= {t["id"] for t in rows}
+            and radius_menu.get().startswith("R15 "), [t["tire_size"] for t in rows])
+    # Числа в другом списке и на фишках статусов - с учётом выбранного радиуса: выбрал - увидел столько строк
+    season_numbers = {t.rsplit(None, 1)[0]: number(t) for t in items(season_menu)}
+    by_season = Counter(t["season"] for t in rows)
+    status_chips = [b for b in app.tires_status_bar.winfo_children() if hasattr(b, "invoke")]
+    h.check("при R15: «Все» в сезонах и статусах = строк в списке, у сезона - его R15",
+            season_numbers.get(all_text) == len(rows)
+            and all(season_numbers.get(app.tire_season_label(s)) == n for s, n in by_season.items())
+            and number(status_chips[0].cget("text")) == len(rows), (season_numbers, by_season, len(rows)))
+    pick(season_menu, items(season_menu)[1])
+    picked = app.tires_season_filter
+    h.check("сезон + радиус вместе: строк столько, сколько было в списке сезонов",
+            picked and len(app.tires_rows) == by_season[picked] and all(
+                t["season"] == picked and rim_of(t["tire_size"]) == "R15" for t in app.tires_rows.values()))
+    pick(season_menu, items(season_menu)[0])
+    h.check("«Все» в сезонах - выбор сезона снят", app.tires_season_filter is None and len(app.tires_rows) == len(rows))
+    pick(radius_menu, items(radius_menu)[0])
+    h.check("«Все» в радиусах - выбор радиуса снят", app.tires_radius_filter is None
             and len(app.tires_rows) >= len(rows))
+    # Колонка цены хранения - «Стоимость» (раньше «Хранение» - непонятно, что это деньги)
+    h.check("колонка цены хранения - «Стоимость»",
+            app.tires_tree.heading("price", "text") == app.tr("tires.col_price")
+            and (app.i18n.lang != "ru" or app.tr("tires.col_price") == "Стоимость"),
+            app.tires_tree.heading("price", "text"))
     app.tires_show_all_time = False
+
+
+def test_booking_vin(h):
+    """«Записать клиента»: VIN - необязательный; новая машина - VIN в карточку машины (без пробелов, заглавными);
+    машина найдена по госномеру - её VIN подставляется; поправили - перезаписан; пусто - прежний не стирается"""
+    def vin_of(plate):
+        rows = h.q("SELECT vin FROM client_cars WHERE car_number = %s", (plate,))
+        return rows[0][0] if rows else None
+
+    def bookings(car_id):
+        return h.q("SELECT COUNT(*) FROM bookings WHERE car_id = %s", (car_id,))[0][0]
+
+    h.booking_form("Т160ТТ799", "Kia", "Rio", "9000000160", "Тест VIN", vin="testvin 0000000160")
+    car = h.car("Т160ТТ799")
+    if not h.check("новая машина записана с VIN заглавными без пробела",
+                   car and vin_of("Т160ТТ799") == "TESTVIN0000000160", (car, vin_of("Т160ТТ799"))):
+        return
+    h.check("запись создана", bookings(car[0]) == 1)
+
+    bw = h.app._ensure_booking_window()
+    h.booking_form("Т160ТТ799", save=False)
+    import customtkinter as ctk
+    vin_entry = h.find_widgets(bw["window"], ctk.CTkEntry)[1]
+    h.check("машина найдена по госномеру - VIN подставлен", vin_entry.get() == "TESTVIN0000000160", vin_entry.get())
+    bw["open"]()
+    h.wait(300)
+    h.check("новое открытие - поле VIN пустое", vin_entry.get() == "", vin_entry.get())
+    bw["window"].withdraw(); bw["overlay"].withdraw(); bw["window"].grab_release()
+
+    h.booking_form("Т160ТТ799", day=date.today() + timedelta(days=2), time=h.app._ensure_booking_window()["slots"][0],
+                   vin="")
+    h.check("VIN стёрли в форме - в базе прежний остался", vin_of("Т160ТТ799") == "TESTVIN0000000160"
+            and bookings(car[0]) == 2, (vin_of("Т160ТТ799"), bookings(car[0])))
+    h.booking_form("Т160ТТ799", day=date.today() + timedelta(days=3), time=h.app._ensure_booking_window()["slots"][0],
+                   vin="TESTVIN0000000161")
+    h.check("VIN поправили - перезаписан", vin_of("Т160ТТ799") == "TESTVIN0000000161"
+            and bookings(car[0]) == 3, (vin_of("Т160ТТ799"), bookings(car[0])))
+    # Граница: 18-й символ не вписывается - сохраняются первые 17
+    h.booking_form("Т160ТТ799", day=date.today() + timedelta(days=6), time=h.app._ensure_booking_window()["slots"][0],
+                   vin="TESTVIN00000001629")
+    h.check("VIN из 18 символов - в базе первые 17", vin_of("Т160ТТ799") == "TESTVIN0000000162", vin_of("Т160ТТ799"))
+
+
+def test_booking_custom_time(h):
+    """«Записать клиента»: своё время вместо кнопки - «1130» → запись на 11:30; кнопка времени стирает своё время;
+    своё время видно в «Записях» и на нём мастер занят"""
+    import customtkinter as ctk
+    app = h.app
+    day = date.today() + timedelta(days=4)
+    h.booking_form("Т161ТТ799", "Kia", "Rio", "9000000161", "Тест Своё Время", day=day, custom_time="1130")
+    car = h.car("Т161ТТ799")
+    rows = h.q("SELECT booking_time FROM bookings WHERE car_id = %s", (car[0],)) if car else []
+    if not h.check("своё время «1130» - запись на 11:30", [tuple(r) for r in rows] == [("11:30",)], rows):
+        return
+    h.check("время 11:30 - в записях этого дня", "11:30" in app.db.get_bookings_by_date(day))
+
+    # Граница «сегодня»: время через 2 минуты - уже можно (ровно «сейчас» - нельзя, в негативных)
+    from datetime import datetime
+    soon = datetime.now() + timedelta(minutes=2)
+    if soon.date() == date.today():
+        h.booking_form("Т161ТТ799", day=date.today(), custom_time=soon.strftime("%H:%M"))
+        rows = h.q("SELECT booking_time FROM bookings WHERE car_id = %s AND booking_date = %s", (car[0], date.today()))
+        h.check(f"сегодня на {soon:%H:%M} (через 2 минуты) - записан", [tuple(r) for r in rows] == [(f"{soon:%H:%M}",)],
+                rows)
+
+    # Ввод с клавиатуры: «:» дописывается сама, своя «:» после неё не вставляется
+    bw = app._ensure_booking_window()
+    bw["open"]()
+    h.wait(300)
+    entry = h.booking_custom_time_entry(bw["window"])
+    entry.focus_set()
+    h.root.update()
+
+    def type_digit(digit):
+        entry._entry.insert("insert", digit)
+        entry._entry.event_generate("<KeyRelease>")
+        h.root.update()
+
+    def press_colon():
+        entry._entry.event_generate("<KeyPress>", keysym="colon")
+        entry._entry.event_generate("<KeyRelease>", keysym="colon")
+        h.root.update()
+
+    type_digit("1")
+    press_colon()
+    h.check("«1» и своя «:» - «1:» (двоеточия не было - вставилась)", entry.get() == "1:", entry.get())
+    entry.delete(0, "end"); type_digit("1"); type_digit("1")
+    h.check("«11» - «:» дописалась сама", entry.get() == "11:", entry.get())
+    press_colon()
+    h.check("своя «:» после дописанной - не вставилась", entry.get() == "11:", entry.get())
+    type_digit("3"); type_digit("0")
+    h.check("дальше минуты - «11:30»", entry.get() == "11:30", entry.get())
+    entry._entry.event_generate("<KeyPress>", keycode=65)   # клавиша A (в любой раскладке - буква)
+    h.root.update()
+    h.check("буква не вводится", entry.get() == "11:30", entry.get())
+    bw["window"].withdraw(); bw["overlay"].withdraw(); bw["window"].grab_release()
+
+    # Кнопка времени после своего - своё стирается, запись на время кнопки
+    slot = app._ensure_booking_window()["slots"][0]
+    bw = app._ensure_booking_window()
+    h.booking_form("Т161ТТ799", day=day + timedelta(days=1), custom_time="12:45", save=False)
+    custom_e = h.booking_custom_time_entry(bw["window"])
+    h.find_button(bw["window"], slot).invoke()
+    h.root.update()
+    h.check("нажали кнопку времени - своё время стёрто", custom_e.get() == "" or getattr(custom_e, "_placeholder_text_active", False),
+            custom_e.get())
+    h.find_button(bw["window"], app.tr("bookings.btn_book")).invoke()
+    h.root.update()
+    bw["window"].withdraw(); bw["overlay"].withdraw(); bw["window"].grab_release()
+    rows = h.q("SELECT booking_time FROM bookings WHERE car_id = %s AND booking_date = %s",
+               (car[0], day + timedelta(days=1)))
+    h.check("запись на время кнопки", [tuple(r) for r in rows] == [(slot,)], rows)
+
+
+def test_booking_form_compact(h):
+    """«Записать клиента» компактная: госномер и VIN в одной строке, «Своё время» - в строке даты;
+    форма в две колонки - окно (новая машина - с маркой и моделью) влезает в экран 1366×768"""
+    import customtkinter as ctk
+    bw = h.app._ensure_booking_window()
+    win = bw["window"]
+    bw["open"]()
+    h.wait(300)
+    plate_e, vin_e, brand_e, model_e = h.find_widgets(win, ctk.CTkEntry)[:4]
+    custom_e = h.booking_custom_time_entry(win)
+    plate_e.delete(0, "end"); plate_e.insert(0, "Т162ТТ799")
+    plate_e._entry.event_generate("<FocusOut>")
+    h.root.update()
+    win.update_idletasks()
+    h.check("госномер и VIN - в одной строке, госномер короче",
+            abs(plate_e.winfo_rooty() - vin_e.winfo_rooty()) < 3 and plate_e.winfo_width() < vin_e.winfo_width(),
+            (plate_e.winfo_rooty(), vin_e.winfo_rooty(), plate_e.winfo_width(), vin_e.winfo_width()))
+    calendar = next(w for w in h.find_widgets(win, __import__("tkcalendar").DateEntry))
+    h.check("«Своё время» - в строке даты", abs(custom_e.winfo_rooty() - calendar.winfo_rooty()) < 12,
+            (custom_e.winfo_rooty(), calendar.winfo_rooty()))
+    h.check("новая машина - марка и модель видны", brand_e.winfo_ismapped() and model_e.winfo_ismapped())
+    width, height = win.winfo_reqwidth(), win.winfo_reqheight()
+    h.check(f"окно {width}×{height}: влезает в экран 1366×768 (с заголовком окна и панелью задач)",
+            width <= 1000 and height <= 650, (width, height))
+    win.withdraw(); bw["overlay"].withdraw(); win.grab_release()
+
+    # Машина с двумя комплектами шин на хранении: надпись длинная - переносится, окно не шире экрана
+    for season, location in (("winter", "Стеллаж 4, полка 2, ячейка В-17 у задней стены"),
+                             ("summer", "Стеллаж 5, полка 1, ячейка Г-3 у ворот")):
+        h.tires_form("Т163ТТ799", "Kia", "Rio", "9000000163", "Тест Длинная Надпись", season=season,
+                     size="225/45 ZR18", tire_brand="Michelin Pilot Sport 4", location=location,
+                     notes="Тест шины длинная надпись")
+    bw["open"]()
+    h.wait(300)
+    plate_e = h.find_widgets(win, ctk.CTkEntry)[0]
+    plate_e.delete(0, "end"); plate_e.insert(0, "Т163ТТ799")
+    plate_e._entry.event_generate("<FocusOut>")
+    h.root.update()
+    win.update_idletasks()
+    status = next((w for w in h.find_widgets(win, ctk.CTkLabel) if "🛞" in str(w.cget("text"))), None)
+    width, height = win.winfo_reqwidth(), win.winfo_reqheight()
+    h.check("надпись о шинах на хранении видна", status is not None and status.winfo_ismapped())
+    h.check(f"длинная надпись о шинах переносится - окно {width}×{height} не шире экрана 1366",
+            width <= 1000 and height <= 700, (width, height))
+    win.withdraw(); bw["overlay"].withdraw(); win.grab_release()
 
 
 TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booking_region_continues,
@@ -2110,4 +2322,5 @@ TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booki
          test_positions, test_finance_category_follows_switch, test_users_and_roles,
          test_locales, test_login, test_bookings_no_phone_red, test_bookings_row_colors, test_bookings_middle_click_scroll, test_tables_middle_click_scroll,
          test_tires_rules, test_tires_accept, test_tires_edit_issue, test_tires_filters, test_tires_transfer, test_tires_hint_soon_receipt,
-         test_tires_cells_dates_lists, test_warehouse_row_colors, test_text_clipboard, test_tires_size_radius, test_booking_slot_tooltip, test_period_follows_new_day, test_booking_with_master]
+         test_tires_cells_dates_lists, test_warehouse_row_colors, test_text_clipboard, test_tires_size_radius, test_booking_slot_tooltip, test_period_follows_new_day, test_booking_with_master, test_booking_vin,
+         test_booking_custom_time, test_booking_form_compact]

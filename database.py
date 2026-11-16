@@ -2038,6 +2038,17 @@ class Database:
         conn.close()
         return car_id
 
+    def set_car_vin(self, car_id, vin):
+        """Записать VIN машины (из «Записать клиента»)"""
+        vin = (vin or "").strip().upper()
+        if not car_id or not vin:
+            return
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE client_cars SET vin = %s WHERE id = %s", (vin, car_id))
+        conn.commit()
+        conn.close()
+
     def get_client_cars_by_client_id(self, client_id):
         """Получить список машин клиента по client_id"""
         if not client_id:

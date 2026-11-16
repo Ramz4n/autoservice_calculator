@@ -14,7 +14,11 @@
 (новая машина / машина из базы / по записи): предупреждение и ни одной записи в базе.
 Неверные значения в пары не смешиваем: форма отклоняет строку целиком, и остальные пары этой строки
 на самом деле не проверялись бы.
-Тестовые госномера Т4xxТТ799, телефоны +790000004xx"""
+
+«Записать клиента» (BOOKING_FACTORS): машина новая / из базы (со своим VIN), VIN оставить как подставился /
+17 символов / 16 (вопрос, «Да») / стёрли, время кнопкой / своё, мастер любой / конкретный. Неверные
+значения (VIN другой машины, своё время 25:00) - на каждом пути (новая машина / из базы).
+Тестовые госномера Т4xxТТ799, телефоны +790000004xx («Добавить работу» - Т400…Т458, запись - Т460…Т499)"""
 from datetime import date, timedelta
 
 from pairwise import pairwise, all_pairs_covered
@@ -37,13 +41,35 @@ ROWS = pairwise(FACTORS, valid)
 INVALID = [("master", "мастер"), ("phone9", "+7"), ("brand_foreign", "нет в списке")]
 PATHS = [("new", "none"), ("known", "none"), ("known", "booking")]
 
-PLATES = [f"Т4{i:02d}ТТ799" for i in range(len(ROWS))] + [f"Т4{50 + i:02d}ТТ799" for i in range(len(INVALID) * 3)]
+BOOKING_FACTORS = {
+    "car": ["new", "known"],
+    "vin": ["keep", "17", "short16", "cleared"],
+    "time": ["button", "custom"],
+    "master": ["any", "specific"],
+}
+
+
+def booking_valid(row):
+    return not (row["car"] == "new" and row["vin"] == "cleared")   # у новой машины стирать нечего (= keep)
+
+
+BOOKING_ROWS = pairwise(BOOKING_FACTORS, booking_valid)
+BOOKING_INVALID = [("vin_taken", "уже есть в базе"), ("time_bad", "ЧЧ:ММ")]
+BOOKING_MASTER = "Тест Мастер Пары"
+BOOKING_OTHER_CAR = "Т499ТТ799"   # машина, чей VIN вписывают по ошибке
+
+PLATES = [f"Т4{i:02d}ТТ799" for i in range(len(ROWS))] + [f"Т4{50 + i:02d}ТТ799" for i in range(len(INVALID) * 3)] + \
+         [f"Т4{60 + i:02d}ТТ799" for i in range(len(BOOKING_ROWS))] + \
+         [f"Т4{90 + i:02d}ТТ799" for i in range(len(BOOKING_INVALID) * 2)] + [BOOKING_OTHER_CAR]
 PHONES = ["+7" + f"90000004{i:02d}" for i in range(len(ROWS))] + \
-         ["+7" + f"90000004{50 + i:02d}" for i in range(len(INVALID) * 3)]
+         ["+7" + f"90000004{50 + i:02d}" for i in range(len(INVALID) * 3)] + \
+         ["+7" + f"90000004{60 + i:02d}" for i in range(len(BOOKING_ROWS))] + \
+         ["+7" + f"90000004{90 + i:02d}" for i in range(len(BOOKING_INVALID) * 2)]
 
 
 def prepare(h):
     h.require_free(PLATES, PHONES)
+    assert len(BOOKING_ROWS) <= 30 and len(BOOKING_INVALID) * 2 <= 9, "номера Т460…Т499 кончились"
 
 
 def make_case(h, index, car, booking):
@@ -194,4 +220,110 @@ def test_pairwise_invalid_rejected(h):
         app.clear_work_form()
 
 
-TESTS = [test_pairwise_work_saved, test_pairwise_invalid_rejected]
+def booking_case(h, index, car):
+    """Машина из базы для «Записать клиента»: свой клиент и свой VIN"""
+    db = h.app.db
+    plate, phone10, name = f"Т4{index:02d}ТТ799", f"90000004{index:02d}", f"Тест Пара Запись {index}"
+    case = {"plate": plate, "phone10": phone10, "name": name, "old_vin": "", "new_vin": f"Z9B4{index:02d}00000000000"}
+    if car == "known":
+        client = db.get_or_create_client(full_name=name, phone="+7" + phone10)
+        car_id = db.get_or_create_car(client, "Kia", "Rio", plate)
+        case["old_vin"] = f"Z9C4{index:02d}00000000000"
+        db.set_car_vin(car_id, case["old_vin"])
+    return case
+
+
+def booking_master(h):
+    db = h.app.db
+    found = h.q("SELECT id FROM workers WHERE full_name = %s", (BOOKING_MASTER,))
+    if not found:
+        db.add_worker(BOOKING_MASTER)
+        found = h.q("SELECT id FROM workers WHERE full_name = %s", (BOOKING_MASTER,))
+    return found[0][0]
+
+
+def fill_booking(h, case, row, day, time_text, invalid=None):
+    """«Записать клиента» по строке набора (и «Записать»)"""
+    known = row["car"] == "known"
+    vin = {"keep": None, "17": case["new_vin"], "short16": case["new_vin"][:16], "cleared": ""}[row["vin"]]
+    if invalid == "vin_taken":
+        vin = h.q("SELECT vin FROM client_cars WHERE car_number = %s", (BOOKING_OTHER_CAR,))[0][0]
+    slots = h.m.booking_time_slots()
+    kwargs = dict(day=day, vin=vin, master=BOOKING_MASTER if row["master"] == "specific" else None)
+    if row["time"] == "button" and invalid != "time_bad":
+        kwargs["time"] = slots[1]
+    else:
+        kwargs["custom_time"] = "25:00" if invalid == "time_bad" else time_text
+    if known:
+        h.booking_form(case["plate"].lower(), **kwargs)
+    else:
+        h.booking_form(case["plate"].lower(), "Kia", "Rio", case["phone10"], case["name"], **kwargs)
+
+
+def test_pairwise_booking_saved(h):
+    """«Записать клиента», пары верных значений: запись на нужные день, время и мастера; VIN машины - как
+    вписали (стёрли / не трогали - прежний); вопрос «VIN не полностью» - ровно где нужно"""
+    from datetime import timedelta
+    app = h.app
+    tr = app.tr
+    missing = all_pairs_covered(BOOKING_FACTORS, BOOKING_ROWS, booking_valid)
+    h.check(f"запись: набор покрывает все пары ({len(BOOKING_ROWS)} строк вместо 30 сочетаний)", not missing, missing)
+    master_id = booking_master(h)
+    slots = h.m.booking_time_slots()
+    for i, row in enumerate(BOOKING_ROWS):
+        index = 60 + i
+        label = f"запись, пара {i}: " + ", ".join(f"{k}={v}" for k, v in row.items())
+        case = booking_case(h, index, row["car"])
+        day = date.today() + timedelta(days=40 + i)   # свой день - чужие записи не занимают место
+        custom = f"13:{10 + i:02d}"
+        n = len(h.dialogs)
+        fill_booking(h, case, row, day, custom.replace(":", ""))
+        dialogs = h.dialogs_since(n)
+        car = h.car(case["plate"])
+        rows = h.q("SELECT booking_date, booking_time, worker_id FROM bookings WHERE car_id = %s", (car[0],)) \
+            if car else ()
+        vin = (h.q("SELECT vin FROM client_cars WHERE id = %s", (car[0],))[0][0] or "") if car else None
+        expected_time = slots[1] if row["time"] == "button" else custom
+        expected_master = master_id if row["master"] == "specific" else None
+        expected_vin = {"keep": case["old_vin"], "17": case["new_vin"], "short16": case["new_vin"][:16],
+                        "cleared": case["old_vin"]}[row["vin"]]
+        problems = []
+        if not any(d[0] == "showinfo" for d in dialogs):
+            problems.append("нет сообщения «записан»")
+        if [tuple(r) for r in rows] != [(day, expected_time, expected_master)]:
+            problems.append(f"записи {rows} вместо {[(day, expected_time, expected_master)]}")
+        if vin != expected_vin:
+            problems.append(f"VIN {vin!r} вместо {expected_vin!r}")
+        short_asked = any(d[2].startswith(tr("works.vin_too_short").split("{")[0]) for d in dialogs)
+        if short_asked != (row["vin"] == "short16"):
+            problems.append(f"вопрос «VIN не полностью»: {'был' if short_asked else 'не было'}")
+        other_questions = [d for d in dialogs if d[0] == "askyesno" and not d[2].startswith(
+            tr("works.vin_too_short").split("{")[0])]
+        if other_questions:
+            problems.append(f"лишние вопросы: {[d[2][:60] for d in other_questions]}")
+        h.check(label, not problems, problems)
+
+
+def test_pairwise_booking_invalid_rejected(h):
+    """«Записать клиента»: VIN другой машины, своё время 25:00 - на пути «новая машина» и «машина из базы»:
+    предупреждение и ни одной записи в базе"""
+    from datetime import timedelta
+    db = h.app.db
+    booking_master(h)
+    if not h.car(BOOKING_OTHER_CAR):
+        other = db.get_or_create_car(None, "Kia", "Rio", BOOKING_OTHER_CAR)
+        db.set_car_vin(other, "Z9D49900000000000")
+    index = 90
+    for invalid, warn in BOOKING_INVALID:
+        for car in ("new", "known"):
+            row = {"car": car, "vin": "17", "time": "custom", "master": "specific"}
+            case = booking_case(h, index, car)
+            day = date.today() + timedelta(days=80 + index - 90)
+            index += 1
+            h.expect_rejected(f"запись, {invalid}: машина {car}",
+                              lambda case=case, row=row, day=day, invalid=invalid: fill_booking(
+                                  h, case, row, day, "1405", invalid), warn)
+
+
+TESTS = [test_pairwise_work_saved, test_pairwise_invalid_rejected, test_pairwise_booking_saved,
+         test_pairwise_booking_invalid_rejected]

@@ -197,11 +197,24 @@ class TireStorageMixin:
         # Второй ряд: сезон и «перенести из запчастей» (видно, только если в запчастях есть похожие на шины)
         second = ctk.CTkFrame(page, fg_color="transparent")
         second.pack(fill=tk.X, padx=10, pady=(0, 6))
+        # Сезон и радиус - два выпадающих списка (выбранное значение - синим)
         self.tires_season_bar = ctk.CTkFrame(second, fg_color="transparent")
         self.tires_season_bar.pack(side=tk.LEFT)
-        # Радиусы (R15, R16 …) - фишками рядом с сезоном
         self.tires_radius_bar = ctk.CTkFrame(second, fg_color="transparent")
-        self.tires_radius_bar.pack(side=tk.LEFT, padx=(12, 0))
+        self.tires_radius_bar.pack(side=tk.LEFT, padx=(16, 0))
+        for bar, title, setter, width in ((self.tires_season_bar, "tires.col_season", "_tires_set_season", 150),
+                                          (self.tires_radius_bar, "tires.radius", "_tires_set_radius", 110)):
+            ctk.CTkLabel(bar, text=self.tr(title) + ":", font=("Arial", 12), text_color="gray45").pack(
+                side=tk.LEFT, padx=(0, 6))
+            menu = ctk.CTkOptionMenu(bar, values=[""], width=width, height=28, corner_radius=8, font=("Arial", 12),
+                                     dropdown_font=("Arial", 12))
+            menu.configure(command=lambda text, m=menu, f=setter: self._tires_pick_menu(m, f, text))
+            menu.tire_items = {}
+            menu.pack(side=tk.LEFT)
+            if setter == "_tires_set_season":
+                self.tires_season_menu = menu
+            else:
+                self.tires_radius_menu = menu
         self.tires_transfer_btn = ctk.CTkButton(
             second, text="", command=self.open_tire_transfer, height=30, corner_radius=8, font=("Arial", 12),
             fg_color="#fff3e0", hover_color="#ffe0b2", text_color="#e65100", border_width=1, border_color="#ffb74d")
@@ -320,6 +333,15 @@ class TireStorageMixin:
         self.tires_season_filter = None if self.tires_season_filter == season else season
         self.refresh_tires()
 
+    def _tires_pick_menu(self, menu, setter, text):
+        """Выбрали в списке «Сезон» / «Радиус»: «Все» - снять, иначе - только это значение"""
+        key = menu.tire_items.get(text)
+        if setter == "_tires_set_season":
+            self.tires_season_filter = key
+        else:
+            self.tires_radius_filter = key
+        self.refresh_tires()
+
     def _tires_set_radius(self, rim):
         """Фишка радиуса: показать только этот радиус; второй клик - снять"""
         self.tires_radius_filter = None if self.tires_radius_filter == rim else rim
@@ -368,23 +390,29 @@ class TireStorageMixin:
                 hidden_by_date += 1
                 if not self.tires_show_all_time and not search:
                     continue
-            counts["all"] += 1
-            counts[shown_status] += 1
-            if shown_status in (STATUS_SOON, STATUS_OVERDUE):
-                counts[STATUS_STORED] += 1   # «на хранении» - вместе со «скоро срок» и просроченными
-            if status_filter == STATUS_STORED and shown_status not in (STATUS_STORED, STATUS_SOON, STATUS_OVERDUE):
-                continue
-            if status_filter in (STATUS_SOON, STATUS_OVERDUE, STATUS_ISSUED) and shown_status != status_filter:
-                continue
-            season_counts[tire["season"]] = season_counts.get(tire["season"], 0) + 1
-            if season_filter and tire["season"] != season_filter:
-                continue
+            # Три группы фишок работают вместе (И): статус, сезон, радиус. Число на фишке - сколько строк
+            # будет в списке, если её нажать (с учётом того, что выбрано в двух других группах)
             rim = rim_of(tire["tire_size"])
-            if rim:
-                radius_counts[rim] = radius_counts.get(rim, 0) + 1
-            if radius_filter and rim != radius_filter:
-                continue
-            rows.append((tire, shown_status, car_info))
+            if status_filter == STATUS_STORED:
+                status_ok = shown_status in (STATUS_STORED, STATUS_SOON, STATUS_OVERDUE)
+            else:
+                status_ok = status_filter == "all" or shown_status == status_filter
+            season_ok = not season_filter or tire["season"] == season_filter
+            radius_ok = not radius_filter or rim == radius_filter
+            if season_ok and radius_ok:
+                counts["all"] += 1
+                counts[shown_status] += 1
+                if shown_status in (STATUS_SOON, STATUS_OVERDUE):
+                    counts[STATUS_STORED] += 1   # «на хранении» - вместе со «скоро срок» и просроченными
+            if status_ok and radius_ok:
+                season_counts["_total"] = season_counts.get("_total", 0) + 1
+                season_counts[tire["season"]] = season_counts.get(tire["season"], 0) + 1
+            if status_ok and season_ok:
+                radius_counts["_total"] = radius_counts.get("_total", 0) + 1
+                if rim:
+                    radius_counts[rim] = radius_counts.get(rim, 0) + 1
+            if status_ok and season_ok and radius_ok:
+                rows.append((tire, shown_status, car_info))
 
         for index, (tire, shown_status, car_info) in enumerate(rows):
             tags = [shown_status, f"bg_{shown_status}"]
@@ -410,21 +438,22 @@ class TireStorageMixin:
                 continue
             self._tires_chip(self.tires_status_bar, f"●  {label}  {counts.get(key, 0)}", color, status_filter == key,
                              lambda k=key: self._tires_set_status(k))
-        for widget in self.tires_season_bar.winfo_children():
-            widget.destroy()
-        for season in SEASONS:
-            count = season_counts.get(season, 0)
-            if not count and season_filter != season:
-                continue
-            self._tires_chip(self.tires_season_bar, f"{self.tire_season_label(season)}  {count}", "#1565c0",
-                             season_filter == season, lambda s=season: self._tires_set_season(s))
-        # Радиусы - по порядку (R13 … R22); пустые скрыты, кроме выбранного
-        for widget in self.tires_radius_bar.winfo_children():
-            widget.destroy()
-        rims = set(radius_counts) | ({radius_filter} if radius_filter else set())
-        for rim in sorted(rims, key=rim_sort_key):
-            self._tires_chip(self.tires_radius_bar, f"{rim}  {radius_counts.get(rim, 0)}", "#00838f",
-                             radius_filter == rim, lambda r=rim: self._tires_set_radius(r))
+        # Сезон и радиус - выпадающими списками (меньше кнопок): «Все  12», «Зимние  7», «R16  6» …
+        # Число - сколько строк будет в списке, если выбрать (с учётом статуса и другого списка)
+        all_text = self.tr("bookings.filter_all")
+        season_items = [(None, f"{all_text}  {season_counts.get('_total', 0)}")] + [
+            (season, f"{self.tire_season_label(season)}  {season_counts.get(season, 0)}") for season in SEASONS
+            if season_counts.get(season) or season_filter == season]
+        rims = {r for r in radius_counts if r != "_total"} | ({radius_filter} if radius_filter else set())
+        radius_items = [(None, f"{all_text}  {radius_counts.get('_total', 0)}")] + [
+            (rim, f"{rim}  {radius_counts.get(rim, 0)}") for rim in sorted(rims, key=rim_sort_key)]
+        for menu, items, current in ((self.tires_season_menu, season_items, season_filter),
+                                     (self.tires_radius_menu, radius_items, radius_filter)):
+            menu.tire_items = dict((text, key) for key, text in items)
+            menu.configure(values=[text for _, text in items],
+                           fg_color="#1565c0" if current else "white", text_color="white" if current else "#263238",
+                           button_color="#1565c0" if current else "#cfd8dc")
+            menu.set(next(text for key, text in items if key == current))
 
         total = len(sets)
         self.tires_count_label.configure(

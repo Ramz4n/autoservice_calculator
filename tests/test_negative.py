@@ -4,9 +4,11 @@
 
 from datetime import date, timedelta
 
-PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799", "Т209ТТ799", "Т210ТТ799", "Т211ТТ799"]
+PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799", "Т209ТТ799", "Т210ТТ799", "Т211ТТ799",
+          "Т212ТТ799", "Т213ТТ799", "Т214ТТ799", "Т215ТТ799", "Т216ТТ799", "Т217ТТ799"]
 PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205", "+79000000206", "+79000000207",
-          "+79000000208", "+79000000209", "+79000000210", "+79000000211"]
+          "+79000000208", "+79000000209", "+79000000210", "+79000000211",
+          "+79000000213", "+79000000214", "+79000000215", "+79000000216", "+79000000217"]
 
 
 def prepare(h):
@@ -33,6 +35,18 @@ def test_booking_rejects(h):
                       "пропущена первая буква", answers=[False])
     h.expect_rejected("буква Г в госномере, ответ «Нет»", booking(plate="т201гг799"), "не бывает", answers=[False])
     h.expect_rejected("госномер не по образцу, ответ «Нет»", booking(plate="т2011тт799"), "не похож", answers=[False])
+    h.expect_rejected("своё время «25:00»", booking(custom_time="25:00"), "ЧЧ:ММ")
+    h.expect_rejected("своё время «11:75»", booking(custom_time="11:75"), "ЧЧ:ММ")
+    h.expect_rejected("своё время не дописано «11:3»", booking(custom_time="113"), "ЧЧ:ММ")
+    h.expect_rejected("своё время сегодня уже прошло", booking(custom_time="00:00", day=date.today()), "уже прошло")
+    h.expect_rejected("VIN короче 17, ответ «Нет»", booking(vin="TESTVIN0201"), "не полностью", answers=[False])
+    # VIN уже у другой машины - не записываем (иначе две машины с одним VIN)
+    other_id = h.app.db.get_or_create_car(None, "Kia", "Rio", "Т212ТТ799")
+    h.app.db.set_car_vin(other_id, "TESTVIN0000000212")
+    h.expect_rejected("VIN уже у другой машины", booking(vin="testvin0000000212"), "уже есть в базе")
+    h.check("у другой машины VIN не тронут, Т201 не создана",
+            h.q("SELECT vin FROM client_cars WHERE id = %s", (other_id,))[0][0] == "TESTVIN0000000212"
+            and not h.car("Т201ТТ799"))
 
 
 def test_works_rejects(h):
@@ -674,7 +688,55 @@ def test_booking_master_rejects(h):
         bw["window"].withdraw(); bw["overlay"].withdraw(); bw["window"].grab_release()
         db.set_worker_day(master_id, day_off, None)
 
+def test_booking_vin_time_rejects(h):
+    """«Записать клиента», VIN и своё время: запись не прошла - VIN машины не меняется; VIN другой машины у
+    найденной машины - отказ; своё время ровно «сейчас» - отказ (граница); на своё время мест нет - «Нет» -
+    ни одной записи; мастер уже записан на это своё время - отказ"""
+    from datetime import datetime, timedelta
+    app, db = h.app, h.app.db
+    client = db.get_or_create_client(full_name="Тест Вин Отказ", phone="+79000000213")
+    car = db.get_or_create_car(client, "Kia", "Rio", "Т213ТТ799")
+    db.set_car_vin(car, "TESTVIN0000000213")
+
+    def vin_of(car_id):
+        return h.q("SELECT vin FROM client_cars WHERE id = %s", (car_id,))[0][0]
+
+    h.expect_rejected("найденная машина, новый VIN, но время неверное - отказ", lambda: h.booking_form(
+        "Т213ТТ799", vin="TESTVIN0000000999", custom_time="25:00"), "ЧЧ:ММ")
+    h.check("запись не прошла - VIN машины прежний", vin_of(car) == "TESTVIN0000000213", vin_of(car))
+    other = db.get_or_create_car(None, "Kia", "Rio", "Т214ТТ799")
+    db.set_car_vin(other, "TESTVIN0000000214")
+    h.expect_rejected("найденной машине вписали VIN другой машины - отказ", lambda: h.booking_form(
+        "Т213ТТ799", vin="TESTVIN0000000214"), "уже есть в базе")
+    h.check("VIN обеих машин не тронут", (vin_of(car), vin_of(other)) == ("TESTVIN0000000213", "TESTVIN0000000214"))
+
+    # Граница «сейчас»: ровно текущая минута - уже прошла
+    now = datetime.now().strftime("%H:%M")
+    h.expect_rejected(f"своё время ровно сейчас ({now}) - уже прошло", lambda: h.booking_form(
+        "Т213ТТ799", custom_time=now, day=date.today()), "уже прошло")
+
+    # Своё время, на которое мест нет: «Нет» - ничего не записано
+    day = date.today() + timedelta(days=83)
+    cap = db.day_capacity(day)["capacity"]
+    if h.check(f"мест на время в {day}: {cap} (1…3)", 1 <= cap <= 3, cap):
+        for i, plate in enumerate(("Т215ТТ799", "Т216ТТ799", "Т217ТТ799")[:cap]):
+            c = db.get_or_create_client(full_name=f"Тест Место Своё {i}", phone=f"+7900000021{5 + i}")
+            db.add_booking(day, "07:05", c, db.get_or_create_car(c, "Kia", "Rio", plate))
+        h.expect_rejected("на своё время 07:05 мест нет, «Нет» - не записан", lambda: h.booking_form(
+            "Т213ТТ799", custom_time="0705", day=day), "записано машин", answers=[False])
+
+    # Мастер уже записан на это своё время
+    master = "Тест Мастер Своё Время"
+    db.add_worker(master)
+    master_id = h.q("SELECT id FROM workers WHERE full_name = %s", (master,))[0][0]
+    busy_day = date.today() + timedelta(days=84)
+    db.add_booking(busy_day, "13:15", client, other, worker_id=master_id)
+    h.expect_rejected("мастер уже записан на своё время 13:15 - отказ", lambda: h.booking_form(
+        "Т213ТТ799", custom_time="1315", day=busy_day, master=master), "уже записан")
+
+
 TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_warehouse_edit_rejects,
          test_edit_rejects, test_positions_rejects,
          test_payment_rejects, test_finance_rejects, test_period_rejects, test_booking_master_rejects,
-         test_bookings_middle_click_nothing_to_scroll, test_tables_middle_click_nothing_to_scroll, test_tires_rejects]
+         test_bookings_middle_click_nothing_to_scroll, test_tables_middle_click_nothing_to_scroll, test_tires_rejects,
+         test_booking_vin_time_rejects]

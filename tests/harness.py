@@ -10,6 +10,7 @@
 import os
 import sys
 import time
+import re
 import traceback
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -208,10 +209,14 @@ class Harness:
         return next(b for b in self.find_widgets(window, ctk.CTkButton)
                     if b.cget("text") == master or str(b.cget("text")).startswith(master + " —"))
 
+    def booking_custom_time_entry(self, window):
+        """Поле «Своё время» в «Записать клиента» (по серой подсказке «11:30»)"""
+        return next(e for e in self.find_widgets(window, ctk.CTkEntry) if e.cget("placeholder_text") == "11:30")
+
     def booking_form(self, plate, brand=None, model=None, phone10=None, name=None, typed_live_first=None, save=True,
-                     day=None, time=None, to_catalog=True, master=None):
+                     day=None, time=None, to_catalog=True, master=None, vin=None, custom_time=None):
         """«Записать клиента»: госномер (с уходом из поля), марка/модель, телефон, имя, «Завтра» (или день day
-        в календаре), мастер master (кнопка с его именем - до выбора времени), время time (кнопка), «Записать».
+        в календаре), VIN vin (None - не трогать), «Своё время» custom_time (после кнопки времени), мастер master (кнопка с его именем - до выбора времени), время time (кнопка), «Записать».
         to_catalog - как в works_form"""
         app, root = self.app, self.root
         if to_catalog and brand and model:
@@ -219,7 +224,8 @@ class Harness:
         bw = app._ensure_booking_window()
         bw["open"]()
         self.wait(300)   # окно показывается с задержкой - ждём, как человек
-        plate_e, brand_e, model_e, phone_e, name_e = self.find_widgets(bw["window"], ctk.CTkEntry)[:5]
+        plate_e, vin_e, brand_e, model_e, phone_e, name_e = self.find_widgets(bw["window"], ctk.CTkEntry)[:6]
+        custom_e = self.booking_custom_time_entry(bw["window"])
         if typed_live_first:
             plate_e.delete(0, "end"); plate_e.insert(0, typed_live_first)
             plate_e._entry.event_generate("<KeyRelease>")
@@ -232,6 +238,8 @@ class Harness:
             brand_e.delete(0, "end"); brand_e.insert(0, brand)
         if model is not None:
             model_e.delete(0, "end"); model_e.insert(0, model)
+        if vin is not None:
+            vin_e.delete(0, "end"); vin_e.insert(0, vin)
         if phone10 is not None:
             app.set_phone_value(phone_e, phone10)
             phone_e._entry.event_generate("<FocusOut>")
@@ -246,10 +254,25 @@ class Harness:
             calendar.event_generate("<<DateEntrySelected>>")
         root.update()
         if master is not None:
+            if time is not None:
+                # Мастер выбирается до времени: сначала - другое время (вечером форма сама ставит последнее
+                # время дня, а на нём мастер может быть уже занят - кнопка недоступна)
+                other = next((b for b in self.find_widgets(bw["window"], ctk.CTkButton)
+                              if re.fullmatch(r"\d\d:\d\d", str(b.cget("text"))) and b.cget("text") != time
+                              and b.cget("state") == "normal"), None)
+                if other:
+                    other.invoke()
+                    root.update()
             self.booking_master_button(bw["window"], master).invoke()
             root.update()
         if time is not None:
             self.find_button(bw["window"], time).invoke()
+            root.update()
+        if custom_time is not None:
+            custom_e.focus_set()   # нажатия клавиш Tk отдаёт полю с фокусом
+            root.update()
+            custom_e.delete(0, "end"); custom_e.insert(0, custom_time)
+            custom_e._entry.event_generate("<KeyRelease>")
             root.update()
         if save:
             self.find_button(bw["window"], app.tr("bookings.btn_book")).invoke()

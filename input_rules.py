@@ -4,7 +4,9 @@
 - деньги: больше 0 и не больше MONEY_MAX; запятая или точка; пробелы между разрядами ("1 500");
   копейки округляются до 2 знаков ("0,001" -> 0 -> неверно); nan / inf / буквы / пусто - неверно;
 - количество: целое от 1 до QUANTITY_MAX; пусто - 1 (если разрешено);
-- процент: от 0 до 100 включительно.
+- процент: от 0 до 100 включительно;
+- время (своё время записи): ЧЧ:ММ, 00:00-23:59; разделитель - двоеточие, точка, тире или пробел;
+  «9» и «9:» → 09:00, «930» → 09:30, «1130» → 11:30. Во время ввода - format_time_typing («:» дописывается сама).
 """
 import math
 import re
@@ -63,6 +65,48 @@ def parse_date(text, allow_empty=False):
     if not DATE_MIN_YEAR <= year <= DATE_MAX_YEAR:
         raise ValueError(raw)
     return date(year, month, day)   # 31.02 - ValueError
+
+
+def parse_time(text, allow_empty=True):
+    """Время из поля → "ЧЧ:ММ". Пусто - "" (если allow_empty). Не время (25:00, 11:75, буквы) - ValueError"""
+    raw = str(text or "").strip()
+    if not raw:
+        if allow_empty:
+            return ""
+        raise ValueError("пусто")
+    match = (re.fullmatch(r"(\d{1,2})\s*[:.,\-\s]\s*(\d{2})", raw) or re.fullmatch(r"(\d{1,2})(\d{2})", raw)
+             or re.fullmatch(r"(\d{1,2}):?()", raw))   # «11» и «11:» (двоеточие дописалось само) - 11:00
+    if not match:
+        raise ValueError(raw)
+    hours, minutes = int(match.group(1)), int(match.group(2) or 0)
+    if hours > 23 or minutes > 59:
+        raise ValueError(raw)
+    return f"{hours:02d}:{minutes:02d}"
+
+
+def format_time_typing(text, grew=True):
+    """Поле времени во время ввода: только цифры и одно двоеточие, не длиннее ЧЧ:ММ.
+    «:» дописывается само: после двух цифр часа («11» → «11:»), а если час - одна цифра 3…9 - сразу («9» → «9:»);
+    только когда текст вырос (стирают - не мешаем). Точка, запятая, тире, пробел - это «:»; второе «:» не ставится.
+    «1130» (вставили) → «11:30»"""
+    raw = re.sub(r"[.,\-\s]", ":", str(text or ""))
+    raw = re.sub(r"[^\d:]", "", raw)
+    if ":" in raw:
+        hours, minutes = raw.split(":", 1)
+        hours, minutes = hours[:2], minutes.replace(":", "")[:2]
+        if not hours:
+            return minutes[:2]   # «:30» - двоеточие без часа не нужно
+        return f"{hours}:{minutes}"
+    digits = raw
+    if digits and digits[0] in "3456789":                # час из одной цифры: 9 → 9:, 930 → 9:30
+        if len(digits) == 1:
+            return digits + ":" if grew else digits
+        return f"{digits[0]}:{digits[1:3]}"
+    if len(digits) >= 3:
+        return f"{digits[:2]}:{digits[2:4]}"             # 1130 → 11:30
+    if grew and len(digits) == 2:
+        return digits + ":"                              # 11 → 11:
+    return digits
 
 
 def parse_percent(text):
