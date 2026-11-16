@@ -4881,8 +4881,8 @@ class AutoServiceApp(TireStorageMixin):
                                "выдано": "#9e9e9e"}
     # Фон строки - как в «Записях»: светлый оттенок цвета полоски статуса (синий, зелёный, жёлтый, серый -
     # те же, что у записей «в работе», «выполнена», «ожидает», «просрочена»); без чередования через строку
-    WAREHOUSE_ROW_COLORS = {"в пути": "#eef4fc", "на складе": "#edf7f0", "установлена": "#fdf7e7",
-                            "выдано": "#f3f4f6"}
+    WAREHOUSE_ROW_COLORS = {"в пути": "#d9e8fb", "на складе": "#d4f0dd", "установлена": "#fcecc2",
+                            "выдано": "#e4e6ea"}
     WAREHOUSE_RECENT_DAYS = 92   # "Все" и "Выдано" по умолчанию - за 3 месяца
 
     def warehouse_status_label(self, status):
@@ -8365,11 +8365,11 @@ class AutoServiceApp(TireStorageMixin):
 
     BOOKING_STATUS_COLORS = {"waiting": "#f59e0b", "in_progress": "#3b82f6", "completed": "#22c55e",
                              "cancelled": "#e53935", "overdue": "#9e9e9e"}
-    # Фон всей строки записи - по статусу, спокойные светлые оттенки; у статуса ровно один цвет
+    # Фон всей строки записи - по статусу, насыщенные светлые оттенки; у статуса ровно один цвет
     # (без чередования через строку - иначе один статус выглядит как два разных цвета)
-    BOOKING_ROW_COLORS = {"waiting": "#fdf7e7", "in_progress": "#eef4fc", "completed": "#edf7f0",
-                          "cancelled": "#fcf0f0", "overdue": "#f3f4f6"}
-    BOOKINGS_SELECTED_BG = "#c4dbf3"   # выбранная строка - заметнее любого цвета статуса
+    BOOKING_ROW_COLORS = {"waiting": "#fcecc2", "in_progress": "#d9e8fb", "completed": "#d4f0dd",
+                          "cancelled": "#f9d6d6", "overdue": "#e4e6ea"}
+    BOOKINGS_SELECTED_BG = "#a9c9ee"   # выбранная строка - заметнее любого цвета статуса
 
     def setup_bookings_tab(self):
         """Вкладка "Записи": быстрые фильтры (сегодня / завтра / неделя / все), статусы с количеством,

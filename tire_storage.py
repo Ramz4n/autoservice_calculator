@@ -89,8 +89,8 @@ class TireStorageMixin:
                           STATUS_ISSUED: "#9e9e9e"}
     # Фон строки - как в «Записях»: светлый оттенок цвета полоски (зелёный, жёлтый, красный, серый);
     # без чередования через строку
-    TIRE_ROW_COLORS = {STATUS_STORED: "#edf7f0", STATUS_SOON: "#fdf7e7", STATUS_OVERDUE: "#fcf0f0",
-                       STATUS_ISSUED: "#f3f4f6"}
+    TIRE_ROW_COLORS = {STATUS_STORED: "#d4f0dd", STATUS_SOON: "#fcecc2", STATUS_OVERDUE: "#f9d6d6",
+                       STATUS_ISSUED: "#e4e6ea"}
     TIRE_RECENT_DAYS = 92    # «Все» и «Выдано» по умолчанию - за 3 месяца
     TIRE_COLUMNS = ("id", "car_info", "client", "phone", "season", "size", "brand", "quantity", "rims", "location",
                     "received", "until", "price", "paid", "status", "notes")

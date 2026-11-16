@@ -944,9 +944,15 @@ def test_bookings_row_colors(h):
 
         def light(color):
             r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
-            return min(r, g, b) >= 0xd8 and max(r, g, b) - min(r, g, b) <= 0x28
+            return min(r, g, b) >= 0xc0 and max(r, g, b) - min(r, g, b) <= 0x40
+
+        def tinted(color):
+            r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+            return max(r, g, b) - min(r, g, b) >= 0x18
         colors = list(app.BOOKING_ROW_COLORS.values())
-        h.check("цвета строк спокойные: светлые и неяркие", all(light(c) for c in colors), colors)
+        h.check("цвета строк светлые, не «ядерные» (текст читается)", all(light(c) for c in colors), colors)
+        h.check("цвет статуса заметен (насыщеннее почти белого)",
+                all(tinted(c) for s, c in app.BOOKING_ROW_COLORS.items() if s != "overdue"), colors)
         h.check("цвета разных статусов различаются", len(set(colors)) == len(colors))
         h.check("выбранная строка отличается от всех цветов статусов", app.BOOKINGS_SELECTED_BG not in colors)
         for _ in range(3):
