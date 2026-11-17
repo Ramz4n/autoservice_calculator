@@ -6,7 +6,7 @@
 Свой мастер «Тест Мастер», своя марка «ТестМарка…» и свои клиенты - чтобы чужие данные за сегодня
 не мешали: проверяются строки этого мастера / марки и ИЗМЕНЕНИЕ итогов, а не итоги целиком."""
 
-from datetime import date
+from datetime import date, timedelta
 
 PLATES = ["Т301ТТ799", "Т302ТТ799", "Т303ТТ799", "Т304ТТ799", "Т305ТТ799", "Т306ТТ799", "Т307ТТ799",
           "Т308ТТ799", "Т309ТТ799", "Т310ТТ799", "Т311ТТ799", "Т312ТТ799", "Т313ТТ799", "Т314ТТ799",
@@ -17,7 +17,7 @@ PLATES = ["Т301ТТ799", "Т302ТТ799", "Т303ТТ799", "Т304ТТ799", "Т305
           "Т333ТТ799", "Т334ТТ799", "Т335ТТ799", "Т336ТТ799",
           "Т337ТТ799", "Т338ТТ799", "Т339ТТ799", "Т340ТТ799", "Т341ТТ799",
           "Т342ТТ799", "Т343ТТ799", "Т344ТТ799", "Т345ТТ799", "Т346ТТ799",
-          "Т347ТТ799", "Т348ТТ799", "Т349ТТ799"]
+          "Т347ТТ799", "Т348ТТ799", "Т349ТТ799", "Т350ТТ799", "Т351ТТ799"]
 PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+79000000305", "+79000000306",
           "+79000000307", "+79000000308", "+79000000309", "+79000000310", "+79000000311", "+79000000312",
           "+79000000313", "+79000000314", "+79000000315", "+79000000316", "+79000000317", "+79000000318",
@@ -29,7 +29,7 @@ PHONES = ["+79000000301", "+79000000302", "+79000000303", "+79000000304", "+7900
           "+79000000336", "+79000000337", "+79000000338", "+79000000339",
           "+79000000340", "+79000000341", "+79000000342", "+79000000343", "+79000000344",
           "+79000000345", "+79000000346", "+79000000347", "+79000000348", "+79000000349",
-          "+79000000350", "+79000000351", "+79000000352"]
+          "+79000000350", "+79000000351", "+79000000352", "+79000000353", "+79000000354"]
 MASTER = "Тест Мастер"
 STAFF_POSITION, STAFF = "Тест-администратор", "Тест Админ"   # должность НЕ «с машинами»
 
@@ -2521,6 +2521,94 @@ def test_tires_menus_follow_changes(h):
     show()
 
 
+def test_bookings_master_from_work(h):
+    """«Добавить работу» → «Записи», колонка «Мастер»: работа без записи - мастер наряда; запись «Любой» - пусто,
+    после работы - мастер наряда; запись к мастеру А, работу делает «Тест Мастер» - виден он; в наряде сменили
+    мастера - в «Записях» новый; удалили запись - строки нет"""
+    app, db = h.app, h.app.db
+    other = "Тест Мастер Колонки"
+    db.add_worker(other, h.q("SELECT id FROM positions WHERE is_master = 1 ORDER BY id LIMIT 1")[0][0])
+    other_id = h.q("SELECT id FROM workers WHERE full_name = %s", (other,))[0][0]
+    app.refresh_workers_combo()
+
+    def master_in_bookings(booking_id):
+        app.switch_tab("bookings")
+        app.bookings_show_all_time = True
+        app.refresh_bookings()
+        tree = app.bookings_tree
+        item = next((i for i in tree.get_children() if str(tree.item(i, "values")[0]) == str(booking_id)), None)
+        app.bookings_show_all_time = False
+        return tree.set(item, "master") if item else None
+
+    # Работа без записи: запись создаётся сама - мастер наряда в «Записях»
+    work_id, booking_id, _ = save_work(h, "т350тт799", "Kia", "Rio", "9000000353", "Тест Мастер Колонка",
+                                       "Тест работа мастер колонки", 900)
+    if h.check("работа сохранена, создана запись", work_id and booking_id, (work_id, booking_id)):
+        h.check("работа без записи - в «Записях» мастер наряда", master_in_bookings(booking_id) == MASTER,
+                master_in_bookings(booking_id))
+
+    # Запись «Любой» (без мастера): пока наряда нет - пусто; работу начали - мастер наряда
+    h.booking_form("т351тт799", "Kia", "Rio", "9000000354", "Тест Мастер Любой", day=date.today())
+    row = h.q("SELECT b.id, b.worker_id FROM bookings b JOIN client_cars cc ON cc.id = b.car_id "
+              "WHERE cc.car_number = 'Т351ТТ799'")
+    if not h.check("запись «Любой» сохранена без мастера", row and row[0][1] is None, row):
+        return
+    any_id = row[0][0]
+    h.check("запись «Любой», наряда нет - в «Мастер» пусто", master_in_bookings(any_id) == "",
+            master_in_bookings(any_id))
+    app.switch_tab("works")
+    app.clear_work_form()
+    app.open_booking_in_add_work(any_id)
+    h.root.update()
+    app.worker_combo.set(MASTER)
+    h.add_work_item("Тест работа по записи Любой", 800)
+    app.add_work()
+    h.root.update()
+    h.check("запись «Любой», работу сделал «Тест Мастер» - он в «Записях»", master_in_bookings(any_id) == MASTER,
+            master_in_bookings(any_id))
+    h.check("сама запись не изменилась (мастер записи пустой)",
+            h.q("SELECT worker_id FROM bookings WHERE id = %s", (any_id,))[0][0] is None)
+
+    # В наряде сменили мастера - в «Записях» новый
+    app.switch_tab("bookings")
+    app.bookings_show_all_time = True
+    app.refresh_bookings()
+    tree = app.bookings_tree
+    item = next((i for i in tree.get_children() if str(tree.item(i, "values")[0]) == str(any_id)), None)
+    app.bookings_show_all_time = False
+    if h.check("запись есть в «Записях»", item):
+        tree.selection_set(item)
+        app.edit_booking_in_add_work()
+        h.root.update()
+        app.worker_combo.set(other)
+        app.add_work()
+        h.root.update()
+        h.check("сменили мастера в наряде - в «Записях» новый мастер", master_in_bookings(any_id) == other,
+                master_in_bookings(any_id))
+
+    # Запись к мастеру А, а работу делает другой - в «Записях» тот, кто делает
+    db.update_booking_status(any_id, "completed")
+    db.mark_work_completed(any_id)
+    tomorrow = date.today() + timedelta(days=1)
+    client_id, car_id = h.q("SELECT client_id, id FROM client_cars WHERE car_number = 'Т351ТТ799'")[0]
+    booked = db.add_booking(tomorrow, h.m.booking_time_slots()[0], client_id, car_id, worker_id=other_id)
+    if h.check("запись к «Тест Мастер Колонки» на завтра", booked):
+        h.check("наряда нет - в «Записях» мастер записи", master_in_bookings(booked) == other,
+                master_in_bookings(booked))
+        app.switch_tab("works")
+        app.clear_work_form()
+        app.open_booking_in_add_work(booked)
+        h.root.update()
+        app.worker_combo.set(MASTER)
+        h.add_work_item("Тест работа другой мастер", 600)
+        app.add_work()
+        h.root.update()
+        h.check("работу делает «Тест Мастер» - в «Записях» он, а не мастер записи",
+                master_in_bookings(booked) == MASTER, master_in_bookings(booked))
+        db.delete_booking(booked)
+        h.check("удалили запись - строки в «Записях» нет", master_in_bookings(booked) is None)
+
+
 TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_works_one_record,
          test_warehouse_chain, test_staff_payment, test_finance_entries, test_report_other_period,
          test_new_owner, test_fire_worker, test_cancel_booking_with_works,
@@ -2535,4 +2623,4 @@ TESTS = [test_work_salary_and_statistics, test_bonus_finances_profit, test_two_w
          test_tires_leave_parts, test_tires_income,
          test_warehouse_edit_dates_paid_delete, test_warehouse_order_money, test_warehouse_goto_and_lists,
          test_booking_vin_custom_time_to_work, test_tires_menus_follow_changes,
-         test_warehouse_english_ui]
+         test_warehouse_english_ui, test_bookings_master_from_work]

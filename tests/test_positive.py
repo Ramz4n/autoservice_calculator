@@ -6,12 +6,12 @@ from datetime import date, timedelta
 PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799",
           "Т140ТТ799", "Т141ТТ799", "Т142ТТ799", "Т143ТТ799", "Т144ТТ799", "Т145ТТ799", "Т146ТТ799", "Т147ТТ799",
           "Т148ТТ799", "Т149ТТ799", "Т150ТТ799", "Т151ТТ799", "Т152ТТ799", "Т153ТТ799",
-          "Т154ТТ799", "Т155ТТ799", "Т156ТТ799", "Т157ТТ799", "Т158ТТ799", "Т159ТТ799", "Т160ТТ799", "Т161ТТ799", "Т162ТТ799", "Т163ТТ799", "Т164ТТ799"]
+          "Т154ТТ799", "Т155ТТ799", "Т156ТТ799", "Т157ТТ799", "Т158ТТ799", "Т159ТТ799", "Т160ТТ799", "Т161ТТ799", "Т162ТТ799", "Т163ТТ799", "Т164ТТ799", "Т165ТТ799", "Т166ТТ799"]
 PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108",
           "+79000000140", "+79000000141", "+79000000142", "+79000000143", "+79000000144", "+79000000145", "+79000000146", "+79000000147",
           "+79000000148", "+79000000149", "+79000000150", "+79000000151", "+79000000152", "+79000000153",
           "+79000000154", "+79000000155", "+79000000156", "+79000000157", "+79000000158", "+79000000159",
-          "+79000000160", "+79000000161", "+79000000163", "+79000000164"]
+          "+79000000160", "+79000000161", "+79000000163", "+79000000164", "+79000000165", "+79000000166"]
 
 
 def prepare(h):
@@ -192,6 +192,39 @@ def test_work_mileage_less_than_last(h):
     rows = h.q("SELECT mileage FROM works WHERE car_id = %s ORDER BY id", (car[0],)) if car else ()
     h.check("«Да» - второй наряд записан с пробегом 12", [r[0] for r in rows] == [123, 12], rows)
     h.check("пробег 500 после 12 - без вопроса", not save("500", "Тест пробег третий"))
+
+
+def test_work_without_mileage_question(h):
+    """«Добавить работу»: пробег не вписали - вопрос «Пробег не введён. Сохранить без пробега?», «Да» - наряд
+    записан без пробега; пробег вписан - вопроса нет"""
+    app = h.app
+    question = app.tr("works.ask_save_without_mileage")
+    h.mileage_question = True
+    try:
+        n = len(h.dialogs)
+        h.answers[:] = [True]
+        h.works_form("т165тт799", "Kia", "Rio", "9000000165", "Тест Без Пробега",
+                     items=[("Тест работа без пробега", 700)])
+        h.answers[:] = []
+        car = h.car("Т165ТТ799")
+        rows = h.q("SELECT mileage FROM works WHERE car_id = %s", (car[0],)) if car else ()
+        h.check("пробег пустой - был вопрос «сохранить без пробега?»",
+                any(d[0] == "askyesno" and d[2] == question for d in h.dialogs_since(n)), h.dialogs_since(n))
+        h.check("«Да» - наряд записан без пробега", len(rows) == 1 and not rows[0][0], rows)
+
+        n = len(h.dialogs)
+        h.works_form("т166тт799", "Kia", "Rio", "9000000166", "Тест С Пробегом", save=False)
+        app.mileage_entry.delete(0, "end"); app.mileage_entry.insert(0, "45000")
+        h.add_work_item("Тест работа с пробегом", 700)
+        app.add_work()
+        h.root.update()
+        car = h.car("Т166ТТ799")
+        rows = h.q("SELECT mileage FROM works WHERE car_id = %s", (car[0],)) if car else ()
+        h.check("пробег вписан - вопроса нет, наряд с пробегом 45000",
+                rows == ((45000,),) and not any(d[2] == question for d in h.dialogs_since(n)),
+                (rows, h.dialogs_since(n)))
+    finally:
+        h.mileage_question = False
 
 
 def test_work_merge_keeps_mileage_vin(h):
@@ -2419,7 +2452,7 @@ def test_booking_form_compact(h):
 TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booking_region_continues,
          test_booking_pick_car_clears_error, test_warehouse_pick_car, test_work_pick_car,
          test_work_from_booking, test_work_new_car, test_work_brand_from_catalog, test_car_hints_same_everywhere,
-         test_work_mileage_digits_only, test_work_mileage_less_than_last,
+         test_work_mileage_digits_only, test_work_mileage_less_than_last, test_work_without_mileage_question,
          test_work_merge_keeps_mileage_vin, test_input_rules_boundaries, test_boundaries_in_forms,
          test_work_opens_active_record, test_plate_hint_all_forms,
          test_warehouse_existing_car, test_warehouse_new_car, test_edit_data, test_delete_booking_with_work,

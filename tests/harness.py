@@ -36,6 +36,9 @@ class Harness:
         self.results = []      # [(группа, проверка, прошла)]
         self.dialogs = []      # [(вид, заголовок, текст)]
         self.answers = []      # очередь ответов для askyesno
+        # Вопрос «Пробег не введён, сохранить без пробега?» («Добавить работу»): большинство тестов пробег не
+        # вписывают - отвечаем «Да» сами, не трогая очередь answers. True - вопрос настоящий (ответ из очереди)
+        self.mileage_question = False
         self.state = {}        # данные между тестами одного набора
         self.group = ""
         self._patch_dialogs()
@@ -85,11 +88,18 @@ class Harness:
         self.log(f"      окно пароля: {str(prompt)[:80]!r} -> {'Отмена' if answer is None else '***'}")
         return answer
 
+    def _is_mileage_question(self, message):
+        app = getattr(self, "app", None)
+        return app is not None and str(message) == app.tr("works.ask_save_without_mileage")
+
     def _patch_dialogs(self):
         def make(kind):
             def dialog(title=None, message=None, **kw):
                 ask = kind.startswith("ask")
-                answer = (self.answers.pop(0) if self.answers else True) if ask else "ok"
+                if ask and not self.mileage_question and self._is_mileage_question(message):
+                    answer = True
+                else:
+                    answer = (self.answers.pop(0) if self.answers else True) if ask else "ok"
                 self.dialogs.append((kind, str(title), str(message)))
                 self.log(f"      окно {kind}: {str(message)[:150]!r} -> {answer}")
                 return answer

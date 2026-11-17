@@ -4618,6 +4618,10 @@ class AutoServiceApp(TireStorageMixin):
                         now=f"{int(mileage):,}".replace(",", " "))):
                     self.mileage_entry.focus_set()
                     return
+        # Пробег не вписали - переспросить (часто забывают; без него не видно, когда следующее ТО)
+        elif not messagebox.askyesno(self.tr("common.attention"), self.tr("works.ask_save_without_mileage")):
+            self.mileage_entry.focus_set()
+            return
 
         # Данные клиента
         booking_id = getattr(self, 'selected_booking_id', None)

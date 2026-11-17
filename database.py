@@ -1520,7 +1520,10 @@ class Database:
                    CONCAT(cc.car_brand, ' ', cc.car_model, ' ', cc.car_number) as car_info,
                    b.client_id, b.car_id,
                    (SELECT w.order_number FROM works w WHERE w.booking_id = b.id
-                    ORDER BY w.id DESC LIMIT 1) AS order_number, b.notes, bw.full_name AS master_name
+                    ORDER BY w.id DESC LIMIT 1) AS order_number, b.notes,
+                   -- Мастер: кто делает работу (наряд записи), а пока наряда нет - к кому записали
+                   COALESCE((SELECT ww.full_name FROM works w JOIN workers ww ON ww.id = w.worker_id
+                             WHERE w.booking_id = b.id ORDER BY w.id DESC LIMIT 1), bw.full_name) AS master_name
                    FROM bookings b
                    LEFT JOIN clients c ON b.client_id = c.id
                    LEFT JOIN client_cars cc ON b.car_id = cc.id

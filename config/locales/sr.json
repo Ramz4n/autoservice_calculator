@@ -88,6 +88,7 @@
     "works.msg_brand_not_in_list": "Marke „{brand}“ nema na spisku.\nIzaberite marku iz predloga. Novu marku možete dodati u Podešavanja → Marke i modeli.",
     "works.msg_model_not_in_list": "Marka {brand} nema model „{model}“.\nIzaberite model iz predloga. Novi model možete dodati u Podešavanja → Marke i modeli.",
     "works.msg_enter_car_number": "Unesite registarski broj!",
+    "works.ask_save_without_mileage": "Kilometraža nije uneta.\nSačuvati bez kilometraže?",
     "works.ask_save_without_phone": "Telefon klijenta nije naveden.\nSačuvati bez telefona?",
     "works.ask_open_car_record": "Vozilo {car} već ima zapis u radu.\n\nOtvoriti ga? Radovi i delovi dodati sada nisu sačuvani i biće uklonjeni.\n\nNe — zadržati ih i napraviti novi zapis za ovo vozilo",
     "works.phone_erased_title": "Telefon klijenta je obrisan",

@@ -88,6 +88,7 @@
     "works.msg_brand_not_in_list": "The brand \"{brand}\" is not in the list.\nPick a brand from the suggestions. A new brand can be added in Settings → Brands & Models.",
     "works.msg_model_not_in_list": "{brand} has no model \"{model}\".\nPick a model from the suggestions. A new model can be added in Settings → Brands & Models.",
     "works.msg_enter_car_number": "Enter the plate number!",
+    "works.ask_save_without_mileage": "Mileage is not entered.\nSave without mileage?",
     "works.ask_save_without_phone": "The client's phone number is not specified.\nSave without a phone number?",
     "works.ask_open_car_record": "Car {car} already has a record in progress.\n\nOpen it? The works and parts added now are not saved and will be removed.\n\nNo — keep them and create a new record for this car",
     "works.phone_erased_title": "Client phone erased",

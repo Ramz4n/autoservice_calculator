@@ -5,10 +5,10 @@
 from datetime import date, timedelta
 
 PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799", "Т209ТТ799", "Т210ТТ799", "Т211ТТ799",
-          "Т212ТТ799", "Т213ТТ799", "Т214ТТ799", "Т215ТТ799", "Т216ТТ799", "Т217ТТ799", "Т218ТТ799"]
+          "Т212ТТ799", "Т213ТТ799", "Т214ТТ799", "Т215ТТ799", "Т216ТТ799", "Т217ТТ799", "Т218ТТ799", "Т219ТТ799"]
 PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205", "+79000000206", "+79000000207",
           "+79000000208", "+79000000209", "+79000000210", "+79000000211",
-          "+79000000213", "+79000000214", "+79000000215", "+79000000216", "+79000000217", "+79000000218"]
+          "+79000000213", "+79000000214", "+79000000215", "+79000000216", "+79000000217", "+79000000218", "+79000000219"]
 
 
 def prepare(h):
@@ -804,8 +804,32 @@ def test_booking_vin_time_rejects(h):
         "Т213ТТ799", custom_time="1315", day=busy_day, master=master), "уже записан")
 
 
+
+def test_work_without_mileage_no(h):
+    """«Добавить работу»: пробег не вписали, на вопрос «сохранить без пробега?» - «Нет»: ничего не записано
+    (ни наряда, ни машины, ни клиента), курсор в поле пробега, работы в форме остались"""
+    app = h.app
+    h.mileage_question = True
+    focused = []
+    real_focus = app.mileage_entry.focus_set
+    app.mileage_entry.focus_set = lambda *a: (focused.append(True), real_focus(*a))
+    try:
+        h.expect_rejected("пробег пустой, «Нет» - ничего не сохранено",
+                          lambda: h.works_form("т219тт799", "Kia", "Rio", "9000000219", "Тест Без Пробега Нет",
+                                               items=[("Тест работа без пробега нет", 700)]),
+                          app.tr("works.ask_save_without_mileage"), answers=[False])
+        h.check("машина Т219ТТ799 не создана", not h.car("Т219ТТ799"))
+        h.check("курсор поставлен в поле пробега", focused)
+        h.check("работы в форме остались", len(app.works_list) == 1, app.works_list)
+    finally:
+        h.mileage_question = False
+        app.mileage_entry.focus_set = real_focus
+        app.clear_work_form()
+
+
 TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_warehouse_edit_rejects,
          test_edit_rejects, test_positions_rejects,
          test_payment_rejects, test_finance_rejects, test_period_rejects, test_booking_master_rejects,
          test_bookings_middle_click_nothing_to_scroll, test_tables_middle_click_nothing_to_scroll, test_tires_rejects,
-         test_booking_vin_time_rejects]
+         test_booking_vin_time_rejects,
+         test_work_without_mileage_no]
