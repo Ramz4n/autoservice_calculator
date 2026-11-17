@@ -6,12 +6,12 @@ from datetime import date, timedelta
 PLATES = ["Т101ТТ799", "Т102ТТ799", "Т103ТТ799", "Т104ТТ799", "Т105ТТ77", "Т105ТТ777", "Т106ТТ799", "Т107ТТ799", "Т108ТТ799",
           "Т140ТТ799", "Т141ТТ799", "Т142ТТ799", "Т143ТТ799", "Т144ТТ799", "Т145ТТ799", "Т146ТТ799", "Т147ТТ799",
           "Т148ТТ799", "Т149ТТ799", "Т150ТТ799", "Т151ТТ799", "Т152ТТ799", "Т153ТТ799",
-          "Т154ТТ799", "Т155ТТ799", "Т156ТТ799", "Т157ТТ799", "Т158ТТ799", "Т159ТТ799", "Т160ТТ799", "Т161ТТ799", "Т162ТТ799", "Т163ТТ799"]
+          "Т154ТТ799", "Т155ТТ799", "Т156ТТ799", "Т157ТТ799", "Т158ТТ799", "Т159ТТ799", "Т160ТТ799", "Т161ТТ799", "Т162ТТ799", "Т163ТТ799", "Т164ТТ799"]
 PHONES = ["+79000000101", "+79000000103", "+79000000104", "+79000000105", "+79000000106", "+79000000107", "+79000000108",
           "+79000000140", "+79000000141", "+79000000142", "+79000000143", "+79000000144", "+79000000145", "+79000000146", "+79000000147",
           "+79000000148", "+79000000149", "+79000000150", "+79000000151", "+79000000152", "+79000000153",
           "+79000000154", "+79000000155", "+79000000156", "+79000000157", "+79000000158", "+79000000159",
-          "+79000000160", "+79000000161", "+79000000163"]
+          "+79000000160", "+79000000161", "+79000000163", "+79000000164"]
 
 
 def prepare(h):
@@ -1273,6 +1273,92 @@ def test_tires_accept(h):
             and summer["store_until"] == date.today() + timedelta(days=183) and not summer["with_rims"]
             and not summer["is_paid"], summer)
 
+    # Размер, радиус и марка шин - обязательные: всё вписано - сохраняется без предупреждений
+    before = len(h.dialogs)
+    h.tires_form("Т150ТТ799", season="winter", size="215/60", radius="17", tire_brand="Nokian", location="Б-5",
+                 price="1500", notes="Тест шины всё вписано")
+    full = h.tire(notes="Тест шины всё вписано")
+    h.check("всё вписано (и ячейка, телефон, стоимость) - сохранено, ни предупреждений, ни вопросов",
+            full and full["tire_size"] == "215/60 R17" and full["tire_brand"] == "Nokian"
+            and not any(d[0] in ("showwarning", "askyesno") for d in h.dialogs[before:]), h.dialogs[before:])
+    h.check("ячейка вписана - вопроса «без ячейки?» нет",
+            not any(app.tr("tires.msg_no_location") in d[2] for d in h.dialogs[before:]))
+
+    # Ячейку не вписали - вопрос «оставить без ячейки?», «да» - сохранено без ячейки
+    before = len(h.dialogs)
+    h.answers[:] = [True]
+    h.tires_form("Т150ТТ799", season="all", location="", notes="Тест шины без ячейки")
+    no_cell = h.tire(notes="Тест шины без ячейки")
+    h.check("без ячейки - был вопрос, «да» - сохранено без ячейки",
+            no_cell and no_cell["location"] is None
+            and any(d[0] == "askyesno" and app.tr("tires.msg_no_location") in d[2] for d in h.dialogs[before:]),
+            no_cell)
+    if no_cell:
+        # Выданный комплект без ячейки - правим без вопроса (ячейка ему не нужна)
+        app.db.set_tire_storage_status(no_cell["id"], "issued", date.today())
+        if h.check("комплект выдан", app.db.get_tire_storage_by_id(no_cell["id"])["status"] == "issued"):
+            before = len(h.dialogs)
+            h.tires_form(None, tire_id=no_cell["id"], notes="Тест шины без ячейки выдано")
+            h.check("выданный без ячейки - изменили без вопроса про ячейку",
+                    h.tire(notes="Тест шины без ячейки выдано")
+                    and not any(app.tr("tires.msg_no_location") in d[2] for d in h.dialogs[before:]))
+        app.db.delete_tire_storage(no_cell["id"])
+
+    # Стоимость не вписали - вопрос «хранить бесплатно?», «да» - сохранено без цены; вписали - вопроса нет
+    before = len(h.dialogs)
+    h.answers[:] = [True]
+    h.tires_form("Т150ТТ799", season="summer", location="Б-6", price="", notes="Тест шины бесплатно")
+    free = h.tire(notes="Тест шины бесплатно")
+    h.check("без стоимости - был вопрос, «да» - сохранено без цены и без дохода",
+            free and free["price"] is None and free["income_id"] is None
+            and any(d[0] == "askyesno" and app.tr("tires.msg_no_price") in d[2] for d in h.dialogs[before:]), free)
+
+    # Машина в базе, у владельца нет телефона: поле пустое - вопрос, «да» - сохранено; вписали - телефон владельцу
+    h.tires_form("т164тт799", "Kia", "Rio", "9000000164", "Тест Шины Без Телефона", location="Б-7", price="1000",
+                 notes="Тест шины телефон 1")
+    car = h.car("Т164ТТ799")
+    if h.check("машина Т164ТТ799 создана", car):
+        app.db.clear_client_phone(car[1])
+        before = len(h.dialogs)
+        h.answers[:] = [True]
+        h.tires_form("Т164ТТ799", location="Б-8", price="1000", notes="Тест шины телефон 2")
+        h.check("владелец без телефона, поле пустое - был вопрос, «да» - сохранено",
+                h.tire(notes="Тест шины телефон 2")
+                and any(d[0] == "askyesno" and app.tr("tires.msg_no_phone") in d[2] for d in h.dialogs[before:]))
+        before = len(h.dialogs)
+        h.tires_form("Т164ТТ799", phone10="9000000164", location="Б-9", price="1000", notes="Тест шины телефон 3")
+        phone = h.q("SELECT phone FROM clients WHERE id = %s", (car[1],))
+        h.check("вписали телефон - вопроса нет, телефон сохранён владельцу",
+                h.tire(notes="Тест шины телефон 3") and phone and phone[0][0] == "+79000000164"
+                and not any(app.tr("tires.msg_no_phone") in d[2] for d in h.dialogs[before:]), phone)
+        before = len(h.dialogs)
+        h.tires_form("Т164ТТ799", location="Б-10", price="1000", notes="Тест шины телефон 4")
+        h.check("у владельца телефон есть - вопроса про телефон нет",
+                h.tire(notes="Тест шины телефон 4")
+                and not any(app.tr("tires.msg_no_phone") in d[2] for d in h.dialogs[before:]))
+
+    import customtkinter as ctk
+    app.show_add_part_form("tires")
+    h.wait(200)
+    h.check("у ширины/профиля, радиуса и марки шин - звёздочка «обязательно»",
+            all(any(isinstance(w, ctk.CTkLabel) and w.cget("text") == app.tr(k) + " *"
+                    for w in app.tire_size_entry.master.winfo_children())
+                for k in ("tires.width_profile", "tires.radius", "tires.brand")))
+    app.hide_add_part_form()
+    app.show_add_part_form("tires")
+    h.wait(200)
+    chips = app.tire_season_switch
+    selected = lambda b: b.cget("fg_color") == chips.SELECTED
+    h.check("новая форма: сезон - отдельные кнопки, ничего не выбрано (синих нет)",
+            chips.get() == "" and not any(selected(b) for b in chips.buttons.values()))
+    winter = app.tr("tires.season_winter")
+    chips.buttons[winter].invoke()
+    h.check("нажали «Зимние» - выбран, синий только он, текст без значков",
+            chips.get() == winter and selected(chips.buttons[winter])
+            and sum(selected(b) for b in chips.buttons.values()) == 1
+            and chips.buttons[winter].cget("text") == winter)
+    app.hide_add_part_form()
+
 
 def test_tires_edit_issue(h):
     """Шины: изменить комплект (двойной клик) - форма открывается с его данными, изменения сохраняются;
@@ -1444,6 +1530,22 @@ def test_tires_hint_soon_receipt(h):
     app.clear_work_form()
     h.root.update()
     h.check("очистили форму - строки про шины нет", not app.works_tires_label.winfo_ismapped())
+
+    # Второй комплект у той же машины - каждый своей строкой с номером, без «;» в одну строку
+    h.tires_form("т153тт799", season="summer", size="225/45 R18", location="Д-5", price="2500", paid=False,
+                 notes="Тест шины подсказка 2")
+    second = h.tire(notes="Тест шины подсказка 2")
+    if h.check("второй комплект сохранён", second):
+        many = app.tire_hint_text(second["car_id"])
+        h.check("два комплекта: заголовок и две пронумерованные строки",
+                many.startswith(hint) and many.count("\n") == 2 and "1) " in many and "2) " in many
+                and "Д-4" in many and "Д-5" in many and ";" not in many, many)
+        h.works_form("Т153ТТ799", master=None, save=False)
+        h.root.update()
+        h.check("«Добавить работу»: оба комплекта на отдельных строках",
+                app.works_tires_label.cget("text").count("\n") == 2, app.works_tires_label.cget("text"))
+        app.clear_work_form()
+        db.delete_tire_storage(second["id"])
 
     # Клиент записан - работу начинают из записи: выбор записи в списке и «Записи» → «Редактировать наряд»
     h.booking_form("Т153ТТ799", None, None, None, None, day=date.today() + timedelta(days=1))
@@ -1917,6 +2019,8 @@ def test_text_clipboard(h):
     app.warehouse_show_page("tires")
     app.show_add_part_form("tires", tire_id=tire["id"])
     h.wait(300)
+    app.tire_size_entry.delete(0, "end")          # пустое поле размера - для проверок вставки и подсказки
+    app.restore_placeholder(app.tire_size_entry)
     notes = app.tire_notes_entry._entry
     size = app.tire_size_entry._entry
 

@@ -5419,6 +5419,10 @@ class AutoServiceApp(TireStorageMixin):
             self.wh_new_car_visible = False
             self.fit_form_window(self.add_part_form_frame)
 
+    def wh_phone_digits(self):
+        """Цифры телефона в форме склада после +7 ("" - не вписан)"""
+        return phone_mask_digits(self.wh_phone_entry.get())
+
     def _wh_phone_unmark_if_changed(self):
         """Телефон уже не тот, что подставил госномер (правили руками или убрали) - снять зелёную подсветку"""
         if self.wh_phone_entry.get() != getattr(self, "wh_plate_phone", None):

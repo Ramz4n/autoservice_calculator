@@ -5,10 +5,10 @@
 from datetime import date, timedelta
 
 PLATES = ["Т201ТТ799", "Т202ТТ799", "Т203ТТ799", "Т204ТТ799", "Т205ТТ799", "Т206ТТ799", "Т207ТТ799", "Т208ТТ799", "Т209ТТ799", "Т210ТТ799", "Т211ТТ799",
-          "Т212ТТ799", "Т213ТТ799", "Т214ТТ799", "Т215ТТ799", "Т216ТТ799", "Т217ТТ799"]
+          "Т212ТТ799", "Т213ТТ799", "Т214ТТ799", "Т215ТТ799", "Т216ТТ799", "Т217ТТ799", "Т218ТТ799"]
 PHONES = ["+79000000201", "+79000000202", "+79000000203", "+79000000204", "+79000000205", "+79000000206", "+79000000207",
           "+79000000208", "+79000000209", "+79000000210", "+79000000211",
-          "+79000000213", "+79000000214", "+79000000215", "+79000000216", "+79000000217"]
+          "+79000000213", "+79000000214", "+79000000215", "+79000000216", "+79000000217", "+79000000218"]
 
 
 def prepare(h):
@@ -517,7 +517,8 @@ def test_tires_rejects(h):
     перенос: ничего не отмечено - ничего не перенесено; деталь в наряде - не переносится"""
     app, db = h.app, h.app.db
     good = dict(brand="Kia", model="Rio", phone10="9000000209", name="Тест Шины Отказ", season="winter",
-                size="205/55 R16", qty="4", received=date.today().strftime("%d.%m.%Y"), until="", price="1000")
+                size="205/55 R16", tire_brand="Nokian", qty="4", received=date.today().strftime("%d.%m.%Y"),
+                until="", price="1000")
     cases = [
         ("нет сезона", dict(season=None), "сезон"),
         ("нет госномера", dict(plate=""), None),
@@ -553,13 +554,81 @@ def test_tires_rejects(h):
                           lambda p=plate, f=fields: h.tires_form(p, **f), text)
     h.check("машина Т209ТТ799 не создана (отказ до сохранения)", not h.car("Т209ТТ799"))
 
+    # Нет сезона - кнопки сезона в красной рамке; выбрали сезон - рамка обычная
+    h.tires_form("Т209ТТ799", **dict(good, season=None), close=False)
+    chips = app.tire_season_switch
+    h.check("нет сезона - кнопки сезона в красной рамке",
+            all(b.cget("border_color") == chips.ERROR_BORDER for b in chips.buttons.values()))
+    chips.set(app.tr("tires.season_summer"))
+    h.check("выбрали сезон - красной рамки нет",
+            not any(b.cget("border_color") == chips.ERROR_BORDER for b in chips.buttons.values()))
+    app.hide_add_part_form()
+
+    # Ширина/профиль, радиус, марка шин - обязательные: нет - предупреждение со списком, ничего не сохранено
+    missing_text = app.tr("tires.msg_missing_fields", fields="").split(":")[0]
+    for name, change, fields_named in (
+            ("нет размера и марки", dict(size="", tire_brand=""), ("width_profile", "radius", "brand")),
+            ("нет радиуса", dict(size="205/55", radius=""), ("radius",)),
+            ("нет ширины/профиля", dict(size="", radius="R16"), ("width_profile",)),
+            ("нет марки шин", dict(tire_brand=""), ("brand",)),
+            ("марка шин - одни пробелы", dict(tire_brand="   "), ("brand",))):
+        before = len(h.dialogs)
+        h.expect_rejected(f"шины: {name} - отказ, ничего не сохранено",
+                          lambda f=dict(good, **change): h.tires_form("Т209ТТ799", **f), missing_text)
+        warned = next((d[2] for d in h.dialogs[before:] if d[0] == "showwarning"), "")
+        listed = warned.split("\n")[0]   # «Не заполнено: «Радиус», «Марка шин».»
+        quoted = {k: "«" + app.tr("tires." + k) + "»" for k in ("width_profile", "radius", "brand")}
+        h.check(f"{name}: в предупреждении названы именно пустые поля",
+                all((quoted[k] in listed) == (k in fields_named) for k in quoted), warned)
+    h.check("машина Т209ТТ799 не создана (размер, марка)", not h.car("Т209ТТ799"))
+
+    # Ячейка пустая - вопрос «оставить без ячейки?», «нет» - ничего не сохранено, рамка у поля ячейки
+    no_cell = app.tr("tires.msg_no_location").split("—")[0].strip()
+    h.expect_rejected("шины: нет ячейки, «нет» - ничего не сохранено",
+                      lambda: h.tires_form("Т209ТТ799", **dict(good, location=""), close=False), no_cell,
+                      answers=[False])
+    h.check("нет ячейки, «нет» - поле ячейки в красной рамке",
+            app.tire_location_entry.cget("border_color") == app.FORM_ERROR_BORDER)
+    app.hide_add_part_form()
+    h.check("машина Т209ТТ799 не создана (ячейка)", not h.car("Т209ТТ799"))
+
+    # Стоимость пустая - вопрос «хранить бесплатно?», «нет» - ничего не сохранено, рамка у стоимости
+    no_price = app.tr("tires.msg_no_price").split("—")[0].strip()
+    h.expect_rejected("шины: нет стоимости, «нет» - ничего не сохранено",
+                      lambda: h.tires_form("Т209ТТ799", **dict(good, location="Ж-9", price=""), close=False),
+                      no_price, answers=[False])
+    h.check("нет стоимости, «нет» - поле стоимости в красной рамке",
+            app.tire_price_entry.cget("border_color") == app.FORM_ERROR_BORDER)
+    app.hide_add_part_form()
+
+    # Машина в базе, у владельца нет телефона: «оставить без телефона?» «нет» - ничего; неполный номер - отказ
+    h.tires_form("т218тт799", "Kia", "Rio", "9000000218", "Тест Шины Телефон", season="winter",
+                 location="Ж-10", price="1000", notes="Тест шины телефон отказ 1")
+    car = h.car("Т218ТТ799")
+    if h.check("машина Т218ТТ799 создана", car):
+        app.db.clear_client_phone(car[1])
+        no_phone = app.tr("tires.msg_no_phone").split("—")[0].strip()
+        h.expect_rejected("шины: владелец без телефона, поле пустое, «нет» - ничего не сохранено",
+                          lambda: h.tires_form("Т218ТТ799", location="Ж-11", price="1000",
+                                               notes="Тест шины телефон отказ 2", close=False),
+                          no_phone, answers=[False])
+        h.check("«нет» - поле телефона в красной рамке",
+                app.wh_phone_entry.cget("border_color") == app.FORM_ERROR_BORDER)
+        app.hide_add_part_form()
+        h.expect_rejected("шины: владелец без телефона, номер неполный - отказ",
+                          lambda: h.tires_form("Т218ТТ799", phone10="90000", location="Ж-11", price="1000",
+                                               notes="Тест шины телефон отказ 3"), None)
+        h.check("телефон владельцу не записан", h.q("SELECT phone FROM clients WHERE id = %s", (car[1],))[0][0]
+                is None)
+
     # Ячейка занята: «нет» - не сохраняется, «да» - сохраняется
     h.tires_form("Т209ТТ799", location="Ж-1", notes="Тест шины ячейка 1", **{k: v for k, v in good.items()})
     first = h.tire(notes="Тест шины ячейка 1")
     if h.check("первый комплект в ячейке Ж-1 сохранён", first and first["location"] == "Ж-1"):
         h.expect_rejected("ячейка Ж-1 занята, ответ «нет» - не сохранено",
-                          lambda: h.tires_form("Т209ТТ799", season="summer", location="ж-1",
-                                               notes="Тест шины ячейка 2"), "Ж-1", answers=[False])
+                          lambda: h.tires_form("Т209ТТ799", season="summer", location="ж-1", size="205/55 R16",
+                                               tire_brand="Nokian", price="1000", notes="Тест шины ячейка 2"), "Ж-1",
+                          answers=[False])
         # Неоплаченные - выдать, «нет»: статус не меняется
         db.set_tire_storage_paid(first["id"], False)
         h.tires_select(first["id"])

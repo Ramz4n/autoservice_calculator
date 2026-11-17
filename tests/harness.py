@@ -358,8 +358,14 @@ class Harness:
         """Склад → «Шины» → «Принять шины» (или изменить комплект tire_id): госномер, данные новой машины,
         раздел «Шины», «Принять на хранение». season - summer / winter / all / None (не выбран).
         size - поле «ширина/профиль» (можно и весь размер «205/55 R16» - разберётся сам), radius - «радиус».
-        Поля, переданные как None, остаются как в форме"""
+        Поля, переданные как None, остаются как в форме. Новый комплект: размер и марка шин обязательны -
+        не переданы (None), подставляются «205/55 R16» и «Nokian»; пустая строка - поле пустое"""
         app = self.app
+        if tire_id is None:
+            if size is None and radius is None:
+                size = "205/55 R16"
+            if tire_brand is None:
+                tire_brand = "Nokian"
         if to_catalog and brand and model:
             self.ensure_catalog_car(brand, model)
         app.switch_tab("warehouse")

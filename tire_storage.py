@@ -21,6 +21,48 @@ from tires import (SEASONS, STATUS_STORED, STATUS_ISSUED, STATUS_OVERDUE, STATUS
 TIRE_TEXT_LIMITS = {"tire_size": 50, "tire_brand": 100, "location": 50}   # как в базе (VARCHAR)
 
 
+class ChoiceChips(ctk.CTkFrame):
+    """Выбор одного из нескольких - отдельными кнопками с рамкой (серые; выбранная - синяя):
+    сразу видно, что это кнопки и надо выбрать одну (а не строка-заголовок). get() / set(текст) -
+    как у CTkSegmentedButton; set("") - ничего не выбрано. error(True) - красные рамки (не выбрали)"""
+    BORDER, ERROR_BORDER, SELECTED = "#90a4ae", "#e53935", "#1565c0"
+
+    def __init__(self, parent, values, height=34, font=("Arial", 13)):
+        super().__init__(parent, fg_color="transparent")
+        self.value = ""
+        self._error = False
+        self.buttons = {}
+        for i, text in enumerate(values):
+            button = ctk.CTkButton(self, text="", height=height, font=font, corner_radius=8, border_width=2,
+                                   command=lambda t=text: self.set(t))
+            button.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 6, 0))
+            self.grid_columnconfigure(i, weight=1, uniform="chips")
+            self.buttons[text] = button
+        self._paint()
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value if value in self.buttons else ""
+        if self.value:
+            self._error = False
+        self._paint()
+
+    def error(self, on):
+        self._error = bool(on)
+        self._paint()
+
+    def _paint(self):
+        for text, button in self.buttons.items():
+            if text == self.value:
+                button.configure(text=text, fg_color=self.SELECTED, hover_color="#0d47a1",
+                                 text_color="white", border_color=self.SELECTED)
+            else:
+                button.configure(text=text, fg_color="#eceff1", hover_color="#cfd8dc", text_color="#37474f",
+                                 border_color=self.ERROR_BORDER if self._error else self.BORDER)
+
+
 class SuggestList:
     """Список под полем: вошли в поле - все варианты, вводят - подходящие (без учёта «/», пробелов, R);
     выбрали мышью / Enter - значение в поле, курсор дальше (on_pick). Вписать своё тоже можно"""
@@ -148,6 +190,7 @@ class TireStorageMixin:
 
     def tire_hint_text(self, car_id):
         """Строка для форм, где нашли машину: «🛞 На хранении: Зимние 205/55 R16, 4 шт., ячейка А-12».
+        Несколько комплектов - каждый своей строкой с номером («1) ...», «2) ...»), чтобы было видно, сколько их.
         Пусто - у машины нет шин на хранении"""
         sets = self.db.get_stored_tires_by_car(car_id) if car_id else []
         if not sets:
@@ -160,7 +203,10 @@ class TireStorageMixin:
             if tire["location"]:
                 text += ", " + self.tr("tires.hint_location", location=tire["location"])
             parts.append(text)
-        return self.tr("tires.hint_stored", sets="; ".join(parts))
+        if len(parts) == 1:
+            return self.tr("tires.hint_stored", sets=parts[0])
+        lines = "".join(f"\n    {i}) {text}" for i, text in enumerate(parts, 1))
+        return self.tr("tires.hint_stored", sets="").rstrip() + lines
 
     # ===== вкладка «Шины» =====
 
@@ -658,18 +704,19 @@ class TireStorageMixin:
 
         self.form_label(body, self.tr("tires.season"), required=True).pack(fill=tk.X)
         self.tire_season_labels = {self.tr(f"tires.season_{s}"): s for s in SEASONS}
-        self.tire_season_switch = ctk.CTkSegmentedButton(body, values=list(self.tire_season_labels), height=32,
-                                                         font=("Arial", 13))
-        self.tire_season_switch.pack(fill=tk.X, pady=(0, 8))
+        self.tire_season_switch = ChoiceChips(body, list(self.tire_season_labels))
+        self.tire_season_switch.pack(fill=tk.X, pady=(2, 8))
 
         # Размер - двумя полями со списками: «ширина/профиль» (205/55) и «радиус» (R16); в базе - «205/55 R16»
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill=tk.X)
         self.tire_size_entry = self.works_cell(row, 0, self.tr("tires.width_profile"),
-                                               self.form_entry(row, width=110, placeholder_text="205/55"), 110)
+                                               self.form_entry(row, width=110, placeholder_text="205/55"), 110,
+                                               required=True)
         self.tire_radius_entry = self.works_cell(row, 1, self.tr("tires.radius"),
-                                                 self.form_entry(row, width=80, placeholder_text="R16"), 80)
-        self.tire_brand_entry = self.works_cell(row, 2, self.tr("tires.brand"), self.form_entry(row))
+                                                 self.form_entry(row, width=80, placeholder_text="R16"), 80,
+                                                 required=True)
+        self.tire_brand_entry = self.works_cell(row, 2, self.tr("tires.brand"), self.form_entry(row), required=True)
         self.tire_quantity_entry = self.works_cell(row, 3, self.tr("warehouse.quantity_short"),
                                                    self.form_entry(row, width=60), 60)
         self.tire_size_suggest = SuggestList(self, self.tire_size_entry, content, self.tire_width_profile_values,
@@ -753,6 +800,7 @@ class TireStorageMixin:
             entry.delete(0, tk.END)
             entry.configure(border_color=self.wh_normal_border)
         self.tire_hide_popups()
+        self.tire_season_switch.error(False)
         self._tire_sizes_cache = None   # списки размеров - заново из базы
         tire = self.db.get_tire_storage_by_id(tire_id) if tire_id else None
         if tire is None:
@@ -786,11 +834,51 @@ class TireStorageMixin:
             if not entry.get():
                 self.restore_placeholder(entry)
 
+    def tire_check_required(self, size, brand, window):
+        """Ширина/профиль, радиус и марка шин - обязательные: чего-то нет - предупреждение со списком пустых полей,
+        у них красная рамка, курсор в первое. True - всё вписано"""
+        width_profile, radius = split_size(size)
+        missing = [(entry, key) for entry, key, value in (
+            (self.tire_size_entry, "tires.width_profile", width_profile),
+            (self.tire_radius_entry, "tires.radius", radius),
+            (self.tire_brand_entry, "tires.brand", brand)) if not value]
+        if not missing:
+            return True
+        fields = ", ".join(f"«{self.tr(key)}»" for _, key in missing)
+        for entry, _ in missing:
+            entry.configure(border_color=self.FORM_ERROR_BORDER)
+        missing[0][0].focus_set()
+        messagebox.showwarning(self.tr("common.attention"), self.tr("tires.msg_missing_fields", fields=fields),
+                               parent=window)
+        return False
+
+    def tire_owner_phone_to_save(self, issued, window):
+        """Телефон клиента для машины из базы, у владельца которой телефона нет (у новой машины телефон и так
+        обязателен). Поле пустое - вопрос «оставить без телефона?» («нет» - рамка, курсор в поле: False);
+        номер неполный - предупреждение (False); вписан - (client_id, "+7...") - сохранить владельцу.
+        None - ничего делать не надо"""
+        owner = self.db.get_car_owner_by_number(self.wh_car_number_entry.get().strip())
+        if not owner or owner["owner_phone"] or not owner["client_id"]:
+            return None   # новая машина (проверит wh_form_car_id) или телефон уже есть
+        digits = self.wh_phone_digits()
+        if len(digits) == 10:
+            return owner["client_id"], "+7" + digits
+        if digits:
+            self.form_mark_error(self.wh_phone_entry, "warehouse.msg_enter_full_phone", window)
+            return False
+        if issued or messagebox.askyesno(self.tr("common.attention"), self.tr("tires.msg_no_phone"),
+                                         icon="warning", parent=window):
+            return None
+        self.wh_phone_entry.configure(border_color=self.FORM_ERROR_BORDER)
+        self.wh_phone_entry.focus_set()
+        return False
+
     def save_tire_storage_form(self):
         """«Принять на хранение» / «Сохранить»: проверка полей, машина (найти или создать), запись в базу"""
         window = self.add_part_form_frame
         season = self.tire_season_labels.get(self.tire_season_switch.get())
         if not season:
+            self.tire_season_switch.error(True)
             messagebox.showwarning(self.tr("common.attention"), self.tr("tires.msg_choose_season"), parent=window)
             return
         self.tire_hide_popups()
@@ -836,11 +924,25 @@ class TireStorageMixin:
             self.form_mark_error(self.tire_price_entry, "warehouse.msg_price_number", window,
                                  max=self.format_money_limit())
             return
+        if not self.tire_check_required(size, texts["tire_brand"], window):
+            return
         tire_id = getattr(self, "wh_editing_tire_id", None)
         # Выданные шины ячейку не занимают - правим такой комплект (цену, примечание) без вопроса про ячейку
         editing = self.db.get_tire_storage_by_id(tire_id) if tire_id else None
-        taken = None if editing and editing["status"] == STATUS_ISSUED else \
-            self.db.tire_location_taken(texts["location"], exclude_id=tire_id)
+        issued = bool(editing and editing["status"] == STATUS_ISSUED)
+        # Телефон, ячейка, стоимость не вписаны - спросить «оставить пустым?» (выданные - история, не спрашиваем)
+        owner_phone = self.tire_owner_phone_to_save(issued, window)
+        if owner_phone is False:
+            return
+        if not issued:
+            for empty, entry, key in ((not texts["location"], self.tire_location_entry, "tires.msg_no_location"),
+                                      (price is None, self.tire_price_entry, "tires.msg_no_price")):
+                if empty and not messagebox.askyesno(self.tr("common.attention"), self.tr(key), icon="warning",
+                                                     parent=window):
+                    entry.configure(border_color=self.FORM_ERROR_BORDER)
+                    entry.focus_set()
+                    return
+        taken = None if issued else self.db.tire_location_taken(texts["location"], exclude_id=tire_id)
         if taken and not messagebox.askyesno(
                 self.tr("common.attention"),
                 self.tr("tires.msg_location_taken", location=texts["location"], tires=self.tire_title(taken)),
@@ -852,6 +954,9 @@ class TireStorageMixin:
         car_id = self.wh_form_car_id(require_car=True)
         if car_id is self.WH_CAR_ABORT:
             return
+        if owner_phone:
+            # У владельца машины из базы телефона не было - вписали в форме: сохраняем ему
+            self.db.update_client_contact(owner_phone[0], phone=owner_phone[1])
         fields = dict(car_id=car_id, season=season, tire_size=texts["tire_size"] or None,
                       tire_brand=texts["tire_brand"] or None, quantity=quantity, with_rims=self.tire_rims_var.get(),
                       location=texts["location"] or None, received_date=received, store_until=until, price=price,
