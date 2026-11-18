@@ -2461,3 +2461,112 @@ TESTS = [test_booking_new_car_latin, test_booking_same_car_same_time, test_booki
          test_tires_rules, test_tires_accept, test_tires_edit_issue, test_tires_filters, test_tires_transfer, test_tires_hint_soon_receipt,
          test_tires_cells_dates_lists, test_warehouse_row_colors, test_text_clipboard, test_tires_size_radius, test_booking_slot_tooltip, test_period_follows_new_day, test_booking_with_master, test_booking_vin,
          test_booking_custom_time, test_booking_form_compact]
+
+
+def test_backup_schedule(h):
+    """Резервные копии по расписанию: ежедневная (папка Backup + облачная папка, 14 шт.), почасовая (только Backup,
+    если данные менялись, 48 шт.), при закрытии программы (Backup + облако). Ручная копия не сдвигает ежедневную.
+    Старые настройки без backup_daily_last - ежедневная считается от backup_last, как раньше"""
+    import os
+    import time
+    from datetime import datetime
+    import backup as backup_module
+    app = h.app
+    DAILY, HOURLY = backup_module.BACKUP_FILE_PREFIX, backup_module.HOURLY_FILE_PREFIX
+    box = h.backup_sandbox()
+    try:
+        t0 = datetime.now()
+        app.auto_backup_tick(now=t0)
+        h.check("первый запуск: ежедневная копия в Backup и в облачной папке",
+                len(box.files(box.local, DAILY)) == 1 and len(box.files(box.cloud, DAILY)) == 1,
+                (os.listdir(box.local), os.listdir(box.cloud)))
+        h.check("время ежедневной и почасовой записано", box.settings.get("backup_daily_last") == t0.isoformat()
+                and box.settings.get("backup_hourly_last") == t0.isoformat(), box.settings)
+
+        app.db.add_expense("Тест копия 1", 1, date.today(), "Тест", False)
+        app.auto_backup_tick(now=t0 + timedelta(minutes=30))
+        h.check("через 30 минут новой копии нет", len(os.listdir(box.local)) == 1, os.listdir(box.local))
+
+        time.sleep(1.1)
+        app.auto_backup_tick(now=t0 + timedelta(minutes=61))
+        h.check("через час, данные менялись: почасовая копия только в Backup",
+                len(box.files(box.local, HOURLY)) == 1 and not box.files(box.cloud, HOURLY)
+                and len(box.files(box.local, DAILY)) == 1, (os.listdir(box.local), os.listdir(box.cloud)))
+
+        # Ручная копия: создаётся, но расписание ежедневной не сдвигает
+        daily_before = box.settings.get("backup_daily_last")
+        time.sleep(1.1)
+        n = len(h.dialogs)
+        app._do_backup_now(silent=False)
+        h.check("«Сделать копию сейчас» - копия в Backup и облаке, сообщение «готово»",
+                len(box.files(box.local, DAILY)) == 2 and len(box.files(box.cloud, DAILY)) == 2
+                and any(d[0] == "showinfo" for d in h.dialogs_since(n)), h.dialogs_since(n))
+        h.check("ручная копия не сдвинула ежедневную", box.settings.get("backup_daily_last") == daily_before)
+
+        # Закрытие программы с новыми данными: копия в Backup и облаке, окно закрывается
+        app.db.add_expense("Тест копия 2", 1, date.today(), "Тест", False)
+        time.sleep(1.1)
+        h.answers[:] = [True]
+        app._confirm_close()
+        h.answers[:] = []
+        h.check("закрытие: копия в Backup и в облачной папке, программа закрылась",
+                len(box.files(box.local, HOURLY)) == 2 and len(box.files(box.cloud, HOURLY)) == 1 and box.destroyed,
+                (os.listdir(box.local), os.listdir(box.cloud), box.destroyed))
+        with __import__("zipfile").ZipFile(os.path.join(box.local, box.files(box.local, HOURLY)[-1])) as zf:
+            h.check("в копии при закрытии - последние данные", "Тест копия 2" in zf.read("db.json").decode("utf-8"))
+
+        # Через сутки от прошлой ежедневной - снова ежедневная
+        time.sleep(1.1)
+        app.auto_backup_tick(now=t0 + timedelta(hours=24, minutes=1))
+        h.check("через сутки - новая ежедневная копия (Backup и облако)",
+                len(box.files(box.local, DAILY)) == 3 and len(box.files(box.cloud, DAILY)) == 3,
+                (os.listdir(box.local), os.listdir(box.cloud)))
+
+        # Старые настройки клиента: только backup_last (2 часа назад) - ежедневная не делается раньше срока
+        box.settings.clear()
+        box.settings.update({"backup_folder": box.cloud, "backup_auto": True,
+                             "backup_last": (t0 - timedelta(hours=2)).isoformat()})
+        before = len(box.files(box.local, DAILY))
+        app.auto_backup_tick(now=t0)
+        h.check("старые настройки (только backup_last 2 ч назад): ежедневной копии нет",
+                len(box.files(box.local, DAILY)) == before, os.listdir(box.local))
+    finally:
+        h.answers[:] = []
+        box.close()
+
+
+def test_backup_rotation(h):
+    """Ротация: почасовых остаётся 48, ежедневных 14, и один ряд не вытесняет другой"""
+    import os
+    import shutil
+    import tempfile
+    import time
+    import backup as backup_module
+    DAILY, HOURLY = backup_module.BACKUP_FILE_PREFIX, backup_module.HOURLY_FILE_PREFIX
+    folder = tempfile.mkdtemp(prefix="alexan_test_rotation_")
+    try:
+        now = time.time()
+        for i in range(20):
+            path = os.path.join(folder, f"{DAILY}{i:03d}.zip")
+            open(path, "wb").close()
+            os.utime(path, (now - 100000 + i, now - 100000 + i))
+        for i in range(55):
+            path = os.path.join(folder, f"{HOURLY}{i:03d}.zip")
+            open(path, "wb").close()
+            os.utime(path, (now - 1000 + i, now - 1000 + i))
+        backup_module.rotate_backups(folder, keep=backup_module.HOURLY_KEEP, prefix=HOURLY)
+        hourly = sorted(f for f in os.listdir(folder) if f.startswith(HOURLY))
+        daily = sorted(f for f in os.listdir(folder) if f.startswith(DAILY))
+        h.check("почасовых осталось 48, самые новые", len(hourly) == 48 and hourly[0] == f"{HOURLY}007.zip", hourly[:3])
+        h.check("почасовые не вытеснили ежедневные (все 20 на месте)", len(daily) == 20, len(daily))
+        backup_module.rotate_backups(folder)
+        daily = sorted(f for f in os.listdir(folder) if f.startswith(DAILY))
+        h.check("ежедневных осталось 14, самые новые; почасовые не тронуты",
+                len(daily) == 14 and daily[0] == f"{DAILY}006.zip"
+                and len([f for f in os.listdir(folder) if f.startswith(HOURLY)]) == 48, daily[:3])
+        h.check("в списке копий (надпись на вкладке) - оба ряда", len(backup_module.list_backups(folder)) == 62)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+TESTS += [test_backup_schedule, test_backup_rotation]

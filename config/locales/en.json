@@ -729,10 +729,10 @@
     "settings.about_tab": "About",
 
     "backup.title": "Backup",
-    "backup.description": "The app automatically creates a .zip archive with the database and settings once a day into a \"Backup\" folder next to the program — this works out of the box, no setup needed.\n\nTo also get a copy in the cloud: download and install the Google Drive desktop app from Google's official website, sign in to your Google account, then below select the folder Google Drive syncs on this computer (or the equivalent Yandex.Disk folder) — the app will place the same copy there too.",
+    "backup.description": "The app automatically creates a .zip archive with the database and settings in a \"Backup\" folder next to the program: once a day (the last 14 are kept), every hour if the data has changed, and when the program is closed (the last 48 are kept, about two days) — this works out of the box, no setup needed.\n\nTo also get a copy in the cloud: download and install the Google Drive desktop app from Google's official website, sign in to your Google account, then below select the folder Google Drive syncs on this computer (or the equivalent Yandex.Disk folder) — the app will place the same copy there too.",
     "backup.folder_label": "Cloud folder (optional):",
     "backup.browse": "Browse...",
-    "backup.auto_label": "Also copy to the cloud folder daily",
+    "backup.auto_label": "Also copy to the cloud folder (once a day and when the program is closed)",
     "backup.status": "Last backup: {last}   •   copies stored: {count}",
     "backup.last_never": "never done yet",
     "backup.now": "Back up now",

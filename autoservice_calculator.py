@@ -1584,6 +1584,12 @@ class AutoServiceApp(TireStorageMixin):
             "Закрыть приложение?",
             parent=self.root
         ):
+            try:
+                self.root.configure(cursor="watch")
+                self.root.update_idletasks()
+            except Exception:
+                pass
+            self.backup_on_close()
             self.root.destroy()
 
     def _logout(self):
@@ -7379,7 +7385,9 @@ class AutoServiceApp(TireStorageMixin):
 
         self._backup_status_label.configure(text=self.tr("backup.status", last=last_str, count=count))
 
-    def _do_backup_now(self, silent: bool = False, include_cloud: bool = True) -> bool:
+    def _do_backup_now(self, silent: bool = False, include_cloud: bool = True,
+                       prefix: str = backup_module.BACKUP_FILE_PREFIX, keep: int = backup_module.DAILY_KEEP,
+                       dump_text: str = None) -> bool:
         """
         Создать бэкап немедленно.
         Всегда пишет копию в LOCAL_BACKUP_DIR (папка "Backup" рядом с
@@ -7392,6 +7400,10 @@ class AutoServiceApp(TireStorageMixin):
         окон при успехе/ошибке. include_cloud=False -- используется фоновой
         проверкой, когда галочка "копировать в облако" выключена (локальный
         бэкап при этом всё равно продолжает делаться).
+        prefix/keep -- ряд копий: ежедневные (по умолчанию, и ручные) или почасовые (HOURLY_FILE_PREFIX, 48 шт.).
+        Расписание автокопий (backup_daily_last / backup_hourly_last) здесь не трогается -- ручная копия
+        не сдвигает автоматическую. backup_last -- время последней копии любого ряда (для надписи на вкладке),
+        backup_hash -- отпечаток данных в ней (почасовая копия не делается, если данные с тех пор не менялись).
         """
         settings = self.load_settings()
         cloud_folder = settings.get('backup_folder', '').strip()
@@ -7400,13 +7412,21 @@ class AutoServiceApp(TireStorageMixin):
         if include_cloud and cloud_folder and cloud_folder != LOCAL_BACKUP_DIR:
             targets.append(cloud_folder)
 
+        errors = []
+        try:
+            if dump_text is None:
+                dump_text = backup_module.dump_database_text(self.db)
+        except Exception as e:
+            errors.append(str(e))
+            targets = []
+
         made_any = False
         local_ok = False
-        errors = []
         for folder in targets:
             try:
-                backup_module.create_backup(self.db, folder, SETTINGS_FILE, SPARE_PARTS_FILE)
-                backup_module.rotate_backups(folder)
+                backup_module.create_backup(self.db, folder, SETTINGS_FILE, SPARE_PARTS_FILE,
+                                            prefix=prefix, dump_text=dump_text)
+                backup_module.rotate_backups(folder, keep=keep, prefix=prefix)
                 made_any = True
                 if folder == LOCAL_BACKUP_DIR:
                     local_ok = True
@@ -7416,6 +7436,7 @@ class AutoServiceApp(TireStorageMixin):
         if made_any:
             settings = self.load_settings()
             settings['backup_last'] = datetime.now().isoformat()
+            settings['backup_hash'] = backup_module.dump_hash(dump_text)
             self.save_settings(settings)
         self._refresh_backup_status_label()
 
@@ -7434,6 +7455,61 @@ class AutoServiceApp(TireStorageMixin):
                 messagebox.showinfo(self.tr("common.success"), self.tr("backup.now_success"), parent=self.root)
 
         return made_any
+
+    @staticmethod
+    def _backup_due(last, period, now):
+        """Прошло ли period с момента last (ISO-строка из настроек); нет даты или она испорчена -- пора."""
+        if not last:
+            return True
+        try:
+            return now - datetime.fromisoformat(last) >= period
+        except (TypeError, ValueError):
+            return True
+
+    def auto_backup_tick(self, now=None):
+        """Фоновая автокопия (вызывается из main() каждые 5 минут).
+        - Раз в сутки -- ежедневная копия: папка Backup и облачная папка (если галочка), хранится 14.
+        - Раз в час -- почасовая копия только в папку Backup, хранится 48 (двое суток). Если данные с последней
+          копии не менялись (программа открыта ночью), почасовая не делается -- иначе 48 одинаковых ночных копий
+          вытеснили бы дневные.
+        Старые настройки без backup_daily_last: время ежедневной берётся из backup_last, как было раньше."""
+        now = now or datetime.now()
+        settings = self.load_settings()
+        daily_last = settings.get('backup_daily_last') or settings.get('backup_last')
+        if self._backup_due(daily_last, timedelta(hours=24), now):
+            if self._do_backup_now(silent=True, include_cloud=settings.get('backup_auto', True)):
+                settings = self.load_settings()
+                settings['backup_daily_last'] = now.isoformat()
+                settings['backup_hourly_last'] = now.isoformat()   # ежедневная копия покрывает и этот час
+                self.save_settings(settings)
+            return
+        if not self._backup_due(settings.get('backup_hourly_last'), timedelta(hours=1), now):
+            return
+        dump_text = backup_module.dump_database_text(self.db)
+        if backup_module.dump_hash(dump_text) != settings.get('backup_hash'):
+            made = self._do_backup_now(silent=True, include_cloud=False, prefix=backup_module.HOURLY_FILE_PREFIX,
+                                       keep=backup_module.HOURLY_KEEP, dump_text=dump_text)
+        else:
+            made = True   # данные не менялись -- копия с ними уже есть, следующая проверка через час
+        if made:
+            settings = self.load_settings()
+            settings['backup_hourly_last'] = now.isoformat()
+            self.save_settings(settings)
+
+    def backup_on_close(self):
+        """Копия при закрытии программы (ряд почасовых): папка Backup и облачная папка (если галочка), чтобы
+        работа после последней почасовой копии не пропала. Данные не менялись с последней копии -- не делается.
+        Ошибки не показываются и закрытию не мешают."""
+        try:
+            settings = self.load_settings()
+            dump_text = backup_module.dump_database_text(self.db)
+            if backup_module.dump_hash(dump_text) == settings.get('backup_hash'):
+                return False
+            return self._do_backup_now(silent=True, include_cloud=settings.get('backup_auto', True),
+                                       prefix=backup_module.HOURLY_FILE_PREFIX, keep=backup_module.HOURLY_KEEP,
+                                       dump_text=dump_text)
+        except Exception:
+            return False
 
     def _do_restore_backup(self):
         """Восстановить БД и настройки из выбранного .zip-бэкапа (только администратор)."""
@@ -11448,26 +11524,15 @@ def main():
 
             root.after(800, _check_and_offer_update)
 
-        # 5. Автоматический бэкап -- проверяем раз в 30 минут, реально
-        # бэкапим не чаще раза в сутки (см. backup.py и вкладку настроек
-        # "Резервные копии"). Локальная копия в папке Backup рядом с
-        # программой делается ВСЕГДА, без какой-либо настройки; облачная
-        # папка (Google Диск/Яндекс.Диск) -- дополнительно, только если
-        # включена галочка "автобэкап" и папка указана.
-        BACKUP_CHECK_INTERVAL_MS = 30 * 60 * 1000
+        # 5. Автоматический бэкап -- проверяем раз в 5 минут (AutoServiceApp.auto_backup_tick):
+        # ежедневная копия раз в сутки (папка Backup + облачная папка, если включена галочка),
+        # почасовая раз в час только в папку Backup (если данные менялись). Плюс копия при закрытии
+        # программы (_confirm_close -> backup_on_close).
+        BACKUP_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
         def _auto_backup_tick():
             try:
-                settings = app.load_settings()
-                last = settings.get('backup_last')
-                need_backup = True
-                if last:
-                    try:
-                        need_backup = (datetime.now() - datetime.fromisoformat(last)) >= timedelta(hours=24)
-                    except Exception:
-                        need_backup = True
-                if need_backup:
-                    app._do_backup_now(silent=True, include_cloud=settings.get('backup_auto', True))
+                app.auto_backup_tick()
             except Exception:
                 pass
             finally:

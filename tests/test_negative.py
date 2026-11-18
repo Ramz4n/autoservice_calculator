@@ -833,3 +833,64 @@ TESTS = [test_booking_rejects, test_works_rejects, test_warehouse_rejects, test_
          test_bookings_middle_click_nothing_to_scroll, test_tables_middle_click_nothing_to_scroll, test_tires_rejects,
          test_booking_vin_time_rejects,
          test_work_without_mileage_no]
+
+
+def test_backup_not_made(h):
+    """Когда резервной копии быть НЕ должно: «Нет» на вопросе «Закрыть приложение?» - ни копии, ни закрытия;
+    данные не менялись - ни почасовой, ни копии при закрытии (ночью 48 одинаковых копий вытеснили бы дневные);
+    облачная папка недоступна - закрытию это не мешает, копия в Backup есть"""
+    import os
+    import time
+    from datetime import datetime
+    import backup as backup_module
+    app = h.app
+    HOURLY = backup_module.HOURLY_FILE_PREFIX
+    box = h.backup_sandbox()
+    try:
+        t0 = datetime.now()
+        app.auto_backup_tick(now=t0)   # ежедневная - точка отсчёта
+        start = sorted(os.listdir(box.local))
+
+        app.db.add_expense("Тест копия нет", 1, date.today(), "Тест", False)
+        h.answers[:] = [False]
+        app._confirm_close()
+        h.answers[:] = []
+        h.check("«Нет» на «Закрыть приложение?» - копии нет, программа не закрылась",
+                sorted(os.listdir(box.local)) == start and not box.destroyed, (os.listdir(box.local), box.destroyed))
+
+        # Данные изменились - почасовая есть; дальше без изменений - больше копий нет
+        time.sleep(1.1)
+        app.auto_backup_tick(now=t0 + timedelta(minutes=61))
+        after_hour = sorted(os.listdir(box.local))
+        app.auto_backup_tick(now=t0 + timedelta(minutes=125))
+        app.auto_backup_tick(now=t0 + timedelta(minutes=190))
+        h.check("данные не менялись - новых почасовых копий нет",
+                len(after_hour) == len(start) + 1 and sorted(os.listdir(box.local)) == after_hour, os.listdir(box.local))
+        h.answers[:] = [True]
+        app._confirm_close()
+        h.answers[:] = []
+        h.check("данные не менялись - при закрытии копии нет, программа закрылась",
+                sorted(os.listdir(box.local)) == after_hour and box.destroyed, (os.listdir(box.local), box.destroyed))
+
+        # Облачная папка недоступна (вместо папки - файл): закрытие не ломается, локальная копия сделана
+        broken = os.path.join(box.local, "not_a_folder.txt")
+        open(broken, "w").close()
+        box.settings["backup_folder"] = broken
+        box.destroyed.clear()
+        app.db.add_expense("Тест копия облако", 1, date.today(), "Тест", False)
+        time.sleep(1.1)
+        n = len(h.dialogs)
+        h.answers[:] = [True]
+        app._confirm_close()
+        h.answers[:] = []
+        hourly = [f for f in os.listdir(box.local) if f.startswith(HOURLY)]
+        h.check("облако недоступно - при закрытии без окон ошибок, копия в Backup, программа закрылась",
+                len(hourly) == 2 and box.destroyed
+                and not [d for d in h.dialogs_since(n) if d[0] in ("showerror", "showwarning")],
+                (hourly, box.destroyed, h.dialogs_since(n)))
+    finally:
+        h.answers[:] = []
+        box.close()
+
+
+TESTS += [test_backup_not_made]

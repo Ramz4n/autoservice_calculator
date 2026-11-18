@@ -26,6 +26,7 @@ import os
 import json
 import zipfile
 import glob
+import hashlib
 from datetime import datetime, date
 from decimal import Decimal
 
@@ -37,7 +38,13 @@ DB_DUMP_NAME = "db.json"
 SETTINGS_NAME = "settings.json"
 SPARE_PARTS_NAME = "spare_parts.txt"
 
+# Ежедневные копии (и ручные «Сделать копию сейчас») - префикс прежний, старые копии клиента остаются в своём ряду.
+# Почасовые и при закрытии программы - отдельный ряд со своим префиксом, чтобы при ротации они не вытесняли
+# ежедневные (имя почасовой НЕ начинается с BACKUP_FILE_PREFIX, иначе glob ежедневных цеплял бы и их)
 BACKUP_FILE_PREFIX = "autoservice_backup_"
+HOURLY_FILE_PREFIX = "autoservice_hourly_"
+DAILY_KEEP = 14
+HOURLY_KEEP = 48
 
 
 def _json_default(value):
@@ -103,19 +110,32 @@ def _restore_database(db, dump: dict) -> None:
         conn.close()
 
 
-def create_backup(db, backup_dir: str, settings_file: str, spare_parts_file: str) -> str:
+def dump_database_text(db) -> str:
+    """Содержимое базы одним текстом (то, что ляжет в db.json)."""
+    return json.dumps(_dump_database(db), ensure_ascii=False, default=_json_default)
+
+
+def dump_hash(dump_text: str) -> str:
+    """Отпечаток содержимого базы: одинаковый - данные не менялись, новая почасовая копия не нужна."""
+    return hashlib.sha256(dump_text.encode("utf-8")).hexdigest()
+
+
+def create_backup(db, backup_dir: str, settings_file: str, spare_parts_file: str,
+                  prefix: str = BACKUP_FILE_PREFIX, dump_text: str = None) -> str:
     """
     Создать .zip-бэкап в backup_dir. Возвращает путь к созданному файлу.
+    dump_text - уже считанная база (dump_database_text), чтобы не читать её второй раз.
     """
     os.makedirs(backup_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    zip_path = os.path.join(backup_dir, f"{BACKUP_FILE_PREFIX}{timestamp}.zip")
+    zip_path = os.path.join(backup_dir, f"{prefix}{timestamp}.zip")
 
-    dump = _dump_database(db)
+    if dump_text is None:
+        dump_text = dump_database_text(db)
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(DB_DUMP_NAME, json.dumps(dump, ensure_ascii=False, default=_json_default))
+        zf.writestr(DB_DUMP_NAME, dump_text)
 
         if os.path.exists(settings_file):
             zf.write(settings_file, SETTINGS_NAME)
@@ -150,17 +170,22 @@ def restore_backup(db, zip_path: str, settings_file: str, spare_parts_file: str)
                 f.write(zf.read(SPARE_PARTS_NAME))
 
 
-def list_backups(backup_dir: str) -> list:
-    """Список файлов бэкапа в папке, от новых к старым."""
+def list_backups(backup_dir: str, prefixes=(BACKUP_FILE_PREFIX, HOURLY_FILE_PREFIX)) -> list:
+    """Список файлов бэкапа в папке (по умолчанию всех рядов - ежедневные и почасовые), от новых к старым."""
     if not backup_dir or not os.path.isdir(backup_dir):
         return []
-    paths = glob.glob(os.path.join(backup_dir, f"{BACKUP_FILE_PREFIX}*.zip"))
+    if isinstance(prefixes, str):
+        prefixes = (prefixes,)
+    paths = []
+    for prefix in prefixes:
+        paths += glob.glob(os.path.join(backup_dir, f"{prefix}*.zip"))
     return sorted(paths, key=os.path.getmtime, reverse=True)
 
 
-def rotate_backups(backup_dir: str, keep: int = 14) -> None:
-    """Оставить только keep самых свежих бэкапов, остальные удалить."""
-    for old_path in list_backups(backup_dir)[keep:]:
+def rotate_backups(backup_dir: str, keep: int = DAILY_KEEP, prefix: str = BACKUP_FILE_PREFIX) -> None:
+    """Оставить только keep самых свежих бэкапов ОДНОГО ряда (prefix), остальные удалить.
+    Другой ряд не трогается: почасовые не вытесняют ежедневные и наоборот."""
+    for old_path in list_backups(backup_dir, prefix)[keep:]:
         try:
             os.remove(old_path)
         except OSError:

@@ -154,6 +154,46 @@ class Harness:
     def counts(self):
         return {t: self.q(f"SELECT COUNT(*) FROM {t}")[0][0] for t in WATCH}
 
+    def backup_sandbox(self):
+        """Резервные копии в тестах - во временные папки (вместо Backup рядом с программой и облачной папки),
+        настройки - в памяти (настоящий settings.json не трогается), закрытие окна - без закрытия.
+        Возвращает объект: .local, .cloud (папки), .settings (dict), .destroyed (сколько раз закрыли окно),
+        .files(folder, prefix) - имена копий, .close() - вернуть всё как было"""
+        import shutil
+        import tempfile
+        h, m, app = self, self.m, self.app
+
+        class Sandbox:
+            local = tempfile.mkdtemp(prefix="alexan_test_local_")
+            cloud = tempfile.mkdtemp(prefix="alexan_test_cloud_")
+            settings = {}
+            destroyed = []
+
+            @staticmethod
+            def files(folder, prefix):
+                return sorted(f for f in os.listdir(folder) if f.startswith(prefix))
+
+            def close(self):
+                m.LOCAL_BACKUP_DIR = real_dir
+                for name in ("load_settings", "save_settings"):
+                    app.__dict__.pop(name, None)
+                h.root.__dict__.pop("destroy", None)
+                try:
+                    h.root.configure(cursor="")
+                except Exception:
+                    pass
+                shutil.rmtree(self.local, ignore_errors=True)
+                shutil.rmtree(self.cloud, ignore_errors=True)
+
+        box = Sandbox()
+        box.settings = {"backup_folder": box.cloud, "backup_auto": True}
+        real_dir = m.LOCAL_BACKUP_DIR
+        m.LOCAL_BACKUP_DIR = box.local
+        app.load_settings = lambda: dict(box.settings)
+        app.save_settings = lambda s: (box.settings.clear(), box.settings.update(s))
+        self.root.destroy = lambda: box.destroyed.append(1)
+        return box
+
     def expect_rejected(self, name, action, warn_text=None, answers=()):
         """Неверный ввод: должно быть предупреждение (с этим текстом) и ни одной новой / удалённой строки в базе"""
         self.answers[:] = list(answers)

@@ -729,10 +729,10 @@
     "settings.about_tab": "O programu",
 
     "backup.title": "Rezervna kopija",
-    "backup.description": "Aplikacija automatski pravi .zip arhivu sa bazom podataka i podešavanjima jednom dnevno u fascikli „Backup“ pored programa — ovo uvek radi, bez ikakvog podešavanja.\n\nDa biste dodatno imali kopiju u oblaku: preuzmite i instalirajte aplikaciju Google Disk za računare sa zvaničnog sajta Google-a, prijavite se na svoj Google nalog, a zatim ispod izaberite fasciklu koju Google Disk sinhronizuje na ovom računaru (ili sličnu fasciklu Yandex.Disk-a) — program će istu kopiju stavljati i tamo.",
+    "backup.description": "Aplikacija automatski pravi .zip arhivu sa bazom podataka i podešavanjima u fascikli „Backup“ pored programa: jednom dnevno (čuva se poslednjih 14), svakog sata ako su se podaci promenili i pri zatvaranju programa (čuva se poslednjih 48, oko dva dana) — ovo uvek radi, bez ikakvog podešavanja.\n\nDa biste dodatno imali kopiju u oblaku: preuzmite i instalirajte aplikaciju Google Disk za računare sa zvaničnog sajta Google-a, prijavite se na svoj Google nalog, a zatim ispod izaberite fasciklu koju Google Disk sinhronizuje na ovom računaru (ili sličnu fasciklu Yandex.Disk-a) — program će istu kopiju stavljati i tamo.",
     "backup.folder_label": "Fascikla u oblaku (opciono):",
     "backup.browse": "Pregledaj...",
-    "backup.auto_label": "Takođe svakodnevno kopiraj u fasciklu u oblaku",
+    "backup.auto_label": "Takođe kopiraj u fasciklu u oblaku (jednom dnevno i pri zatvaranju programa)",
     "backup.status": "Poslednja kopija: {last}   •   sačuvano kopija: {count}",
     "backup.last_never": "još nije napravljena",
     "backup.now": "Napravi kopiju sada",
